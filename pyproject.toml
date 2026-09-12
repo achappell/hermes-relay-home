@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-relay-home"
+version = "0.1.0"
+description = "Local Home service for canonical Hermes household state and wake arbitration"
+readme = "README.md"
+requires-python = ">=3.14,<3.15"
+authors = [{ name = "Amanda Chappell" }]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

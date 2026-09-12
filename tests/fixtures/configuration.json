@@ -1,0 +1,19 @@
+{
+  "revision": 12,
+  "rooms": [
+    {"id": "kitchen", "name": "Kitchen"}
+  ],
+  "wake_mappings": [
+    {"id": "hey-hermes", "name": "Hey Hermes"}
+  ],
+  "devices": [
+    {
+      "id": "puck-kitchen",
+      "name": "Kitchen Puck",
+      "room_id": "kitchen",
+      "profile_id": "family",
+      "priority": 1,
+      "capabilities": {"wake_claim": true}
+    }
+  ]
+}

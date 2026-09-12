@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hermes.home/contracts/v1/wake-claim.schema.json",
+  "title": "Hermes Home wake claim",
+  "type": "object",
+  "required": ["schema", "claim_id", "device_id", "wake_mapping_id", "observation", "acoustic_evidence", "availability"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": 1},
+    "claim_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "device_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "wake_mapping_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "observation": {"type": "object", "minProperties": 1},
+    "acoustic_evidence": {"type": "object", "minProperties": 1},
+    "availability": {"const": "ready"}
+  }
+}

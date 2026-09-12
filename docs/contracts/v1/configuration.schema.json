@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hermes.home/contracts/v1/configuration.schema.json",
+  "title": "Hermes Home configuration snapshot",
+  "type": "object",
+  "required": ["revision", "rooms", "wake_mappings", "devices"],
+  "additionalProperties": false,
+  "properties": {
+    "revision": {"type": "integer", "minimum": 0},
+    "rooms": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/room"}
+    },
+    "wake_mappings": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/wake_mapping"}
+    },
+    "devices": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/device"}
+    }
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "room": {
+      "type": "object",
+      "required": ["id", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "name": {"type": "string", "minLength": 1, "maxLength": 128}
+      }
+    },
+    "wake_mapping": {
+      "type": "object",
+      "required": ["id", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "name": {"type": "string", "minLength": 1, "maxLength": 128}
+      }
+    },
+    "device": {
+      "type": "object",
+      "required": ["id", "name", "room_id", "profile_id", "priority", "capabilities"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "name": {"type": "string", "minLength": 1, "maxLength": 128},
+        "room_id": {"$ref": "#/$defs/id"},
+        "profile_id": {"$ref": "#/$defs/id"},
+        "priority": {"type": "integer", "minimum": 1},
+        "capabilities": {
+          "type": "object",
+          "required": ["wake_claim"],
+          "additionalProperties": false,
+          "properties": {"wake_claim": {"type": "boolean"}}
+        }
+      }
+    }
+  }
+}
