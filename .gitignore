@@ -10,3 +10,8 @@ __pycache__/
 build/
 dist/
 data/
+
+# BMAD personal/runtime state
+_bmad/config.user.toml
+_bmad/custom/config.user.toml
+_bmad/render/
