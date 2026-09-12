@@ -17,6 +17,21 @@ The versioned HTTP contract lives in [`docs/contracts/v1/`](docs/contracts/v1/).
 Clients must treat the Home service as the source of truth and must not create
 their own household-wide configuration or arbitration authority.
 
+## Project planning
+
+This repository uses BMAD for local product and implementation planning. Start
+with [`docs/project-context.md`](docs/project-context.md), then read the
+[architecture spine](_bmad-output/planning-artifacts/architecture/architecture-hermes-relay-home-2026-09-12/ARCHITECTURE-SPINE.md)
+and [foundation spec](_bmad-output/specs/spec-home-service-foundation/SPEC.md)
+before changing the service boundary. BMAD's installer-managed runtime lives
+in `_bmad/` and the Claude Code skill surface in `.claude/skills/`.
+
+Check the installed planning surface with:
+
+```sh
+npx --yes bmad-method@6.12.0 status
+```
+
 ## Current status
 
 This is the repository boundary and contract bootstrap. The HTTP adapter,
