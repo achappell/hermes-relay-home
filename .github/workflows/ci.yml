@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test and package
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install test and build dependencies
+        run: |
+          python -m pip install --upgrade pip build
+          python -m pip install ".[dev]"
+
+      - name: Validate contract documents
+        run: |
+          python -m json.tool docs/contracts/v1/configuration.schema.json >/dev/null
+          python -m json.tool docs/contracts/v1/wake-claim.schema.json >/dev/null
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Build distributions
+        run: python -m build --sdist --wheel
+
+      - name: Verify wheel installation
+        run: |
+          python -m venv "$RUNNER_TEMP/hermes-home-smoke"
+          "$RUNNER_TEMP/hermes-home-smoke/bin/pip" install --no-deps dist/*.whl
+          "$RUNNER_TEMP/hermes-home-smoke/bin/python" -c \
+            "from hermes_home import API_VERSION; assert API_VERSION == 1"
