@@ -40,3 +40,53 @@ def test_grafana_provisioning_points_at_versioned_dashboard_artifacts() -> None:
     assert "path: /etc/grafana/dashboards/hermes-home" in dashboard_provider
     assert "name: Prometheus" in datasource_provider
     assert "type: prometheus" in datasource_provider
+
+
+def test_windows_deployment_artifacts_install_a_supervised_scraped_runtime() -> None:
+    deployment = Path(__file__).parents[1] / "deploy" / "windows"
+    installer = (deployment / "install.ps1").read_text()
+    runner = (deployment / "run.ps1").read_text()
+
+    assert "HERMES_HOME_ADMIN_TOKEN_FILE" in installer
+    assert "Register-ScheduledTask" in installer
+    assert "bearer_token_file" in installer
+    assert "promtool.exe" in installer
+    assert "Restart-Service" in installer
+    assert "hermes_home" in runner
+
+
+def test_windows_installer_stops_the_previous_runtime_before_updating_its_venv() -> (
+    None
+):
+    installer = (
+        Path(__file__).parents[1] / "deploy" / "windows" / "install.ps1"
+    ).read_text()
+
+    assert installer.index(
+        "Stop-ExistingHermesHomeTask -Name $TaskName"
+    ) < installer.index("& $uv python install 3.14")
+
+
+def test_windows_installer_restores_a_running_task_when_upgrade_fails() -> None:
+    installer = (
+        Path(__file__).parents[1] / "deploy" / "windows" / "install.ps1"
+    ).read_text()
+
+    assert "$taskWasRunning" in installer
+    assert "catch {" in installer
+    assert (
+        "Start-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue"
+        in installer
+    )
+
+
+def test_ops_alloy_artifact_scrapes_home_with_a_bearer_secret() -> None:
+    artifact = (
+        Path(__file__).parents[1] / "deploy" / "ops" / "hermes-home.alloy"
+    ).read_text()
+
+    assert 'prometheus.scrape "hermes_home"' in artifact
+    assert 'job_name        = "hermes-home"' in artifact
+    assert "prometheus.remote_write.default.receiver" in artifact
+    assert 'type             = "Bearer"' in artifact
+    assert 'credentials_file = "/etc/alloy/secrets/hermes-home-admin-token"' in artifact

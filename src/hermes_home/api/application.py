@@ -44,6 +44,12 @@ class HomeApplication:
         self._clock = clock
         self._sleeper = sleeper
         self._metrics = metrics or MetricsRegistry()
+        try:
+            snapshot = self._configuration_store.read()
+        except OSError, RuntimeError, TypeError, ValueError:
+            pass
+        else:
+            self._set_revision(snapshot)
 
     def handle(
         self,
@@ -243,9 +249,12 @@ class HomeApplication:
             return
         snapshot = response.body.get("snapshot")
         if isinstance(snapshot, Mapping):
-            revision = snapshot.get("revision")
-            if type(revision) is int and revision >= 0:
-                self._metrics.set("hermes_home_configuration_revision", revision)
+            self._set_revision(snapshot)
+
+    def _set_revision(self, snapshot: Mapping[str, object]) -> None:
+        revision = snapshot.get("revision")
+        if type(revision) is int and revision >= 0:
+            self._metrics.set("hermes_home_configuration_revision", revision)
 
 
 def _json_object(body: bytes | str) -> dict[str, object]:
