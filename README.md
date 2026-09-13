@@ -55,7 +55,7 @@ The project targets Python 3.14 and uses the standard library for SQLite and
 the initial HTTP server. Run the focused checks with:
 
 ```sh
-uv run --no-project --with pytest -- python -m pytest -q
+uv run --no-project --python 3.14 --with pytest -- python -m pytest -q
 uvx --from ruff ruff check src tests
 uvx --from ruff ruff format --check src tests
 ```
