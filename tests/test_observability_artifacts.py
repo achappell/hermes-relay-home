@@ -40,3 +40,16 @@ def test_grafana_provisioning_points_at_versioned_dashboard_artifacts() -> None:
     assert "path: /etc/grafana/dashboards/hermes-home" in dashboard_provider
     assert "name: Prometheus" in datasource_provider
     assert "type: prometheus" in datasource_provider
+
+
+def test_windows_deployment_artifacts_install_a_supervised_scraped_runtime() -> None:
+    deployment = Path(__file__).parents[1] / "deploy" / "windows"
+    installer = (deployment / "install.ps1").read_text()
+    runner = (deployment / "run.ps1").read_text()
+
+    assert "HERMES_HOME_ADMIN_TOKEN_FILE" in installer
+    assert "Register-ScheduledTask" in installer
+    assert "bearer_token_file" in installer
+    assert "promtool.exe" in installer
+    assert "Restart-Service" in installer
+    assert "hermes_home" in runner

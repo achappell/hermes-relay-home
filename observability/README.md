@@ -38,3 +38,8 @@ when importing the JSON manually.
 The dashboards intentionally contain no alert notification channels. Alert
 ownership and household-hours thresholds should be chosen after the service
 has real traffic rather than embalming guesses in a JSON file.
+
+For the native Windows deployment used by CaticornQueen, see
+[`../deploy/windows/README.md`](../deploy/windows/README.md). It installs the
+runtime, protects the admin token, configures the authenticated Prometheus
+scrape, and verifies the target before returning.
