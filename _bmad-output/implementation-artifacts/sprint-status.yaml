@@ -1,0 +1,9 @@
+schema_version: 1
+generated: 2026-09-12
+last_updated: 2026-09-12
+project: hermes-relay-home
+tracking_system: file-system
+status_authority: local
+story_location: _bmad-output/implementation-artifacts
+development_status:
+  spec-home-service-foundation: done

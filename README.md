@@ -41,6 +41,14 @@ server, and admin-authenticated Prometheus metrics with provisionable Grafana
 dashboards. Device credential provisioning, production process management, and
 hardware acoustic calibration remain deployment work.
 
+## BMAD ownership
+
+This repository owns the Home service foundation story record in
+`_bmad-output/implementation-artifacts/story-index.yaml` and its formal local
+status in `sprint-status.yaml`. The product hub owns durable household intent
+and cross-repository decisions; the TUI repository is not the Home service's
+status authority.
+
 ## Development
 
 The project targets Python 3.14 and uses the standard library for SQLite and

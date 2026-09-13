@@ -1,0 +1,9 @@
+schema_version: 1
+repository: hermes-relay-home
+surface: HOME
+stories:
+  - id: SPEC-home-service-foundation
+    title: Build the durable Home service foundation
+    kind: local-foundation
+    spec: _bmad-output/specs/spec-home-service-foundation/SPEC.md
+    validation: tests
