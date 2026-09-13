@@ -43,3 +43,7 @@ For the native Windows deployment used by CaticornQueen, see
 [`../deploy/windows/README.md`](../deploy/windows/README.md). It installs the
 runtime, protects the admin token, configures the authenticated Prometheus
 scrape, and verifies the target before returning.
+
+For the cross-host scrape that feeds the household Grafana instance, see
+[`../deploy/ops/README.md`](../deploy/ops/README.md). It adds the authenticated
+Home target to Alloy, which remote-writes into the Prometheus used by Grafana.

@@ -156,6 +156,23 @@ def test_metrics_route_exposes_low_cardinality_operational_metrics(tmp_path) -> 
         store.close()
 
 
+def test_metrics_route_exposes_the_current_revision_after_startup(tmp_path) -> None:
+    application, store = _application(tmp_path)
+
+    try:
+        response = application.handle(
+            "GET",
+            "/metrics",
+            {"Authorization": "Bearer admin-secret"},
+            b"",
+        )
+
+        assert response.status == 200
+        assert "hermes_home_configuration_revision 0" in response.body
+    finally:
+        store.close()
+
+
 def test_metrics_route_counts_configuration_and_wake_outcomes(tmp_path) -> None:
     application, store = _application(tmp_path)
 

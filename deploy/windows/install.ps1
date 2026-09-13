@@ -67,7 +67,7 @@ function Ensure-AdminToken {
         finally {
             $random.Dispose()
         }
-        $token = [Convert]::ToHexString($bytes).ToLowerInvariant()
+        $token = [BitConverter]::ToString($bytes).Replace('-', '').ToLowerInvariant()
         $utf8 = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
         [System.IO.File]::WriteAllText($Path, $token, $utf8)
     }
@@ -224,6 +224,7 @@ if (-not (Test-Path -LiteralPath $runnerSource -PathType Leaf)) {
     throw "The deployment bundle is missing run.ps1 beside install.ps1"
 }
 
+Stop-ExistingHermesHomeTask -Name $TaskName
 New-Item -ItemType Directory -Path $root, $appRoot, $secretRoot -Force | Out-Null
 Copy-Item -LiteralPath $runnerSource -Destination $runnerPath -Force
 
@@ -263,7 +264,6 @@ else {
 }
 
 $backup = Update-PrometheusConfig -ConfigPath $PrometheusConfigPath -PrometheusTokenPath $tokenPath -TargetHost $BindHost -TargetPort $Port
-Stop-ExistingHermesHomeTask -Name $TaskName
 Register-HermesHomeTask -Name $TaskName -RunnerPath $runnerPath -WorkingDirectory $root
 Start-ScheduledTask -TaskName $TaskName
 Wait-ForHomeMetrics -HostName $BindHost -TargetPort $Port -Token $token

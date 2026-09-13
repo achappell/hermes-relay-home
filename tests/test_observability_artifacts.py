@@ -53,3 +53,27 @@ def test_windows_deployment_artifacts_install_a_supervised_scraped_runtime() -> 
     assert "promtool.exe" in installer
     assert "Restart-Service" in installer
     assert "hermes_home" in runner
+
+
+def test_windows_installer_stops_the_previous_runtime_before_updating_its_venv() -> (
+    None
+):
+    installer = (
+        Path(__file__).parents[1] / "deploy" / "windows" / "install.ps1"
+    ).read_text()
+
+    assert installer.index(
+        "Stop-ExistingHermesHomeTask -Name $TaskName"
+    ) < installer.index("& $uv python install 3.14")
+
+
+def test_ops_alloy_artifact_scrapes_home_with_a_bearer_secret() -> None:
+    artifact = (
+        Path(__file__).parents[1] / "deploy" / "ops" / "hermes-home.alloy"
+    ).read_text()
+
+    assert 'prometheus.scrape "hermes_home"' in artifact
+    assert 'job_name        = "hermes-home"' in artifact
+    assert "prometheus.remote_write.default.receiver" in artifact
+    assert 'type             = "Bearer"' in artifact
+    assert 'credentials_file = "/etc/alloy/secrets/hermes-home-admin-token"' in artifact

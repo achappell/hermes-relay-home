@@ -1,0 +1,20 @@
+// Scrape the authenticated Home runtime from the ops Alloy collector.
+//
+// The target is deliberately the CaticornQueen Tailscale address: Home binds
+// there when deployed for cross-host observability, while its admin endpoint
+// remains protected by the bearer token below.
+prometheus.scrape "hermes_home" {
+  targets = [
+    {"__address__" = "100.78.105.19:8780", "instance" = "caticornqueen", "host" = "caticornqueen"},
+  ]
+  forward_to      = [prometheus.remote_write.default.receiver]
+  job_name        = "hermes-home"
+  scrape_interval = "15s"
+  scrape_timeout  = "5s"
+  metrics_path    = "/metrics"
+
+  authorization {
+    type             = "Bearer"
+    credentials_file = "/etc/alloy/secrets/hermes-home-admin-token"
+  }
+}
