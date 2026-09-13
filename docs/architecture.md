@@ -17,6 +17,7 @@ presentation.
 | Wake detection, local capture, and grant handling | Claimant device/surface |
 | Display rendering and display-only state | Display surfaces |
 | Hermes model, speech, and voice-session protocol | Hermes relay |
+| Operational metrics and dashboard definitions | Home service / observability artifacts |
 
 ## Runtime shape
 
@@ -28,6 +29,9 @@ The first runtime is deliberately one local service with two internal roles:
 
 The HTTP layer is an adapter over those roles. The contract is independent of
 the HTTP framework so clients do not acquire a Python implementation detail.
+The admin-authenticated `/metrics` endpoint is a separate operational adapter;
+its low-cardinality Prometheus output is not household state and is not part of
+the versioned client contract.
 
 ```text
                          local LAN

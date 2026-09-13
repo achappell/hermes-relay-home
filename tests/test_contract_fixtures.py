@@ -2,6 +2,7 @@ import json
 import unittest
 from pathlib import Path
 
+from hermes_home.domain.configuration import validate_snapshot
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -18,6 +19,7 @@ class ContractFixtureTests(unittest.TestCase):
         self.assertTrue(configuration["rooms"])
         self.assertTrue(configuration["wake_mappings"])
         self.assertTrue(configuration["devices"])
+        self.assertEqual(validate_snapshot(configuration), configuration)
 
     def test_wake_claim_fixture_has_no_conversation_or_audio_payload(self) -> None:
         claim = load("wake-claim.json")

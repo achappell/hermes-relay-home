@@ -128,7 +128,9 @@ flowchart TB
 | Python | 3.14 |
 | SQLite | 3.x via the Python standard library |
 | Home HTTP contract | v1 |
-| HTTP framework | Deferred until the first adapter slice |
+| HTTP framework | Python 3.14 standard-library `http.server` for the initial adapter |
+| Metrics | Dependency-free Prometheus text exposition at admin-authenticated `/metrics` |
+| Dashboards | Provisionable Grafana JSON in `observability/grafana/` |
 
 ## Structural Seed
 
@@ -139,6 +141,8 @@ hermes-relay-home/
     domain/       # configuration and arbitration functional cores
     storage/      # SQLite adapter
     auth/         # credential lookup and fail-closed identity boundary
+    observability/ # low-cardinality Prometheus metrics adapter
+  observability/  # Prometheus example and Grafana dashboards
   tests/          # domain, adapter, and contract tests
   docs/contracts/v1/  # versioned wire contract and schemas
 ```
@@ -177,7 +181,8 @@ flowchart LR
 
 ## Deferred
 
-- Exact HTTP framework and production process manager.
+- Whether to retain the standard-library adapter or adopt a production HTTP
+  framework and process manager.
 - Device credential issuance, rotation, expiry, and revocation propagation.
 - Acoustic evidence encoding, calibration, normalization, and tie-band policy.
 - Push notification or subscription routes.
