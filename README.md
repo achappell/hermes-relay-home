@@ -37,9 +37,9 @@ npx --yes bmad-method@6.12.0 status
 The first service foundation slice is implemented. It includes validated,
 revisioned SQLite configuration storage, deterministic bounded wake arbitration,
 credential-bound contract translation, a loopback-by-default threaded HTTP
-server, and admin-authenticated Prometheus metrics with provisionable Grafana
-dashboards. Device credential provisioning, production process management, and
-hardware acoustic calibration remain deployment work.
+server, an executable Python 3.14 runtime, and admin-authenticated Prometheus
+metrics with provisionable Grafana dashboards. Device credential provisioning,
+LAN binding policy, and hardware acoustic calibration remain follow-up work.
 
 ## BMAD ownership
 
@@ -61,3 +61,5 @@ uvx --from ruff ruff format --check src tests
 ```
 
 Monitoring setup is documented in [`observability/README.md`](observability/README.md).
+The native Windows deployment path is documented in
+[`deploy/windows/README.md`](deploy/windows/README.md).
