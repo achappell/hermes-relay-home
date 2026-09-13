@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -28,9 +28,9 @@ class RuntimeSettings:
     bind_host: str
     port: int
     admin_token_file: Path
-    admin_token: str
+    admin_token: str = field(repr=False)
     device_credentials_file: Path | None
-    device_credentials: dict[str, str]
+    device_credentials: dict[str, str] = field(repr=False)
 
 
 @dataclass(slots=True)

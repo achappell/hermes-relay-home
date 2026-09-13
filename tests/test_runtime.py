@@ -37,6 +37,8 @@ def test_load_settings_reads_file_backed_credentials(tmp_path) -> None:
     assert settings.port == 8780
     assert settings.admin_token == "admin-secret"
     assert settings.device_credentials == {"device-secret": "puck-kitchen"}
+    assert "admin-secret" not in repr(settings)
+    assert "device-secret" not in repr(settings)
 
 
 def test_load_settings_rejects_a_missing_or_blank_admin_token(tmp_path) -> None:

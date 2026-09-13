@@ -159,12 +159,12 @@ function Stop-ExistingHermesHomeTask {
 
     $existing = Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
     if (-not $existing -or $existing.State -ne 'Running') {
-        return
+        return $false
     }
     Stop-ScheduledTask -TaskName $Name
     for ($attempt = 1; $attempt -le 15; $attempt++) {
         if ((Get-ScheduledTask -TaskName $Name).State -ne 'Running') {
-            return
+            return $true
         }
         Start-Sleep -Seconds 1
     }
@@ -224,51 +224,61 @@ if (-not (Test-Path -LiteralPath $runnerSource -PathType Leaf)) {
     throw "The deployment bundle is missing run.ps1 beside install.ps1"
 }
 
-Stop-ExistingHermesHomeTask -Name $TaskName
-New-Item -ItemType Directory -Path $root, $appRoot, $secretRoot -Force | Out-Null
-Copy-Item -LiteralPath $runnerSource -Destination $runnerPath -Force
+$existingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+$taskWasRunning = $null -ne $existingTask -and $existingTask.State -eq 'Running'
+try {
+    $null = Stop-ExistingHermesHomeTask -Name $TaskName
+    New-Item -ItemType Directory -Path $root, $appRoot, $secretRoot -Force | Out-Null
+    Copy-Item -LiteralPath $runnerSource -Destination $runnerPath -Force
 
-$uv = Resolve-UvPath -RequestedPath $UvPath
-$env:UV_PYTHON_INSTALL_DIR = $pythonRoot
-& $uv python install 3.14 --no-bin
-if ($LASTEXITCODE -ne 0) {
-    throw 'uv could not install Python 3.14'
-}
-if (Test-Path -LiteralPath $venvPython -PathType Leaf) {
-    & $uv venv --python 3.14 --allow-existing --link-mode copy $venvRoot
-}
-else {
-    & $uv venv --python 3.14 --link-mode copy $venvRoot
-}
-if ($LASTEXITCODE -ne 0) {
-    throw 'uv could not create the Hermes Home virtual environment'
-}
-& $uv pip install --python $venvPython --no-deps --force-reinstall $WheelPath
-if ($LASTEXITCODE -ne 0) {
-    throw 'uv could not install the Hermes Home wheel'
-}
-
-$token = Ensure-AdminToken -Path $tokenPath
-[Environment]::SetEnvironmentVariable('HERMES_HOME_DATA_DIR', $root, 'Machine')
-[Environment]::SetEnvironmentVariable('HERMES_HOME_BIND_HOST', $BindHost, 'Machine')
-[Environment]::SetEnvironmentVariable('HERMES_HOME_PORT', [string] $Port, 'Machine')
-[Environment]::SetEnvironmentVariable('HERMES_HOME_ADMIN_TOKEN_FILE', $tokenPath, 'Machine')
-if ($DeviceCredentialsFile) {
-    if (-not (Test-Path -LiteralPath $DeviceCredentialsFile -PathType Leaf)) {
-        throw "Device credentials file was not found: $DeviceCredentialsFile"
+    $uv = Resolve-UvPath -RequestedPath $UvPath
+    $env:UV_PYTHON_INSTALL_DIR = $pythonRoot
+    & $uv python install 3.14 --no-bin
+    if ($LASTEXITCODE -ne 0) {
+        throw 'uv could not install Python 3.14'
     }
-    [Environment]::SetEnvironmentVariable('HERMES_HOME_DEVICE_CREDENTIALS_FILE', $DeviceCredentialsFile, 'Machine')
-}
-else {
-    [Environment]::SetEnvironmentVariable('HERMES_HOME_DEVICE_CREDENTIALS_FILE', $null, 'Machine')
-}
+    if (Test-Path -LiteralPath $venvPython -PathType Leaf) {
+        & $uv venv --python 3.14 --allow-existing --link-mode copy $venvRoot
+    }
+    else {
+        & $uv venv --python 3.14 --link-mode copy $venvRoot
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw 'uv could not create the Hermes Home virtual environment'
+    }
+    & $uv pip install --python $venvPython --no-deps --force-reinstall $WheelPath
+    if ($LASTEXITCODE -ne 0) {
+        throw 'uv could not install the Hermes Home wheel'
+    }
 
-$backup = Update-PrometheusConfig -ConfigPath $PrometheusConfigPath -PrometheusTokenPath $tokenPath -TargetHost $BindHost -TargetPort $Port
-Register-HermesHomeTask -Name $TaskName -RunnerPath $runnerPath -WorkingDirectory $root
-Start-ScheduledTask -TaskName $TaskName
-Wait-ForHomeMetrics -HostName $BindHost -TargetPort $Port -Token $token
-Wait-ForPrometheusTarget
+    $token = Ensure-AdminToken -Path $tokenPath
+    [Environment]::SetEnvironmentVariable('HERMES_HOME_DATA_DIR', $root, 'Machine')
+    [Environment]::SetEnvironmentVariable('HERMES_HOME_BIND_HOST', $BindHost, 'Machine')
+    [Environment]::SetEnvironmentVariable('HERMES_HOME_PORT', [string] $Port, 'Machine')
+    [Environment]::SetEnvironmentVariable('HERMES_HOME_ADMIN_TOKEN_FILE', $tokenPath, 'Machine')
+    if ($DeviceCredentialsFile) {
+        if (-not (Test-Path -LiteralPath $DeviceCredentialsFile -PathType Leaf)) {
+            throw "Device credentials file was not found: $DeviceCredentialsFile"
+        }
+        [Environment]::SetEnvironmentVariable('HERMES_HOME_DEVICE_CREDENTIALS_FILE', $DeviceCredentialsFile, 'Machine')
+    }
+    else {
+        [Environment]::SetEnvironmentVariable('HERMES_HOME_DEVICE_CREDENTIALS_FILE', $null, 'Machine')
+    }
 
-Write-Output "Hermes Home installed under $root"
-Write-Output "Prometheus configuration backup: $backup"
-Write-Output "Scheduled task: $TaskName"
+    $backup = Update-PrometheusConfig -ConfigPath $PrometheusConfigPath -PrometheusTokenPath $tokenPath -TargetHost $BindHost -TargetPort $Port
+    Register-HermesHomeTask -Name $TaskName -RunnerPath $runnerPath -WorkingDirectory $root
+    Start-ScheduledTask -TaskName $TaskName
+    Wait-ForHomeMetrics -HostName $BindHost -TargetPort $Port -Token $token
+    Wait-ForPrometheusTarget
+
+    Write-Output "Hermes Home installed under $root"
+    Write-Output "Prometheus configuration backup: $backup"
+    Write-Output "Scheduled task: $TaskName"
+}
+catch {
+    if ($taskWasRunning) {
+        Start-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    }
+    throw
+}

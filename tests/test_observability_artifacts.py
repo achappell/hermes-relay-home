@@ -67,6 +67,19 @@ def test_windows_installer_stops_the_previous_runtime_before_updating_its_venv()
     ) < installer.index("& $uv python install 3.14")
 
 
+def test_windows_installer_restores_a_running_task_when_upgrade_fails() -> None:
+    installer = (
+        Path(__file__).parents[1] / "deploy" / "windows" / "install.ps1"
+    ).read_text()
+
+    assert "$taskWasRunning" in installer
+    assert "catch {" in installer
+    assert (
+        "Start-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue"
+        in installer
+    )
+
+
 def test_ops_alloy_artifact_scrapes_home_with_a_bearer_secret() -> None:
     artifact = (
         Path(__file__).parents[1] / "deploy" / "ops" / "hermes-home.alloy"
