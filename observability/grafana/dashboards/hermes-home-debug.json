@@ -1,0 +1,104 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 8, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"editorMode": "code", "expr": "sum(rate(hermes_home_http_requests_total{status=~\"4..|5..\"}[5m]))", "legendFormat": "errors", "range": true, "refId": "A"}],
+      "title": "HTTP error rate",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 8, "x": 8, "y": 0},
+      "id": 2,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"editorMode": "code", "expr": "sum(rate(hermes_home_http_requests_total{status=\"503\"}[5m]))", "legendFormat": "503", "range": true, "refId": "A"}],
+      "title": "Service-unavailable rate",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "fillOpacity": 12, "lineWidth": 1, "showPoints": "never"}}, "overrides": []},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 5},
+      "id": 3,
+      "options": {"legend": {"calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"editorMode": "code", "expr": "histogram_quantile(0.99, sum by (le, route) (rate(hermes_home_http_request_duration_seconds_bucket[5m])))", "legendFormat": "p99 {{route}}", "range": true, "refId": "A"}],
+      "title": "Slow routes (p99 latency)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "reqps", "custom": {"drawStyle": "line", "fillOpacity": 12, "lineWidth": 1, "showPoints": "never"}}, "overrides": []},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 13},
+      "id": 4,
+      "options": {"legend": {"calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"editorMode": "code", "expr": "sum by (route, status) (rate(hermes_home_http_requests_total{status=~\"4..|5..\"}[5m]))", "legendFormat": "{{route}} {{status}}", "range": true, "refId": "A"}],
+      "title": "HTTP errors by route and status",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"drawStyle": "line", "fillOpacity": 12, "lineWidth": 1, "showPoints": "never"}}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 21},
+      "id": 5,
+      "options": {"legend": {"calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"editorMode": "code", "expr": "sum by (result) (rate(hermes_home_wake_claims_total{result=~\"claim_denied|invalid_request|not_found|service_unavailable|unauthorized\"}[5m]))", "legendFormat": "{{result}}", "range": true, "refId": "A"}],
+      "title": "Failed wake claims",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"drawStyle": "line", "fillOpacity": 12, "lineWidth": 1, "showPoints": "never"}}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 21},
+      "id": 6,
+      "options": {"legend": {"calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"editorMode": "code", "expr": "sum by (result) (rate(hermes_home_configuration_publishes_total{result!=\"success\"}[5m]))", "legendFormat": "{{result}}", "range": true, "refId": "A"}],
+      "title": "Failed configuration publishes",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "none"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 12, "x": 0, "y": 29},
+      "id": 7,
+      "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"editorMode": "code", "expr": "hermes_home_configuration_revision", "legendFormat": "revision", "range": true, "refId": "A"}],
+      "title": "Configuration revision during incident",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 5, "w": 12, "x": 12, "y": 29},
+      "id": 8,
+      "options": {"content": "Use the route/status and latency panels first. Then compare claim failures with the active configuration revision; a rising `service_unavailable` series points to storage or configuration-read failure, while `claim_denied` points to eligibility or arbitration policy.", "mode": "markdown"},
+      "title": "Triage notes",
+      "type": "text"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "none"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 8, "x": 0, "y": 34},
+      "id": 9,
+      "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"editorMode": "code", "expr": "up{job=\"hermes-home\"}", "legendFormat": "scrape", "range": true, "refId": "A"}],
+      "title": "Prometheus scrape health",
+      "type": "stat"
+    }
+  ],
+  "refresh": "15s",
+  "schemaVersion": 39,
+  "tags": ["hermes", "home", "debug", "observability"],
+  "templating": {"list": [{"current": {"selected": true, "text": "Prometheus", "value": "Prometheus"}, "hide": 0, "includeAll": false, "label": "Data source", "name": "DS_PROMETHEUS", "options": [], "query": "prometheus", "refresh": 1, "regex": "", "type": "datasource"}]},
+  "time": {"from": "now-6h", "to": "now"},
+  "title": "Hermes Home — Debug",
+  "uid": "hermes-home-debug",
+  "version": 1
+}

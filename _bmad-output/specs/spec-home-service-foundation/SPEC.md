@@ -99,8 +99,8 @@ conversation content.
 
 ## Open Questions
 
-- Which HTTP framework and process manager best fit the local service once the
-  domain and storage slice are proven?
+- Whether to retain the initial standard-library HTTP adapter or adopt a
+  production framework and process manager.
 - How are device credentials issued, rotated, expired, and revoked?
 - What exact acoustic-evidence encoding, calibration, normalization, and tie
   band should the hardware contract standardize?

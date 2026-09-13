@@ -29,17 +29,19 @@ snapshots, URLs, display payloads, transcripts, or ordinary diagnostics.
 
 ## Current state
 
-The repository currently contains the service boundary, architecture notes, a
-versioned HTTP contract, JSON Schemas, fixtures, tests, packaging, BMAD runtime
-configuration, and CI/release automation. The first runtime implementation has
-not begun.
-
-The next vertical slice is the service foundation:
+The repository contains the service boundary, architecture notes, a versioned
+HTTP contract, JSON Schemas, fixtures, tests, packaging, BMAD runtime
+configuration, CI/release automation, and the first runtime foundation slice:
 
 1. SQLite-backed configuration store with atomic revisioned replacement;
 2. pure wake-claim validation and bounded arbitration engine;
 3. thin HTTP adapter over those roles;
-4. deterministic tests using fakes and contract fixtures.
+4. admin-authenticated Prometheus metrics and provisionable Grafana dashboards;
+5. deterministic tests using fakes, concurrent requests, and contract fixtures.
+
+The next work is integration and deployment policy: device credential
+provisioning and revocation, hardware acoustic-evidence calibration, and client
+adapters consuming the v1 contract.
 
 ## Contract anchors
 

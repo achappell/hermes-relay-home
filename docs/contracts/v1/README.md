@@ -132,6 +132,12 @@ The claim contains no Profile ID, wake phrase, prompt, transcript, or audio.
 The server uses its monotonic receive clock; Device wall-clock values are
 observation metadata only. Wi-Fi RSSI is not accepted as physical proximity.
 
+The foundation implementation interprets a finite numeric `value` in the
+`acoustic_evidence` object as a deterministic proximity score, with higher
+values closer. Equal scores use the configured Device priority; this is the
+provisional policy used by deterministic tests, not the final hardware
+encoding or calibration contract.
+
 The exact acoustic evidence encoding, calibration, normalization, and tie band
 remain a hardware-contract decision. The field is intentionally isolated so
 that decision does not leak into the mobile configuration API.

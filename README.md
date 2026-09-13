@@ -34,11 +34,22 @@ npx --yes bmad-method@6.12.0 status
 
 ## Current status
 
-This is the repository boundary and contract bootstrap. The HTTP adapter,
-SQLite store, and arbitration engine are the next implementation slice.
+The first service foundation slice is implemented. It includes validated,
+revisioned SQLite configuration storage, deterministic bounded wake arbitration,
+credential-bound contract translation, a loopback-by-default threaded HTTP
+server, and admin-authenticated Prometheus metrics with provisionable Grafana
+dashboards. Device credential provisioning, production process management, and
+hardware acoustic calibration remain deployment work.
 
 ## Development
 
-The project targets Python 3.14. The contract fixtures use only the standard
-library; HTTP framework and runtime dependencies will be added with the first
-service implementation.
+The project targets Python 3.14 and uses the standard library for SQLite and
+the initial HTTP server. Run the focused checks with:
+
+```sh
+uv run --no-project --with pytest -- python -m pytest -q
+uvx --from ruff ruff check src tests
+uvx --from ruff ruff format --check src tests
+```
+
+Monitoring setup is documented in [`observability/README.md`](observability/README.md).
