@@ -9,14 +9,17 @@ companions:
   - ../spec-standard-hermes-compatibility-migration/SPEC.md
   - ../spec-standard-hermes-compatibility-migration/standard-baseline.md
   - ../spec-standard-hermes-compatibility-migration/surface-migration-matrix.md
-sources:
-  - ../../../docs/standard-bridge.md
 ---
 
 > **Canonical contract.** This SPEC and the files in `companions:` define the
 > Story 2 bridge seam that Home must build, test, and validate. The route-roaming
 > and Standard-migration companions retain ownership of the public Home route
 > and the pinned cross-surface rollout.
+
+The front-end coordination contract is documented in the route-roaming
+companion `../spec-home-bridge-route-roaming/bridge-contract.md`, but it
+describes a later route adapter;
+it is not a Story 2 implementation artifact or a live endpoint.
 
 # Story 2: Standard Hermes Bridge for Home
 

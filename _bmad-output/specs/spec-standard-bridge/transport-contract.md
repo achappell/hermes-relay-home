@@ -4,6 +4,22 @@ This companion carries the load-bearing wire, state, fixture, and failure
 details for Story 2. It preserves the pinned Standard boundary; it does not
 define the public Home route envelope.
 
+## Implementation status
+
+Story 2 implements the framework-independent `HomeBridge` seam and
+deterministic fake-gateway/fake-audio fixtures. It does not serve the public
+Home WebSocket, select routes, establish Household Identity proof, or provide
+browser credential bootstrap. The front-end target for those later adapters is
+the route-roaming companion
+[`bridge-contract.md`](../spec-home-bridge-route-roaming/bridge-contract.md).
+
+`BridgeStatus.to_endpoint()`, `BridgeTurn.to_endpoint()`, and
+`BridgeEvent.to_endpoint()` are current Home domain dictionaries, not public
+JSON-RPC envelopes. The planned adapter must wrap them, preserve Standard event
+meaning, and add the Home-only route/authentication boundary without exposing
+Profile IDs, runtime Session IDs, or credentials. The planned endpoint is not a
+claim that this Story 2 seam is live at `/api/v1/bridge/ws`.
+
 ## Boundary records
 
 | Record | Required meaning |
@@ -85,7 +101,7 @@ The bridge contract is verified with injected JSON and audio socket ports and
 deterministic fixtures. The focused and full Home checks use:
 
 ```sh
-uv run --no-project --with pytest -- python -m pytest -q
+uv run --python 3.14 --no-project --with pytest -- python -m pytest -q
 ```
 
 Live Hermes, physical hardware, and the final Home route envelope are separate
