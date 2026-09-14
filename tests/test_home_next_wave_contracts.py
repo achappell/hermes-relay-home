@@ -73,9 +73,7 @@ def test_endpoint_bridge_contract_pins_home_boundary_without_leaking_hermes_iden
         SPECS / "spec-home-service-foundation" / "credential-lifecycle.md"
     ).read_text()
     migration = (
-        SPECS
-        / "spec-standard-hermes-compatibility-migration"
-        / "SPEC.md"
+        SPECS / "spec-standard-hermes-compatibility-migration" / "SPEC.md"
     ).read_text()
 
     assert "`/api/v1/bridge/ws`" in bridge
