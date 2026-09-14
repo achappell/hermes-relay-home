@@ -5,6 +5,7 @@ companions:
   - route-session-state.md
   - ../../planning-artifacts/architecture/architecture-hermes-relay-home-2026-09-12/ARCHITECTURE-SPINE.md
   - ../../../docs/contracts/v1/README.md
+  - ../../../docs/contracts/v1/bridge.md
   - ../../../docs/contracts/v1/configuration.schema.json
   - ../../../docs/contracts/v1/wake-claim.schema.json
   - '~/Documents/Vaults/Personal Vault/projects/hermes-home/sources/prds/prd-hermes-home-next-wave-2026-09-13/prd.md'
@@ -121,6 +122,22 @@ connectivity without quietly duplicating a turn whose delivery is uncertain.
   identity, clock, credential, and WebSocket ports without a live public
   network or Hermes endpoint.
 
+## Endpoint contract decision
+
+Session-bearing endpoint migrations use the Home bridge first. A paired client
+does not become a direct Standard Hermes client during this wave: it reaches
+Home through the versioned `/api/v1/bridge/ws` contract in
+`docs/contracts/v1/bridge.md`, authenticates with its limited Device
+credential, and receives only opaque conversation/turn handles and safe
+capability state. Home alone opens Standard `/api/ws` and
+`/api/audio/speak-stream` with its server-held Hermes credential.
+
+The route contract intentionally does not settle the cryptographic proof that
+two routes reach the same Household Identity, the discovery/refresh mechanism,
+or the final public TLS deployment. Those decisions cannot weaken the pinned
+endpoint path, credential boundary, no-mid-turn switch rule, or no-replay
+recovery rule.
+
 ## Non-goals
 
 - Choosing the final cryptographic or challenge-based same-Household identity
@@ -166,8 +183,6 @@ endpoint is ready again.
   Tailscale, and optional public routes are the same Household Server?
 - Where are Approved Routes configured and refreshed, and how does an endpoint
   learn them without treating a stale route list as authority?
-- What exact versioned Home bridge envelope and endpoint WebSocket path carry
-  device authentication, conversation handles, route status, and safe errors?
 - When a route changes during active response audio, should the endpoint drain
   local playback, stop immediately, or show a distinct interrupted state
   before reconnecting?

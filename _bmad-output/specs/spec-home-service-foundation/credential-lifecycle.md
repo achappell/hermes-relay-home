@@ -1,9 +1,9 @@
 # Credential lifecycle
 
 This companion defines the behavior of the pairing and endpoint-credential
-slice. It does not choose the HTTP framework, QR library, cryptographic
-encoding, or route-discovery mechanism; those choices remain the open
-questions in `SPEC.md`.
+slice. It does not choose the HTTP framework, QR library, at-rest digest or
+encryption primitive, or route-discovery mechanism; those choices remain
+implementation details or open questions in `SPEC.md`.
 
 ## Enrollment state
 
@@ -61,6 +61,57 @@ generation it is presenting. The request ID is not a credential and cannot be
 reused for a later generation. Home must make the same request safe to retry
 without issuing multiple valid replacements. Explicit revocation invalidates
 the retry path immediately.
+
+## Wire representation and migration boundary
+
+Production Home credentials are 32 random bytes encoded as unpadded base64url.
+The resulting 43-character ASCII value is opaque: it contains no endpoint ID,
+Profile ID, capability, expiry, or route information. Deterministic tests may
+use readable fixture values, but a fixture value is not a production format.
+
+The only ordinary endpoint authentication form is:
+
+```http
+Authorization: Device <base64url-device-credential>
+```
+
+Credential issuance and rotation may return the credential exactly once in an
+authenticated, TLS-protected control-plane response:
+
+```json
+{
+  "schema": 1,
+  "device_id": "device-opaque-id",
+  "credential": "<base64url-device-credential>",
+  "generation": 1,
+  "issued_at": "2026-09-14T19:00:00Z",
+  "expires_at": "2026-12-13T19:00:00Z"
+}
+```
+
+The response is not a configuration snapshot and must not be logged, cached,
+placed in a URL, or forwarded through an ordinary bridge event. An endpoint
+stores only the credential value in its platform secure store; it does not
+parse or derive authority from the value.
+
+There is deliberately no endpoint API that converts a personal Hermes bearer
+or the fork-only `/voice-session` credential into a Home credential. A surface
+migrating from the fork performs this local, idempotent transition:
+
+1. preserve its local Profile ID, device label, and Profile-scoped history;
+2. retain the old credential only in a rollback-only secure-store slot until
+   the migration retirement gate;
+3. complete the approved Home pairing flow and store the newly issued Home
+   credential in a separate secure-store slot;
+4. mark the target binding usable only after a Home bridge authorization
+   succeeds for the same endpoint; and
+5. leave the target unavailable, preserve the source, and submit no turn if
+   pairing, secure storage, or authorization fails.
+
+Repeating the transition for the same local Profile updates the existing Home
+binding; it never creates another Profile or history, derives a credential from
+the old token, or replays a turn whose delivery was uncertain. The old slot is
+removed only by the explicit post-migration retirement decision.
 
 ## Storage boundary
 

@@ -56,11 +56,12 @@ or `sudo.respond`) and refuses stale or uncorrelated prompts.
 
 ## Scope
 
-The final versioned endpoint WebSocket envelope and public Home bridge path are
-still open in the route-roaming specification. This module is the tested
-transport seam and does not invent that public route. Its deterministic fixtures
-are validated with:
+The endpoint-facing v1 WebSocket envelope and public Home bridge path are
+defined in [`docs/contracts/v1/bridge.md`](contracts/v1/bridge.md). This module
+remains the tested Standard transport seam; it does not implement the public
+Home route or its endpoint adapter. Its deterministic fixtures are validated
+with:
 
 ```sh
-uv run --no-project --with pytest -- python -m pytest -q
+uv run --python 3.14 --no-project --with pytest -- python -m pytest -q
 ```

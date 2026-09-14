@@ -4,6 +4,9 @@ companions:
   - standard-baseline.md
   - surface-migration-matrix.md
   - compatibility-and-rollout.md
+  - ../spec-home-service-foundation/credential-lifecycle.md
+  - ../spec-home-bridge-route-roaming/SPEC.md
+  - ../../../docs/contracts/v1/bridge.md
 sources:
   - ../../../docs/project-context.md
   - ../../planning-artifacts/architecture/architecture-hermes-relay-home-2026-09-12/ARCHITECTURE-SPINE.md
@@ -144,9 +147,10 @@ the fork.
 
 - Which capabilities are mandatory before the first default switch, and which
   may remain explicitly unavailable in the pilot?
-- Which surfaces move behind Home first, and which may temporarily remain
-  direct Standard Hermes clients during rollout?
-- What exact configuration conversion preserves profiles, local history,
-  device identity, and rollback when a direct fork endpoint becomes a
-  Home-paired endpoint?
+- Session-bearing surface migrations use the Home bridge first; direct Standard
+  access is a Home-owned server-side concern, not an endpoint rollout path.
+- Configuration conversion preserves each surface's local Profile/history
+  identity and rollback credential slot while a newly issued Home credential
+  is paired and verified. The exact wire and failure rules live in the Home
+  bridge and credential companions.
 - What operational signal authorizes retirement of the legacy fork path?
