@@ -3,6 +3,11 @@
 This matrix is part of `SPEC.md`. It assigns migration work without claiming
 that one surface's evidence closes another surface.
 
+Front-end agents consuming Home must also read the route-roaming companion
+[`bridge-contract.md`](../spec-home-bridge-route-roaming/bridge-contract.md).
+It is the planned Home endpoint contract and explicitly distinguishes the live
+Story 2 seam from the not-yet-served public adapter.
+
 ## Capability contract
 
 The pinned release and the meaning of these labels are defined in

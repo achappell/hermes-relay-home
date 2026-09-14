@@ -4,6 +4,7 @@ companions:
   - standard-baseline.md
   - surface-migration-matrix.md
   - compatibility-and-rollout.md
+  - ../spec-home-bridge-route-roaming/bridge-contract.md
 sources:
   - ../../../docs/project-context.md
   - ../../planning-artifacts/architecture/architecture-hermes-relay-home-2026-09-12/ARCHITECTURE-SPINE.md

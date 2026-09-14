@@ -5,6 +5,7 @@ companions:
   - route-session-state.md
   - ../../planning-artifacts/architecture/architecture-hermes-relay-home-2026-09-12/ARCHITECTURE-SPINE.md
   - ../../../docs/contracts/v1/README.md
+  - bridge-contract.md
   - ../../../docs/contracts/v1/configuration.schema.json
   - ../../../docs/contracts/v1/wake-claim.schema.json
   - '~/Documents/Vaults/Personal Vault/projects/hermes-home/sources/prds/prd-hermes-home-next-wave-2026-09-13/prd.md'
@@ -22,6 +23,12 @@ sources:
 > credentials, Slice B owns Profile mapping and conversation claims, and the
 > pinned Standard baseline owns the target gateway/audio transport. The fork
 > voice-session README is rollback evidence only.
+
+The front-end wire shape is recorded in `bridge-contract.md`
+as a planned route-adapter contract. Story 2 currently provides only the
+internal `HomeBridge` seam; route discovery, identity proof, TLS deployment,
+browser bootstrap, and the public WebSocket adapter are not live merely because
+that contract is documented.
 
 # Home Bridge and Route Roaming
 
@@ -166,8 +173,9 @@ endpoint is ready again.
   Tailscale, and optional public routes are the same Household Server?
 - Where are Approved Routes configured and refreshed, and how does an endpoint
   learn them without treating a stale route list as authority?
-- What exact versioned Home bridge envelope and endpoint WebSocket path carry
-  device authentication, conversation handles, route status, and safe errors?
+- Which production route-discovery, identity-proof, TLS, and deployment choices
+  will serve the planned bridge envelope and endpoint WebSocket path while
+  preserving the safe errors and browser credential boundary?
 - When a route changes during active response audio, should the endpoint drain
   local playback, stop immediately, or show a distinct interrupted state
   before reconnecting?

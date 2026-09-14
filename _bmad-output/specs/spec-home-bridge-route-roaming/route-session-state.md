@@ -5,6 +5,12 @@ protocol-preservation matrix, and failure cases for the Home Bridge and Route
 Roaming slice. It does not choose the unresolved identity-proof or endpoint
 envelope mechanisms.
 
+The planned front-end wire shape is recorded in
+`bridge-contract.md`; it is coordination material, not a
+claim that the public WebSocket adapter is currently served. The live Story 2
+implementation is the internal `HomeBridge` seam and its separate Standard
+gateway/audio sockets.
+
 ## Records
 
 | Record | Required meaning |
@@ -81,6 +87,12 @@ uncertain.
 The bridge may add a versioned Home authorization or route envelope at its own
 boundary. That envelope must not rename, reinterpret, or duplicate the Standard
 gateway or audio-sidecar events above.
+
+When the planned endpoint adapter is implemented, its JSON audio notifications
+use `method: "audio.frame"` with the original sidecar `kind` values (`start`,
+`end`, `fallback`, and `unavailable`) and carry raw PCM as binary frames between
+the start and terminal notifications. It must not turn those Standard frame
+kinds into new `audio.start`, `audio.end`, or `audio.fallback` Hermes methods.
 
 Text preview events retain the Standard gateway's cumulative-draft and
 replacement semantics. An endpoint replaces its preview or appends only a
