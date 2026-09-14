@@ -45,13 +45,21 @@ in [`docs/standard-bridge.md`](docs/standard-bridge.md). Device credential
 provisioning, LAN binding policy, and hardware acoustic calibration remain
 follow-up work.
 
+## BMAD ownership
+
+This repository owns the Home service foundation story record in
+`_bmad-output/implementation-artifacts/story-index.yaml` and its formal local
+status in `sprint-status.yaml`. The product hub owns durable household intent
+and cross-repository decisions; the TUI repository is not the Home service's
+status authority.
+
 ## Development
 
 The project targets Python 3.14 and uses the standard library for SQLite and
 the initial HTTP server. Run the focused checks with:
 
 ```sh
-uv run --no-project --with pytest -- python -m pytest -q
+uv run --no-project --python 3.14 --with pytest -- python -m pytest -q
 uvx --from ruff ruff check src tests
 uvx --from ruff ruff format --check src tests
 ```
