@@ -2,8 +2,9 @@
 
 This companion carries the route records, bridge boundary, state transitions,
 protocol-preservation matrix, and failure cases for the Home Bridge and Route
-Roaming slice. It does not choose the unresolved identity-proof or endpoint
-envelope mechanisms.
+Roaming slice. The planned endpoint envelope is defined in
+`bridge-contract.md`; identity proof and route discovery remain separate
+decisions.
 
 The planned front-end wire shape is recorded in
 `bridge-contract.md`; it is coordination material, not a
@@ -84,9 +85,14 @@ uncertain.
 | Standard gateway ↔ endpoint | Correlated approval/clarify/secret/sudo prompts and explicit `command.dispatch` when advertised | Preserve prompt sensitivity, options/values, and command authority only when the capability is advertised; never turn either into ordinary model input. |
 | Standard gateway/audio → endpoint | No `speech_timing` event in the pinned baseline | Expose explicit timing absence. A verified playback-clock or duration adapter may add capability evidence; network arrival never supplies timing authority. |
 
-The bridge may add a versioned Home authorization or route envelope at its own
-boundary. That envelope must not rename, reinterpret, or duplicate the Standard
-gateway or audio-sidecar events above.
+The versioned Home authorization and route envelope is the JSON-RPC and audio
+framing in `bridge-contract.md`. It must not rename, reinterpret, or duplicate
+the Standard gateway or audio-sidecar events above.
+
+The v1 endpoint shape is the JSON-RPC and audio framing in
+`bridge-contract.md`. It uses `/api/v1/bridge/ws`, authenticates with
+the `Authorization: Device` header, keeps opaque conversation/turn handles at
+the endpoint, and never exposes the runtime Profile or Hermes Session IDs.
 
 When the planned endpoint adapter is implemented, its JSON audio notifications
 use `method: "audio.frame"` with the original sidecar `kind` values (`start`,

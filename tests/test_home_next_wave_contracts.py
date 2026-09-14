@@ -84,3 +84,26 @@ def test_architecture_links_all_home_next_wave_and_standard_baseline_companions(
     rubric = (ARCHITECTURE / "reviews" / "review-rubric.md").read_text()
     assert "formal Slice C and Slice D specifications are now written" in rubric
     assert "still need to be written" not in rubric
+
+
+def test_endpoint_bridge_contract_pins_home_boundary_without_leaking_hermes_identity():
+    bridge = (
+        SPECS / "spec-home-bridge-route-roaming" / "bridge-contract.md"
+    ).read_text()
+    credentials = (
+        SPECS / "spec-home-service-foundation" / "credential-lifecycle.md"
+    ).read_text()
+    migration = (
+        SPECS / "spec-standard-hermes-compatibility-migration" / "SPEC.md"
+    ).read_text()
+
+    assert "`/api/v1/bridge/ws`" in bridge
+    assert "Authorization: Device <device-credential>" in bridge
+    assert '"method": "conversation.open"' in bridge
+    assert "`prompt.submit`" in bridge
+    assert "`session.interrupt`" in bridge
+    assert "Hermes Session ID" in bridge
+    assert "raw signed" in bridge
+    assert "32 random bytes encoded as unpadded base64url" in credentials
+    assert "no endpoint API that converts a personal Hermes bearer" in credentials
+    assert "Session-bearing surface migrations use the Home bridge first" in migration
