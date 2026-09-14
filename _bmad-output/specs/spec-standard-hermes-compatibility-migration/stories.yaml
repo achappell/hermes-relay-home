@@ -1,0 +1,122 @@
+- id: "1"
+  title: "[Home] Pin Standard baseline and compatibility matrix"
+  description: >-
+    Pin the supported Standard Hermes release and record the required JSON,
+    PCM, timing, prompt, command, interrupt, liveness, authentication, and
+    recovery behavior for every in-scope surface. Freeze current fork-only
+    behavior as rollback evidence without making it a target requirement.
+  spec_checkpoint: true
+  done_checkpoint: true
+  invoke_dev_with: >-
+    Use the pinned Standard release only. Treat the matrix as a contract: no
+    fork-only acceptance criteria, and make timing authority or explicit timing
+    absence visible.
+
+- id: "2"
+  title: "[Home] Prove the Standard Hermes bridge"
+  description: >-
+    Exercise the Standard path through Home with deterministic fixtures for
+    gateway.ready, session create/resume, text, response PCM from the separate
+    audio socket, audio metadata, interruption, reconnect, structured prompts,
+    and advertised commands. Keep the Hermes bearer token server-side and
+    preserve opaque conversation handles and normalized event meaning.
+  spec_checkpoint: true
+  done_checkpoint: true
+  invoke_dev_with: >-
+    Do not add a Hermes channel or a second answer authority. Preserve JSON
+    and PCM event ordering, and never replay an uncertain turn.
+
+- id: "3"
+  title: "[TUI] Migrate the terminal client"
+  description: >-
+    Move TUI transport, configuration, identity, history, timing state,
+    interruption, reconnect, and failure handling to the approved Home or
+    Standard boundary while preserving SessionProtocol and current
+    presentation. Record live text and voice evidence plus honest timing
+    capability behavior.
+  spec_checkpoint: true
+  invoke_dev_with: >-
+    Use the existing SessionProtocol and normalized-event boundary. Preserve
+    Profile, device identity, local history, and no-mid-turn-switch/no-replay
+    behavior.
+
+- id: "4"
+  title: "[Apple] Migrate the iOS/macOS client"
+  description: >-
+    Move the native Apple client to the approved Home or Standard boundary
+    without changing local Profile, history, presentation, audio lifecycle,
+    or interruption semantics. Record fake-bridge and live text, voice,
+    reconnect, route, and timing evidence in the owning repository.
+  spec_checkpoint: true
+  invoke_dev_with: >-
+    Keep SwiftUI and Apple lifecycle concerns local to the Apple repository.
+    Do not introduce a second Hermes wire parser or claim timing from network
+    arrival.
+
+- id: "5"
+  title: "[Android] Migrate the Android client"
+  description: >-
+    Move Android from direct fork-dependent profiles to the approved Home or
+    Standard boundary while preserving secure credential conversion, Profile
+    history, lifecycle audio, interruption, reconnect, and unavailable-state
+    behavior. Record JVM, instrumentation, and live transport evidence in the
+    owning repository.
+  spec_checkpoint: true
+  invoke_dev_with: >-
+    Keep secure storage and Android lifecycle ownership local to Android. A
+    failed credential conversion must fail closed and must not replay a turn.
+
+- id: "6"
+  title: "[Puck] Migrate the ReSpeaker Puck path"
+  description: >-
+    Replace fork-only authorization and session assumptions in the ReSpeaker
+    Puck path with the Home credential and opaque-handle flow while retaining
+    local capture, playback, and hardware lifecycle ownership. Record bridge
+    fixtures, build or OTA evidence, spoken round-trip behavior, and recovery
+    evidence.
+  spec_checkpoint: true
+  invoke_dev_with: >-
+    Keep microphone and speaker ownership on the Puck path. Home owns
+    authorization; the device must not receive the personal Hermes bearer
+    token.
+
+- id: "7"
+  title: "[ESP32] Add the Touch Display audio/session adapter"
+  description: >-
+    Add the bounded audio and session adapter needed for the ESP32-S3 Touch
+    Display to use Home or Standard Hermes while preserving the shared
+    snapshot/action contract. Keep Hermes answer authority, cancellation,
+    reconnect, and no-replay semantics outside firmware.
+  spec_checkpoint: true
+  invoke_dev_with: >-
+    The firmware must not parse Hermes wire frames or invent responses. Prove
+    audio ownership, cancellation, reconnect, and honest unsupported-capability
+    states on the native target and simulator.
+
+- id: "8"
+  title: "[W/K] Migrate browser and iPad routes"
+  description: >-
+    Move web and iPad authentication and route selection behind Home while
+    preserving normalized session events, browser audio state, timing behavior,
+    permissions, reconnect, and accessibility behavior. Record DOM or
+    TypeScript checks plus Safari/iPad smoke evidence in the owning delivery
+    repository.
+  spec_checkpoint: true
+  invoke_dev_with: >-
+    Do not put bearer tokens or Hermes answer authority in the browser. Timing
+    must come from an explicit contract or playback clock, never network
+    arrival.
+
+- id: "9"
+  title: "[Home] Run the pilot, switch the default, and retire fork dependence"
+  description: >-
+    Run the household pilot across the required surfaces, record evidence and
+    unresolved capability gaps, and switch Standard Hermes to the default only
+    when every required gate is green. Retain explicit rollback until
+    acceptance, then remove fork-only defaults and documentation.
+  spec_checkpoint: true
+  done_checkpoint: true
+  invoke_dev_with: >-
+    No default switch while a required surface is unverified. Keep rollback
+    and fresh-user-action recovery until the pilot is accepted; do not silently
+    change transport or resend uncertain turns.

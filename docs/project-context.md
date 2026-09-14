@@ -8,8 +8,8 @@ Android, the TUI, web/iPad Hands-Free Home, and wake-capable hardware one
 canonical place to read configuration and resolve simultaneous wake claims.
 
 The service is deliberately not a second assistant. Hermes remains authoritative
-for sessions, model routing, answer content, speech generation, and the
-voice-session protocol.
+for sessions, model routing, answer content, speech generation, and supported
+session protocols.
 
 ## Ownership boundary
 
@@ -51,6 +51,8 @@ adapters consuming the v1 contract.
 - `docs/architecture.md` — repository and ownership boundary;
 - `_bmad-output/planning-artifacts/architecture/architecture-hermes-relay-home-2026-09-12/ARCHITECTURE-SPINE.md` — concise design invariants;
 - `_bmad-output/specs/spec-home-service-foundation/SPEC.md` — first implementation slice.
+- `_bmad-output/specs/spec-standard-hermes-compatibility-migration/standard-baseline.md` — pinned Standard release and rollback ledger;
+- `_bmad-output/specs/spec-standard-hermes-compatibility-migration/surface-migration-matrix.md` — per-surface capability contract and evidence ownership.
 
 ## Working rules
 
