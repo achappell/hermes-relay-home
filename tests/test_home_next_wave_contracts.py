@@ -2,7 +2,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SPECS = ROOT / "_bmad-output" / "specs"
-CONTRACTS = ROOT / "docs" / "contracts" / "v1"
 ARCHITECTURE = (
     ROOT
     / "_bmad-output"
@@ -19,6 +18,7 @@ def test_home_next_wave_contract_packages_are_present():
         SPECS / "spec-profile-mapping-conversation-claims" / "state-machine.md",
         SPECS / "spec-home-bridge-route-roaming" / "SPEC.md",
         SPECS / "spec-home-bridge-route-roaming" / "route-session-state.md",
+        SPECS / "spec-home-bridge-route-roaming" / "bridge-contract.md",
         SPECS / "spec-household-diagnostics-incident-review" / "SPEC.md",
         SPECS
         / "spec-household-diagnostics-incident-review"
@@ -27,8 +27,6 @@ def test_home_next_wave_contract_packages_are_present():
 
     for artifact in expected:
         assert artifact.is_file(), artifact
-
-    assert (CONTRACTS / "bridge.md").is_file()
 
 
 def test_route_roaming_contract_targets_pinned_standard_transport():
@@ -47,6 +45,27 @@ def test_route_roaming_contract_targets_pinned_standard_transport():
     assert "`hello_ack`" not in route_state
     assert "baseline has no `speech_timing` event" in route_spec
     assert "No `speech_timing` event in the pinned baseline" in route_state
+
+
+def test_bridge_contract_separates_the_live_seam_from_the_planned_endpoint():
+    bridge_contract = (
+        SPECS / "spec-home-bridge-route-roaming" / "bridge-contract.md"
+    ).read_text()
+    standard_bridge = (
+        SPECS / "spec-standard-bridge" / "transport-contract.md"
+    ).read_text()
+
+    assert "> Status: planned endpoint-adapter contract." in bridge_contract
+    assert "endpoint route is live" in bridge_contract
+    assert "Vanilla Hermes Agent `0.21.1`" in bridge_contract
+    assert "not vanilla Hermes methods or fields" in bridge_contract
+    assert "conversation.reconnect" in bridge_contract
+    assert "/api/v1/bridge/ws-ticket" in bridge_contract
+    assert '"method": "audio.frame"' in bridge_contract
+    assert "audio.start" in bridge_contract
+    assert "There are no public `audio.start`" in bridge_contract
+    assert "planned endpoint is not a" in standard_bridge
+    assert "/api/v1/bridge/ws" in standard_bridge
 
 
 def test_architecture_links_all_home_next_wave_and_standard_baseline_companions():
@@ -68,7 +87,9 @@ def test_architecture_links_all_home_next_wave_and_standard_baseline_companions(
 
 
 def test_endpoint_bridge_contract_pins_home_boundary_without_leaking_hermes_identity():
-    bridge = (CONTRACTS / "bridge.md").read_text()
+    bridge = (
+        SPECS / "spec-home-bridge-route-roaming" / "bridge-contract.md"
+    ).read_text()
     credentials = (
         SPECS / "spec-home-service-foundation" / "credential-lifecycle.md"
     ).read_text()
@@ -79,9 +100,9 @@ def test_endpoint_bridge_contract_pins_home_boundary_without_leaking_hermes_iden
     assert "`/api/v1/bridge/ws`" in bridge
     assert "Authorization: Device <device-credential>" in bridge
     assert '"method": "conversation.open"' in bridge
-    assert '"method": "prompt.submit"' in bridge
-    assert '"method": "session.interrupt"' in bridge
-    assert "runtime Hermes Session ID" in bridge
+    assert "`prompt.submit`" in bridge
+    assert "`session.interrupt`" in bridge
+    assert "Hermes Session ID" in bridge
     assert "raw signed" in bridge
     assert "32 random bytes encoded as unpadded base64url" in credentials
     assert "no endpoint API that converts a personal Hermes bearer" in credentials

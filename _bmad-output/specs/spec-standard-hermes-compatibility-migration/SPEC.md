@@ -6,7 +6,7 @@ companions:
   - compatibility-and-rollout.md
   - ../spec-home-service-foundation/credential-lifecycle.md
   - ../spec-home-bridge-route-roaming/SPEC.md
-  - ../../../docs/contracts/v1/bridge.md
+  - ../spec-home-bridge-route-roaming/bridge-contract.md
 sources:
   - ../../../docs/project-context.md
   - ../../planning-artifacts/architecture/architecture-hermes-relay-home-2026-09-12/ARCHITECTURE-SPINE.md

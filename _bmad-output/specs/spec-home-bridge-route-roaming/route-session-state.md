@@ -2,9 +2,15 @@
 
 This companion carries the route records, bridge boundary, state transitions,
 protocol-preservation matrix, and failure cases for the Home Bridge and Route
-Roaming slice. The endpoint envelope is pinned in
-`docs/contracts/v1/bridge.md`; identity proof and route discovery remain
-separate decisions.
+Roaming slice. The planned endpoint envelope is defined in
+`bridge-contract.md`; identity proof and route discovery remain separate
+decisions.
+
+The planned front-end wire shape is recorded in
+`bridge-contract.md`; it is coordination material, not a
+claim that the public WebSocket adapter is currently served. The live Story 2
+implementation is the internal `HomeBridge` seam and its separate Standard
+gateway/audio sockets.
 
 ## Records
 
@@ -80,13 +86,19 @@ uncertain.
 | Standard gateway/audio → endpoint | No `speech_timing` event in the pinned baseline | Expose explicit timing absence. A verified playback-clock or duration adapter may add capability evidence; network arrival never supplies timing authority. |
 
 The versioned Home authorization and route envelope is the JSON-RPC and audio
-framing in `docs/contracts/v1/bridge.md`. It must not rename, reinterpret, or
-duplicate the Standard gateway or audio-sidecar events above.
+framing in `bridge-contract.md`. It must not rename, reinterpret, or duplicate
+the Standard gateway or audio-sidecar events above.
 
 The v1 endpoint shape is the JSON-RPC and audio framing in
-`docs/contracts/v1/bridge.md`. It uses `/api/v1/bridge/ws`, authenticates with
+`bridge-contract.md`. It uses `/api/v1/bridge/ws`, authenticates with
 the `Authorization: Device` header, keeps opaque conversation/turn handles at
 the endpoint, and never exposes the runtime Profile or Hermes Session IDs.
+
+When the planned endpoint adapter is implemented, its JSON audio notifications
+use `method: "audio.frame"` with the original sidecar `kind` values (`start`,
+`end`, `fallback`, and `unavailable`) and carry raw PCM as binary frames between
+the start and terminal notifications. It must not turn those Standard frame
+kinds into new `audio.start`, `audio.end`, or `audio.fallback` Hermes methods.
 
 Text preview events retain the Standard gateway's cumulative-draft and
 replacement semantics. An endpoint replaces its preview or appends only a

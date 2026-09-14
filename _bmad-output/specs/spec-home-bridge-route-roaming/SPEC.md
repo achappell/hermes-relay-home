@@ -5,7 +5,7 @@ companions:
   - route-session-state.md
   - ../../planning-artifacts/architecture/architecture-hermes-relay-home-2026-09-12/ARCHITECTURE-SPINE.md
   - ../../../docs/contracts/v1/README.md
-  - ../../../docs/contracts/v1/bridge.md
+  - bridge-contract.md
   - ../../../docs/contracts/v1/configuration.schema.json
   - ../../../docs/contracts/v1/wake-claim.schema.json
   - '~/Documents/Vaults/Personal Vault/projects/hermes-home/sources/prds/prd-hermes-home-next-wave-2026-09-13/prd.md'
@@ -23,6 +23,21 @@ sources:
 > credentials, Slice B owns Profile mapping and conversation claims, and the
 > pinned Standard baseline owns the target gateway/audio transport. The fork
 > voice-session README is rollback evidence only.
+
+The front-end wire shape is recorded in `bridge-contract.md`
+as a planned route-adapter contract. Story 2 currently provides only the
+internal `HomeBridge` seam; route discovery, identity proof, TLS deployment,
+browser bootstrap, and the public WebSocket adapter are not live merely because
+that contract is documented.
+
+## Endpoint contract decision
+
+Session-bearing endpoint migrations use the Home bridge first. A paired client
+does not become a direct Standard Hermes client during this wave: it reaches
+Home through the planned `/api/v1/bridge/ws` contract in `bridge-contract.md`,
+authenticates with its limited Device credential, and receives only opaque
+conversation/turn handles and safe capability state. Home alone opens Standard
+`/api/ws` and `/api/audio/speak-stream` with its server-held Hermes credential.
 
 # Home Bridge and Route Roaming
 
@@ -122,22 +137,6 @@ connectivity without quietly duplicating a turn whose delivery is uncertain.
   identity, clock, credential, and WebSocket ports without a live public
   network or Hermes endpoint.
 
-## Endpoint contract decision
-
-Session-bearing endpoint migrations use the Home bridge first. A paired client
-does not become a direct Standard Hermes client during this wave: it reaches
-Home through the versioned `/api/v1/bridge/ws` contract in
-`docs/contracts/v1/bridge.md`, authenticates with its limited Device
-credential, and receives only opaque conversation/turn handles and safe
-capability state. Home alone opens Standard `/api/ws` and
-`/api/audio/speak-stream` with its server-held Hermes credential.
-
-The route contract intentionally does not settle the cryptographic proof that
-two routes reach the same Household Identity, the discovery/refresh mechanism,
-or the final public TLS deployment. Those decisions cannot weaken the pinned
-endpoint path, credential boundary, no-mid-turn switch rule, or no-replay
-recovery rule.
-
 ## Non-goals
 
 - Choosing the final cryptographic or challenge-based same-Household identity
@@ -183,6 +182,9 @@ endpoint is ready again.
   Tailscale, and optional public routes are the same Household Server?
 - Where are Approved Routes configured and refreshed, and how does an endpoint
   learn them without treating a stale route list as authority?
+- Which production route-discovery, identity-proof, TLS, and deployment choices
+  will serve the planned bridge envelope and endpoint WebSocket path while
+  preserving the safe errors and browser credential boundary?
 - When a route changes during active response audio, should the endpoint drain
   local playback, stop immediately, or show a distinct interrupted state
   before reconnecting?

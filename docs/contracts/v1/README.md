@@ -4,12 +4,6 @@ The wire contract is versioned in the URL and every JSON document carries
 `schema: 1`. JSON is UTF-8 and requests must use `Content-Type:
 application/json`.
 
-Session-bearing endpoints use the companion
-[Home bridge WebSocket contract](bridge.md) at `/api/v1/bridge/ws`. The bridge
-uses the same `Authorization: Device <device-credential>` authentication
-boundary as the HTTP claim routes, while keeping the Hermes credential and
-runtime Profile/Session identities inside Home.
-
 ## Authentication
 
 Administrative routes use a dedicated Home-service admin bearer credential:

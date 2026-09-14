@@ -9,15 +9,17 @@ companions:
   - ../spec-standard-hermes-compatibility-migration/SPEC.md
   - ../spec-standard-hermes-compatibility-migration/standard-baseline.md
   - ../spec-standard-hermes-compatibility-migration/surface-migration-matrix.md
-  - ../../../docs/contracts/v1/bridge.md
-sources:
-  - ../../../docs/standard-bridge.md
 ---
 
 > **Canonical contract.** This SPEC and the files in `companions:` define the
 > Story 2 bridge seam that Home must build, test, and validate. The route-roaming
 > and Standard-migration companions retain ownership of the public Home route
 > and the pinned cross-surface rollout.
+
+The front-end coordination contract is documented in the route-roaming
+companion `../spec-home-bridge-route-roaming/bridge-contract.md`, but it
+describes a later route adapter;
+it is not a Story 2 implementation artifact or a live endpoint.
 
 # Story 2: Standard Hermes Bridge for Home
 
@@ -104,7 +106,7 @@ without exposing the Hermes credential or inventing fork-only behavior.
 
 - Implement the production Home endpoint adapter, route path, or roaming
   identity proof. The endpoint contract is pinned by the route-roaming
-  specification and `docs/contracts/v1/bridge.md`.
+  specification and `../spec-home-bridge-route-roaming/bridge-contract.md`.
 - Implement live Hermes deployment validation, physical hardware adapters,
   client integrations, production framework wiring, persistence, or pairing.
 - Add timing or latency authority that Standard Hermes does not explicitly
@@ -127,7 +129,7 @@ second assistant authority.
 
 - The existing Home authorization and `ConversationGrant` seam supplies
   endpoint authorization while the endpoint-facing v1 envelope is pinned by
-  the route-roaming specification and `docs/contracts/v1/bridge.md`.
+  the route-roaming specification and its `bridge-contract.md` companion.
 - The pinned Standard Hermes `0.21.1` baseline and migration artifacts are the
   accepted compatibility authority for this slice.
 - Unit-level deterministic fixtures are sufficient for Story 2; live Hermes

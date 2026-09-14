@@ -41,9 +41,10 @@ server, an executable Python 3.14 runtime, and admin-authenticated Prometheus
 metrics with provisionable Grafana dashboards. The framework-independent
 Standard Hermes bridge seam is now covered by deterministic JSON/PCM fixtures;
 its endpoint envelope and route binding remain intentionally open as specified
-in [`docs/standard-bridge.md`](docs/standard-bridge.md). Device credential
-provisioning, LAN binding policy, and hardware acoustic calibration remain
-follow-up work.
+in the route-roaming BMAD companion
+[`bridge-contract.md`](_bmad-output/specs/spec-home-bridge-route-roaming/bridge-contract.md).
+Device credential provisioning, LAN binding policy, and hardware acoustic
+calibration remain follow-up work.
 
 ## BMAD ownership
 
