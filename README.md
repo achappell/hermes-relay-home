@@ -38,8 +38,12 @@ The first service foundation slice is implemented. It includes validated,
 revisioned SQLite configuration storage, deterministic bounded wake arbitration,
 credential-bound contract translation, a loopback-by-default threaded HTTP
 server, an executable Python 3.14 runtime, and admin-authenticated Prometheus
-metrics with provisionable Grafana dashboards. Device credential provisioning,
-LAN binding policy, and hardware acoustic calibration remain follow-up work.
+metrics with provisionable Grafana dashboards. The framework-independent
+Standard Hermes bridge seam is now covered by deterministic JSON/PCM fixtures;
+its endpoint envelope and route binding remain intentionally open as specified
+in [`docs/standard-bridge.md`](docs/standard-bridge.md). Device credential
+provisioning, LAN binding policy, and hardware acoustic calibration remain
+follow-up work.
 
 ## BMAD ownership
 

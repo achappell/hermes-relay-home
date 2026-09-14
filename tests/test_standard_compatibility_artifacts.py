@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 SPEC_DIR = (
     Path(__file__).resolve().parents[1]
     / "_bmad-output"
@@ -22,7 +21,9 @@ def test_standard_baseline_pins_immutable_release_and_endpoint_split():
 
 def test_surface_matrix_covers_every_in_scope_surface_and_capability():
     matrix = (SPEC_DIR / "surface-migration-matrix.md").read_text()
-    header = next(line for line in matrix.splitlines() if line.startswith("| Surface |"))
+    header = next(
+        line for line in matrix.splitlines() if line.startswith("| Surface |")
+    )
 
     required_columns = (
         "JSON/session",

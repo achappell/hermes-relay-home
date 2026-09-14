@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 SPECS = ROOT / "_bmad-output" / "specs"
 ARCHITECTURE = (
@@ -20,7 +19,9 @@ def test_home_next_wave_contract_packages_are_present():
         SPECS / "spec-home-bridge-route-roaming" / "SPEC.md",
         SPECS / "spec-home-bridge-route-roaming" / "route-session-state.md",
         SPECS / "spec-household-diagnostics-incident-review" / "SPEC.md",
-        SPECS / "spec-household-diagnostics-incident-review" / "diagnostics-contract.md",
+        SPECS
+        / "spec-household-diagnostics-incident-review"
+        / "diagnostics-contract.md",
     )
 
     for artifact in expected:
