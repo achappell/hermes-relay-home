@@ -1,0 +1,9 @@
+schema_version: 1
+repository: hermes-relay-home
+planning: bmad
+surfaces:
+  - id: HOME
+    name: Hermes Home service
+status_tracker: _bmad-output/implementation-artifacts/sprint-status.yaml
+story_index: _bmad-output/implementation-artifacts/story-index.yaml
+coordination_authority: product-hub
