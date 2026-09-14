@@ -16,7 +16,7 @@ presentation.
 | Terminal interaction, Hermes session, local audio | TUI |
 | Wake detection, local capture, and grant handling | Claimant device/surface |
 | Display rendering and display-only state | Display surfaces |
-| Hermes model, speech, and voice-session protocol | Hermes relay |
+| Hermes model, speech, and supported session protocols | Hermes relay |
 | Operational metrics and dashboard definitions | Home service / observability artifacts |
 
 ## Runtime shape
