@@ -10,6 +10,7 @@ __pycache__/
 build/
 dist/
 data/
+.worktrees/
 
 # BMAD personal/runtime state
 _bmad/config.user.toml
