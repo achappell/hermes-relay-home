@@ -1262,7 +1262,9 @@ def _readiness_payload(status: object, *, route: BridgeRoute) -> dict[str, objec
             reason = "hermes_unavailable"
         result["reason"] = _normalize_code(reason, readiness=True)
     unresolved = raw.get("unresolved_turn")
-    if unresolved is not None:
+    if unresolved is None and status_value == "ready":
+        result["unresolved_turn"] = False
+    elif unresolved is not None:
         result["unresolved_turn"] = _safe_unresolved_turn(unresolved, handle)
     return result
 
@@ -1283,6 +1285,12 @@ def _safe_capabilities(value: object) -> dict[str, object]:
         if type(heartbeat) is not bool:
             raise _RequestError("protocol_error")
         result["heartbeat"] = heartbeat
+    for key in ("interrupt", "audio"):
+        capability = value.get(key)
+        if capability is not None:
+            if type(capability) is not bool:
+                raise _RequestError("protocol_error")
+            result[key] = capability
     timing = value.get("timing", "absent")
     if type(timing) is not str or not timing:
         raise _RequestError("protocol_error")

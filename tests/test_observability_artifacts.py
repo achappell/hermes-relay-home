@@ -90,3 +90,15 @@ def test_ops_alloy_artifact_scrapes_home_with_a_bearer_secret() -> None:
     assert "prometheus.remote_write.default.receiver" in artifact
     assert 'type             = "Bearer"' in artifact
     assert 'credentials_file = "/etc/alloy/secrets/hermes-home-admin-token"' in artifact
+
+
+def test_standard_pilot_ops_artifacts_keep_the_token_out_of_launchd() -> None:
+    deployment = Path(__file__).parents[1] / "deploy" / "ops"
+    wrapper = (deployment / "hermes-standard-home-pilot.sh").read_text()
+    plist = (deployment / "com.hermes.home-standard-pilot.plist").read_text()
+
+    assert "HERMES_DASHBOARD_SESSION_TOKEN" in wrapper
+    assert "standard-token" in wrapper
+    assert "--isolated" in wrapper
+    assert "standard-token" not in plist
+    assert "HERMES_HOME_STANDARD_PROFILE" in plist

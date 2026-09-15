@@ -70,6 +70,12 @@ class HomeApplication:
         else:
             self._set_revision(snapshot)
 
+    @property
+    def device_authenticator(self):
+        """Return the authenticator shared by HTTP and bridge callers."""
+
+        return self._authenticator
+
     def handle(
         self,
         method: str,

@@ -13,6 +13,14 @@ from hermes_home.bridge.endpoint import (
     RouteDescriptor,
     WebSocketConnection,
 )
+from hermes_home.bridge.production import (
+    ConversationGrantStore,
+    WebsocketsAudioSocket,
+    WebsocketsAudioSocketFactory,
+    WebsocketsJsonSocket,
+    WebsocketsJsonSocketFactory,
+    create_standard_bridge_factory,
+)
 from hermes_home.bridge.standard import (
     AudioFrame,
     AudioSocket,
@@ -56,6 +64,7 @@ __all__ = [
     "BridgeTransportError",
     "BridgeTurn",
     "ConversationGrant",
+    "ConversationGrantStore",
     "GatewayRPCError",
     "HomeBridge",
     "HomeBridgeEndpoint",
@@ -64,4 +73,9 @@ __all__ = [
     "RouteDescriptor",
     "StandardGatewayClient",
     "WebSocketConnection",
+    "WebsocketsAudioSocket",
+    "WebsocketsAudioSocketFactory",
+    "WebsocketsJsonSocket",
+    "WebsocketsJsonSocketFactory",
+    "create_standard_bridge_factory",
 ]

@@ -155,6 +155,95 @@ def test_load_settings_reads_the_sibling_bridge_listener_settings(tmp_path) -> N
     assert settings.bridge_route_id == "approved-local"
 
 
+def test_load_settings_reads_the_standard_backed_pilot_settings(tmp_path) -> None:
+    token_file = tmp_path / "admin-token"
+    standard_token_file = tmp_path / "standard-token"
+    grants_file = tmp_path / "conversation-grants.json"
+    token_file.write_text("admin-secret", encoding="utf-8")
+    standard_token_file.write_text("standard-secret\n", encoding="utf-8")
+    grants_file.write_text('{"schema":1,"grants":[]}', encoding="utf-8")
+
+    settings = load_settings(
+        {
+            "HERMES_HOME_ADMIN_TOKEN_FILE": str(token_file),
+            "HERMES_HOME_STANDARD_GATEWAY_URL": ("wss://media-server.example/api/ws"),
+            "HERMES_HOME_STANDARD_TOKEN_FILE": str(standard_token_file),
+            "HERMES_HOME_CONVERSATION_GRANTS_FILE": str(grants_file),
+        }
+    )
+
+    assert settings.standard_gateway_url == "wss://media-server.example/api/ws"
+    assert settings.standard_token_file == standard_token_file
+    assert settings.standard_token == "standard-secret"
+    assert settings.conversation_grants_file == grants_file
+    assert "standard-secret" not in repr(settings)
+
+
+def test_load_settings_rejects_partial_standard_backed_pilot_settings(tmp_path) -> None:
+    token_file = tmp_path / "admin-token"
+    token_file.write_text("admin-secret", encoding="utf-8")
+
+    with pytest.raises(RuntimeConfigurationError, match="Standard bridge settings"):
+        load_settings(
+            {
+                "HERMES_HOME_ADMIN_TOKEN_FILE": str(token_file),
+                "HERMES_HOME_STANDARD_GATEWAY_URL": (
+                    "wss://media-server.example/api/ws"
+                ),
+            }
+        )
+
+
+def test_create_runtime_auto_wires_the_standard_backed_pilot_factory(
+    tmp_path, monkeypatch
+) -> None:
+    token_file = tmp_path / "admin-token"
+    standard_token_file = tmp_path / "standard-token"
+    grants_file = tmp_path / "conversation-grants.json"
+    token_file.write_text("admin-secret", encoding="utf-8")
+    standard_token_file.write_text("standard-secret", encoding="utf-8")
+    grants_file.write_text('{"schema":1,"grants":[]}', encoding="utf-8")
+    settings = load_settings(
+        {
+            "HERMES_HOME_DATA_DIR": str(tmp_path / "data"),
+            "HERMES_HOME_ADMIN_TOKEN_FILE": str(token_file),
+            "HERMES_HOME_PORT": "0",
+            "HERMES_HOME_BRIDGE_PORT": "0",
+            "HERMES_HOME_STANDARD_GATEWAY_URL": ("wss://media-server.example/api/ws"),
+            "HERMES_HOME_STANDARD_TOKEN_FILE": str(standard_token_file),
+            "HERMES_HOME_CONVERSATION_GRANTS_FILE": str(grants_file),
+        }
+    )
+    captured = {}
+
+    def fake_standard_factory(**kwargs):
+        captured.update(kwargs)
+        return lambda: object()
+
+    class FakeBridgeServer:
+        def serve_forever(self) -> None:
+            return None
+
+        def shutdown(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "hermes_home.bridge.production.create_standard_bridge_factory",
+        fake_standard_factory,
+    )
+    runtime = create_runtime(
+        settings,
+        bridge_server_factory=lambda **kwargs: FakeBridgeServer(),
+    )
+    try:
+        assert captured["gateway_url"] == "wss://media-server.example/api/ws"
+        assert captured["hermes_token"] == "standard-secret"
+        assert captured["grants_file"] == grants_file
+        assert captured["device_authenticator"] is not None
+    finally:
+        runtime.close()
+
+
 def test_create_runtime_forwards_the_configured_bridge_route_and_listener(
     tmp_path,
 ) -> None:

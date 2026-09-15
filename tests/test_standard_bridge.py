@@ -305,6 +305,8 @@ def test_bridge_ready_keeps_hermes_credential_and_session_identity_server_side()
         "commands": ["status"],
         "heartbeat": True,
         "timing": "absent",
+        "interrupt": True,
+        "audio": False,
     }
     assert bridge.state == "ready"
     endpoint_payload = result.to_endpoint()
@@ -328,6 +330,49 @@ def test_bridge_ready_keeps_hermes_credential_and_session_identity_server_side()
             "params": {"source": "home", "profile": "family"},
         },
     ]
+
+
+def test_bridge_persists_the_durable_session_binding_after_open() -> None:
+    gateway_socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {"heartbeat": True}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {
+                    "session_id": "runtime-hermes-1",
+                    "stored_session_id": "durable-hermes-1",
+                },
+            },
+        ]
+    )
+    grant = ConversationGrant(
+        handle="opaque-conversation-1",
+        device_id="puck-kitchen",
+        profile_id="amanda",
+    )
+    persisted: list[tuple[ConversationGrant, str]] = []
+    bridge = HomeBridge(
+        gateway_url="wss://hermes.example/api/ws",
+        hermes_token="server-hermes-secret",
+        device_authenticator=StaticCredentialAuthenticator(
+            admin_token="admin-secret",
+            device_credentials={"device-secret": "puck-kitchen"},
+        ),
+        conversation_resolver=lambda handle, device_id: grant,
+        gateway_socket_factory=FakeSocketFactory(gateway_socket),
+        session_persistor=lambda current, session_id: persisted.append(
+            (current, session_id)
+        ),
+    )
+
+    result = bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle=grant.handle,
+    )
+
+    assert result.status == "ready"
+    assert persisted == [(grant, "durable-hermes-1")]
 
 
 def test_standard_gateway_keeps_concurrent_rpc_and_event_reads_ordered():
@@ -3219,6 +3264,8 @@ def test_bridge_discovers_commands_from_the_pinned_standard_catalog():
         "commands": ["status"],
         "heartbeat": True,
         "timing": "absent",
+        "interrupt": True,
+        "audio": False,
     }
     assert [frame["method"] for frame in gateway_socket.sent] == [
         "commands.catalog",
