@@ -26,6 +26,14 @@ Keep changes in a clean, focused branch or worktree, preserve unrelated local
 edits, and review staged paths before committing. Never commit credentials,
 tokens, `.env` files, or generated local state.
 
+## Worktrees
+
+All linked feature and agent worktrees for this repository belong under
+`.worktrees/<name>` inside the repository's main checkout. Keep `.worktrees/`
+ignored and do not create sibling `*-worktrees` directories or use a global
+tool-specific worktree location. BMAD loop-managed run worktrees under
+`.bmad-loop/runs/<run>/worktrees/` are engine-owned and remain there.
+
 ## Verification
 
 Use the supported Python 3.14 environment. Before handing off a change, run

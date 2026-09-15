@@ -99,13 +99,14 @@ without exposing the Hermes credential or inventing fork-only behavior.
   explicit rejection.
 - A response-audio sidecar may fail independently; readable text survives and
   the audio failure is typed and observable.
-- The final Home route envelope and roaming identity proof belong to the
-  route-roaming specification; this slice must not invent them.
+- The production Home route adapter and roaming identity proof belong to the
+  route-roaming specification; this slice must not implement them.
 
 ## Non-goals
 
-- Define the final versioned Home endpoint WebSocket or HTTP route envelope,
-  route path, or roaming identity proof.
+- Implement the production Home endpoint adapter, route path, or roaming
+  identity proof. The endpoint contract is pinned by the route-roaming
+  specification and `../spec-home-bridge-route-roaming/bridge-contract.md`.
 - Implement live Hermes deployment validation, physical hardware adapters,
   client integrations, production framework wiring, persistence, or pairing.
 - Add timing or latency authority that Standard Hermes does not explicitly
@@ -127,8 +128,8 @@ second assistant authority.
 ## Assumptions
 
 - The existing Home authorization and `ConversationGrant` seam supplies
-  endpoint authorization while the exact public endpoint envelope remains
-  deferred to route roaming.
+  endpoint authorization while the endpoint-facing v1 envelope is pinned by
+  the route-roaming specification and its `bridge-contract.md` companion.
 - The pinned Standard Hermes `0.21.1` baseline and migration artifacts are the
   accepted compatibility authority for this slice.
 - Unit-level deterministic fixtures are sufficient for Story 2; live Hermes
@@ -136,8 +137,8 @@ second assistant authority.
 
 ## Open Questions
 
-- What final Home route envelope and roaming identity proof will consume this
-  bridge seam?
+- Which production Home route adapter and roaming identity proof will consume
+  this bridge seam?
 - Which live Standard Hermes smoke test, if any, becomes a release gate after
   deterministic compatibility passes?
 - Should the bridge integrate with the existing `SessionProtocol` in the route

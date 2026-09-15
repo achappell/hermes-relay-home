@@ -30,6 +30,15 @@ internal `HomeBridge` seam; route discovery, identity proof, TLS deployment,
 browser bootstrap, and the public WebSocket adapter are not live merely because
 that contract is documented.
 
+## Endpoint contract decision
+
+Session-bearing endpoint migrations use the Home bridge first. A paired client
+does not become a direct Standard Hermes client during this wave: it reaches
+Home through the planned `/api/v1/bridge/ws` contract in `bridge-contract.md`,
+authenticates with its limited Device credential, and receives only opaque
+conversation/turn handles and safe capability state. Home alone opens Standard
+`/api/ws` and `/api/audio/speak-stream` with its server-held Hermes credential.
+
 # Home Bridge and Route Roaming
 
 ## Why
