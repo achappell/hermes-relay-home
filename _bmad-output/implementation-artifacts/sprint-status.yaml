@@ -1,9 +1,24 @@
 schema_version: 1
 generated: 2026-09-12
-last_updated: 2026-09-12
+last_updated: 2026-09-14
 project: hermes-relay-home
 tracking_system: file-system
 status_authority: local
 story_location: _bmad-output/implementation-artifacts
 development_status:
   spec-home-service-foundation: done
+  next-wave: in-progress
+  home-nw-01-standard-compatibility-boundary: ready-for-dev
+  home-nw-02-pairing-limited-credentials: in-progress
+  home-nw-03-approved-local-bridge-route: ready-for-dev
+  home-nw-04-route-roaming-identity-proof: backlog
+  home-nw-05-profile-mappings-conversation-claims: backlog
+  home-nw-06-diagnostics-incident-review: ready-for-dev
+  home-nw-07-typed-choice-authority: backlog
+  home-nw-08-watch-safe-preview: backlog
+  home-nw-09-device-health-check: backlog
+  home-nw-10-device-permissions-sensitive-entry: backlog
+  home-nw-11-endpoint-notifications-quiet-hours: backlog
+  home-nw-12-shared-artifacts-propose-diff-apply: backlog
+  home-nw-13-custom-wake-phrases: backlog
+  home-nw-14-arbitrary-attachment-transport: backlog

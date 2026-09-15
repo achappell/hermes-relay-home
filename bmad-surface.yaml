@@ -7,3 +7,18 @@ surfaces:
 status_tracker: _bmad-output/implementation-artifacts/sprint-status.yaml
 story_index: _bmad-output/implementation-artifacts/story-index.yaml
 coordination_authority: product-hub
+story_aliases:
+  home-nw-01-standard-compatibility-boundary: HOME-NW-01
+  home-nw-02-pairing-limited-credentials: HOME-NW-02
+  home-nw-03-approved-local-bridge-route: HOME-NW-03
+  home-nw-04-route-roaming-identity-proof: HOME-NW-04
+  home-nw-05-profile-mappings-conversation-claims: HOME-NW-05
+  home-nw-06-diagnostics-incident-review: HOME-NW-06
+  home-nw-07-typed-choice-authority: HOME-NW-07
+  home-nw-08-watch-safe-preview: HOME-NW-08
+  home-nw-09-device-health-check: HOME-NW-09
+  home-nw-10-device-permissions-sensitive-entry: HOME-NW-10
+  home-nw-11-endpoint-notifications-quiet-hours: HOME-NW-11
+  home-nw-12-shared-artifacts-propose-diff-apply: HOME-NW-12
+  home-nw-13-custom-wake-phrases: HOME-NW-13
+  home-nw-14-arbitrary-attachment-transport: HOME-NW-14

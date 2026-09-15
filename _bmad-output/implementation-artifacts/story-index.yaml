@@ -7,3 +7,87 @@ stories:
     kind: local-foundation
     spec: _bmad-output/specs/spec-home-service-foundation/SPEC.md
     validation: tests
+  - id: HOME-NW-01
+    title: Pin and prove the Standard Hermes compatibility boundary
+    kind: next-wave
+    spec: _bmad-output/specs/spec-standard-hermes-compatibility-migration/SPEC.md
+    github_issue: https://github.com/achappell/hermes-relay-home/issues/11
+    horizon: now
+  - id: HOME-NW-02
+    title: Pair endpoints with QR enrollment and limited credentials
+    kind: next-wave
+    spec: _bmad-output/implementation-artifacts/spec-home-nw-02-pairing-credentials.md
+    github_issue: https://github.com/achappell/hermes-relay-home/issues/12
+    horizon: now
+  - id: HOME-NW-03
+    title: Serve the versioned Home bridge over one approved local route
+    kind: next-wave
+    spec: _bmad-output/specs/spec-home-bridge-route-roaming/SPEC.md
+    github_issue: https://github.com/achappell/hermes-relay-home/issues/13
+    horizon: now
+  - id: HOME-NW-04
+    title: Add approved-route roaming and same-household identity proof
+    kind: next-wave
+    spec: _bmad-output/specs/spec-home-bridge-route-roaming/SPEC.md
+    github_issue: https://github.com/achappell/hermes-relay-home/issues/14
+    horizon: next
+  - id: HOME-NW-05
+    title: Add household Profile mappings and conversation claims
+    kind: next-wave
+    spec: _bmad-output/specs/spec-profile-mapping-conversation-claims/SPEC.md
+    github_issue: https://github.com/achappell/hermes-relay-home/issues/15
+    horizon: next
+  - id: HOME-NW-06
+    title: Add content-safe diagnostics and incident review
+    kind: next-wave
+    spec: _bmad-output/specs/spec-household-diagnostics-incident-review/SPEC.md
+    github_issue: https://github.com/achappell/hermes-relay-home/issues/16
+    horizon: now
+  - id: HOME-NW-07
+    title: Add freshness-bound typed-choice authority
+    kind: next-wave
+    spec: _bmad-output/implementation-artifacts/spec-next-wave-planned.md
+    github_issue: https://github.com/achappell/hermes-relay-home/issues/17
+    horizon: next
+  - id: HOME-NW-08
+    title: Provide one read-only Watch Safe Preview
+    kind: next-wave
+    spec: _bmad-output/implementation-artifacts/spec-next-wave-planned.md
+    github_issue: https://github.com/achappell/hermes-relay-home/issues/18
+    horizon: later
+  - id: HOME-NW-09
+    title: Add a bounded single-device health check
+    kind: next-wave
+    spec: _bmad-output/implementation-artifacts/spec-next-wave-planned.md
+    github_issue: https://github.com/achappell/hermes-relay-home/issues/19
+    horizon: later
+  - id: HOME-NW-10
+    title: Enforce per-device permissions and masked Sensitive Entry
+    kind: next-wave
+    spec: _bmad-output/implementation-artifacts/spec-next-wave-planned.md
+    github_issue: https://github.com/achappell/hermes-relay-home/issues/20
+    horizon: later
+  - id: HOME-NW-11
+    title: Add endpoint-scoped notifications and quiet hours
+    kind: next-wave
+    spec: _bmad-output/implementation-artifacts/spec-next-wave-planned.md
+    github_issue: https://github.com/achappell/hermes-relay-home/issues/21
+    horizon: later
+  - id: HOME-NW-12
+    title: Add shared artifacts as propose, diff, and Apply
+    kind: next-wave
+    spec: _bmad-output/implementation-artifacts/spec-next-wave-planned.md
+    github_issue: https://github.com/achappell/hermes-relay-home/issues/22
+    horizon: later
+  - id: HOME-NW-13
+    title: Add custom wake phrases after built-in mappings
+    kind: next-wave
+    spec: _bmad-output/implementation-artifacts/spec-next-wave-planned.md
+    github_issue: https://github.com/achappell/hermes-relay-home/issues/23
+    horizon: later
+  - id: HOME-NW-14
+    title: Define a separate arbitrary-attachment transport
+    kind: next-wave
+    spec: _bmad-output/implementation-artifacts/spec-next-wave-planned.md
+    github_issue: https://github.com/achappell/hermes-relay-home/issues/24
+    horizon: later
