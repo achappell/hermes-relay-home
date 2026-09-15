@@ -13,7 +13,8 @@ param(
     [int] $Port = 8780,
     [string] $TaskName = 'Hermes Home',
     [string] $UvPath = '',
-    [string] $DeviceCredentialsFile = ''
+    [string] $DeviceCredentialsFile = '',
+    [string] $CredentialRootSecretFile = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -220,6 +221,10 @@ $runnerSource = Join-Path $PSScriptRoot 'run.ps1'
 $runnerPath = Join-Path $root 'run.ps1'
 $venvPython = Join-Path $venvRoot 'Scripts\python.exe'
 
+if ($DeviceCredentialsFile -and $CredentialRootSecretFile) {
+    throw 'DeviceCredentialsFile and CredentialRootSecretFile cannot be configured together'
+}
+
 if (-not (Test-Path -LiteralPath $runnerSource -PathType Leaf)) {
     throw "The deployment bundle is missing run.ps1 beside install.ps1"
 }
@@ -246,7 +251,7 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw 'uv could not create the Hermes Home virtual environment'
     }
-    & $uv pip install --python $venvPython --no-deps --force-reinstall $WheelPath
+    & $uv pip install --python $venvPython --force-reinstall $WheelPath
     if ($LASTEXITCODE -ne 0) {
         throw 'uv could not install the Hermes Home wheel'
     }
@@ -256,6 +261,22 @@ try {
     [Environment]::SetEnvironmentVariable('HERMES_HOME_BIND_HOST', $BindHost, 'Machine')
     [Environment]::SetEnvironmentVariable('HERMES_HOME_PORT', [string] $Port, 'Machine')
     [Environment]::SetEnvironmentVariable('HERMES_HOME_ADMIN_TOKEN_FILE', $tokenPath, 'Machine')
+    if ($CredentialRootSecretFile) {
+        if (-not (Test-Path -LiteralPath $CredentialRootSecretFile -PathType Leaf)) {
+            throw "Credential root secret file was not found: $CredentialRootSecretFile"
+        }
+        $credentialRootPath = (Resolve-Path -LiteralPath $CredentialRootSecretFile).Path
+        $credentialRoot = (Get-Content -LiteralPath $credentialRootPath -Raw).Trim()
+        if ($credentialRoot -notmatch '^[0-9a-fA-F]{64}$') {
+            throw 'Credential root secret must contain exactly 64 hexadecimal characters'
+        }
+        Set-SecretFileAcl -Path $credentialRootPath
+        [Environment]::SetEnvironmentVariable('HERMES_HOME_CREDENTIAL_ROOT_SECRET_FILE', $credentialRootPath, 'Machine')
+        [Environment]::SetEnvironmentVariable('HERMES_HOME_DEVICE_CREDENTIALS_FILE', $null, 'Machine')
+    }
+    else {
+        [Environment]::SetEnvironmentVariable('HERMES_HOME_CREDENTIAL_ROOT_SECRET_FILE', $null, 'Machine')
+    }
     if ($DeviceCredentialsFile) {
         if (-not (Test-Path -LiteralPath $DeviceCredentialsFile -PathType Leaf)) {
             throw "Device credentials file was not found: $DeviceCredentialsFile"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from math import isfinite
 from threading import RLock
@@ -85,11 +85,15 @@ class ArbitrationEngine:
         claim: Mapping[str, object],
         *,
         authenticated_device_id: str | None,
+        authorized_rooms: Iterable[str] | None = None,
+        authorized_wake_claim: bool | None = None,
     ) -> ClaimSubmission:
         with self._lock:
             return self._submit(
                 claim,
                 authenticated_device_id=authenticated_device_id,
+                authorized_rooms=authorized_rooms,
+                authorized_wake_claim=authorized_wake_claim,
             )
 
     def _submit(
@@ -97,6 +101,8 @@ class ArbitrationEngine:
         claim: Mapping[str, object],
         *,
         authenticated_device_id: str | None,
+        authorized_rooms: Iterable[str] | None,
+        authorized_wake_claim: bool | None,
     ) -> ClaimSubmission:
         """Admit one claim, or return a fail-closed denial reason."""
         claim_id = _claim_id(claim)
@@ -134,6 +140,8 @@ class ArbitrationEngine:
                     )
                     | self._accepted_claim_ids
                 ),
+                authorized_rooms=authorized_rooms,
+                authorized_wake_claim=authorized_wake_claim,
             )
         except ClaimValidationError as error:
             return ClaimSubmission(
@@ -211,6 +219,8 @@ def _validate_claim(
     authenticated_device_id: str | None,
     configuration: Mapping[str, object],
     existing_claim_ids: set[str],
+    authorized_rooms: Iterable[str] | None,
+    authorized_wake_claim: bool | None,
 ) -> _EligibleClaim:
     if not isinstance(claim, Mapping):
         raise ClaimValidationError("invalid_request")
@@ -256,6 +266,12 @@ def _validate_claim(
         raise ClaimValidationError("not_found")
     if not device["capabilities"]["wake_claim"]:
         raise ClaimValidationError("claim_denied")
+    if authorized_wake_claim is not None and (
+        not authorized_wake_claim
+        or authorized_rooms is None
+        or device["room_id"] not in authorized_rooms
+    ):
+        raise ClaimValidationError("forbidden")
 
     value = acoustic_evidence.get("value")
     if type(value) not in (int, float) or isinstance(value, bool):

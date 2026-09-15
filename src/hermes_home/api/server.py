@@ -5,7 +5,11 @@ from __future__ import annotations
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from hermes_home.api.application import HomeApplication
+from hermes_home.api.application import (
+    MAX_REQUEST_BODY_BYTES,
+    HomeApplication,
+    HTTPResponse,
+)
 
 
 class _HomeRequestHandler(BaseHTTPRequestHandler):
@@ -21,10 +25,24 @@ class _HomeRequestHandler(BaseHTTPRequestHandler):
         self._dispatch("POST")
 
     def _dispatch(self, method: str) -> None:
-        content_length = int(self.headers.get("Content-Length", "0"))
-        body = self.rfile.read(content_length)
         path = self.path.split("?", 1)[0]
-        response = self.application.handle(method, path, self.headers, body)
+        content_length_header = self.headers.get("Content-Length", "0")
+        try:
+            content_length = int(content_length_header)
+        except TypeError, ValueError:
+            content_length = -1
+        if content_length < 0 or content_length > MAX_REQUEST_BODY_BYTES:
+            self.close_connection = True
+            response = HTTPResponse(
+                400,
+                {"schema": 1, "error": {"code": "invalid_request"}},
+            )
+        else:
+            body = self.rfile.read(content_length)
+            response = self.application.handle(method, path, self.headers, body)
+        self._write_response(response)
+
+    def _write_response(self, response: HTTPResponse) -> None:
         if isinstance(response.body, str):
             payload = response.body.encode("utf-8")
         else:
