@@ -10,7 +10,6 @@ followup_review_recommended: true
 warnings: [oversized]
 deferred:
   - Active-session revocation observation requires a credential/session lifecycle hook outside NW-03.
-  - Windows installer/environment wiring for the sibling bridge listener remains deployment follow-up.
 context:
   - '{project-root}/AGENTS.md'
   - '{project-root}/_bmad-output/specs/spec-home-bridge-route-roaming/SPEC.md'
@@ -372,8 +371,12 @@ route can be tested without a live Hermes endpoint.
   sdist/wheel build. The live listener smoke uses an injected fake bridge; no
   live Hermes or physical-device claim is made.
 - Deferred risk: active-session revocation observation needs a credential/
-  session lifecycle hook outside NW-03, and Windows installer wiring for the
-  sibling listener remains deployment follow-up.
+  session lifecycle hook outside NW-03.
+- Deployment follow-up: the Windows installer now persists the sibling bridge
+  listener's bind host, port, and route ID as machine environment settings;
+  remote install and tailnet-path smoke evidence is recorded in the validation
+  artifact. This wires deployment without claiming a live Hermes bridge, since
+  the console entry point still requires an injected bridge factory.
 - Follow-up review: recommended once a real HomeBridge/Hermes integration
   fixture or environment is available; the current adapter-boundary evidence
   is complete and the route never retries uncertain input.
