@@ -47,7 +47,7 @@ Profile ID.
 | Liveness | Advertised heartbeat and `gateway.ping` | Ping exercises the Standard operation but does not create timing or playback authority. |
 | Interrupt | `session.interrupt` | An accepted request or acknowledgement is not completion; wait for the matching interrupted or cancelled terminal state. |
 | Structured prompts | Correlated approval, clarify, secret, and sudo request events | Preserve prompt type, sensitivity, options, and correlation; map only a validated response to its matching `approval.respond`, `clarify.respond`, `secret.respond`, or `sudo.respond` operation. |
-| Commands | Advertised `command.dispatch` | Dispatch only an advertised command; preserve command identity and correlation; report unavailable or rejected outcomes explicitly. |
+| Commands | `commands.catalog` returns Standard `pairs`; `command.dispatch` executes an advertised entry | Normalize only the catalog-advertised command names for Home callers; dispatch only an advertised command; preserve command identity and correlation; report unavailable or rejected outcomes explicitly. |
 
 ## State and recovery
 
@@ -71,7 +71,7 @@ Profile or a second Hermes Session.
 | Fixture | Acceptance evidence |
 | --- | --- |
 | Valid device credential and opaque handle | Home reaches `ready`; gateway URL receives the server-held token only in Home-owned setup; endpoint-safe output contains no token, Profile ID, or runtime Session ID. |
-| `gateway.ready` with commands and heartbeat | Status advertises the commands and heartbeat and reports timing as explicitly absent. |
+| `gateway.ready` with heartbeat, followed by `commands.catalog` pairs | Status advertises only the catalog-provided commands and heartbeat and reports timing as explicitly absent; a ready payload command list is not accepted as Standard evidence. |
 | New grant with no durable Session | `session.create` is sent with Home source and the grant Profile; the runtime Session is retained internally. |
 | Grant with durable Session | `session.resume` is sent with the granted Session ID; no new Session is created. |
 | Ordered text stream | RPC response and gateway events remain ordered under concurrent demand; unrelated or identity-less session events cannot complete the active turn. |
@@ -102,7 +102,7 @@ The bridge contract is verified with injected JSON and audio socket ports and
 deterministic fixtures. The focused and full Home checks use:
 
 ```sh
-uv run --no-cache --no-project --python 3.14 --with pytest --with cryptography --with 'websockets>=17,<18' -- python -m pytest -q
+PYTHONPATH="$PWD/src" uv run --isolated --no-cache --no-project --python 3.14 --with pytest --with cryptography --with 'websockets>=17,<18' -- python -m pytest -q
 ```
 
 Live Hermes, physical hardware, and route-roaming/browser deployment are

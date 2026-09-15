@@ -850,6 +850,7 @@ class HomeBridge:
         )
         try:
             ready_payload = gateway.connect()
+            advertised_commands = self._discover_commands(gateway)
             operation = "session.resume" if grant.session_id else "session.create"
             params: dict[str, object] = {
                 "source": "home",
@@ -904,11 +905,7 @@ class HomeBridge:
             self._device_id = device_id
             self._runtime_session_id = runtime_session_id
             self._resume_session_id = durable_session_id or grant.session_id
-            self._advertised_commands = frozenset(
-                command
-                for command in _capabilities(ready_payload)["commands"]
-                if isinstance(command, str)
-            )
+            self._advertised_commands = frozenset(advertised_commands)
             self._audio_socket = None
             self._audio_owner = None
             self._audio_started = False
@@ -923,7 +920,7 @@ class HomeBridge:
         return BridgeStatus(
             "ready",
             conversation_handle,
-            capabilities=_capabilities(ready_payload),
+            capabilities=_capabilities(ready_payload, commands=advertised_commands),
         )
 
     def _open_failure(self, conversation_handle: str, reason: str) -> BridgeStatus:
@@ -1007,6 +1004,7 @@ class HomeBridge:
         )
         try:
             ready_payload = gateway.connect()
+            advertised_commands = self._discover_commands(gateway)
             session = gateway.request(
                 "session.resume",
                 {
@@ -1044,17 +1042,13 @@ class HomeBridge:
             self._resume_session_id = (
                 str(durable_session_id) if durable_session_id else resume_session_id
             )
-            self._advertised_commands = frozenset(
-                command
-                for command in _capabilities(ready_payload)["commands"]
-                if isinstance(command, str)
-            )
+            self._advertised_commands = frozenset(advertised_commands)
             self._state = "ready"
             unresolved_turn = self._unresolved_turn
         return BridgeStatus(
             "ready",
             handle,
-            capabilities=_capabilities(ready_payload),
+            capabilities=_capabilities(ready_payload, commands=advertised_commands),
             unresolved_turn=unresolved_turn,
         )
 
@@ -1069,6 +1063,16 @@ class HomeBridge:
             reason,
             unresolved_turn=unresolved_turn,
         )
+
+    @staticmethod
+    def _discover_commands(gateway: StandardGatewayClient) -> list[str]:
+        """Read the pinned Standard command catalog without guessing commands."""
+
+        try:
+            catalog = gateway.request("commands.catalog", {})
+            return _catalog_commands(catalog)
+        except BridgeProtocolError, BridgeTimeoutError, GatewayRPCError:
+            return []
 
     def _revalidate_ready_binding(self) -> tuple[StandardGatewayClient, str]:
         """Recheck the Home claim before an operation uses a ready transport."""
@@ -2300,19 +2304,13 @@ def _durable_session_id(payload: Mapping[str, object]) -> str | None:
     return values[0] if values else None
 
 
-def _capabilities(payload: Mapping[str, object]) -> dict[str, object]:
+def _capabilities(
+    payload: Mapping[str, object], *, commands: list[str] | None = None
+) -> dict[str, object]:
     capabilities = payload.get("capabilities")
     source = capabilities if isinstance(capabilities, Mapping) else payload
-    commands = source.get("commands")
-    if not isinstance(commands, list):
-        commands = payload.get("commands")
-    advertised_commands = (
-        [command for command in commands if isinstance(command, str) and command]
-        if isinstance(commands, list)
-        else []
-    )
     result: dict[str, object] = {
-        "commands": advertised_commands,
+        "commands": list(commands) if commands is not None else [],
         "timing": "absent",
     }
     heartbeat = source.get("heartbeat")
@@ -2321,6 +2319,40 @@ def _capabilities(payload: Mapping[str, object]) -> dict[str, object]:
     if isinstance(heartbeat, bool):
         result["heartbeat"] = heartbeat
     return result
+
+
+def _catalog_commands(payload: Mapping[str, object]) -> list[str]:
+    """Normalize the pinned ``commands.catalog`` pairs for Home callers."""
+
+    pairs = payload.get("pairs")
+    if pairs is None:
+        return []
+    if not isinstance(pairs, list):
+        raise BridgeProtocolError("standard command catalog pairs are not a list")
+
+    commands: list[str] = []
+    for pair in pairs:
+        if not isinstance(pair, list) or len(pair) != 2:
+            raise BridgeProtocolError(
+                "standard command catalog entry is not a name/description pair"
+            )
+        name, description = pair
+        if not isinstance(name, str) or not name.startswith("/"):
+            raise BridgeProtocolError(
+                "standard command catalog name must start with a slash"
+            )
+        if not isinstance(description, str):
+            raise BridgeProtocolError(
+                "standard command catalog description is not a string"
+            )
+        command = name[1:]
+        if not command or command != command.strip():
+            raise BridgeProtocolError(
+                "standard command catalog name must be a non-empty command"
+            )
+        if command not in commands:
+            commands.append(command)
+    return commands
 
 
 def _audio_text_fragment(
