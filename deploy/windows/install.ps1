@@ -11,6 +11,10 @@ param(
     [string] $BindHost = '127.0.0.1',
     [ValidateRange(1, 65535)]
     [int] $Port = 8780,
+    [string] $BridgeBindHost = '127.0.0.1',
+    [ValidateRange(1, 65535)]
+    [int] $BridgePort = 8766,
+    [string] $BridgeRouteId = 'local',
     [string] $TaskName = 'Hermes Home',
     [string] $UvPath = '',
     [string] $DeviceCredentialsFile = '',
@@ -224,6 +228,15 @@ $venvPython = Join-Path $venvRoot 'Scripts\python.exe'
 if ($DeviceCredentialsFile -and $CredentialRootSecretFile) {
     throw 'DeviceCredentialsFile and CredentialRootSecretFile cannot be configured together'
 }
+if ([string]::IsNullOrWhiteSpace($BridgeBindHost)) {
+    throw 'BridgeBindHost must not be blank'
+}
+if ([string]::IsNullOrWhiteSpace($BridgeRouteId)) {
+    throw 'BridgeRouteId must not be blank'
+}
+if ($BridgeRouteId -match '[\r\n]') {
+    throw 'BridgeRouteId must not contain line breaks'
+}
 
 if (-not (Test-Path -LiteralPath $runnerSource -PathType Leaf)) {
     throw "The deployment bundle is missing run.ps1 beside install.ps1"
@@ -260,6 +273,9 @@ try {
     [Environment]::SetEnvironmentVariable('HERMES_HOME_DATA_DIR', $root, 'Machine')
     [Environment]::SetEnvironmentVariable('HERMES_HOME_BIND_HOST', $BindHost, 'Machine')
     [Environment]::SetEnvironmentVariable('HERMES_HOME_PORT', [string] $Port, 'Machine')
+    [Environment]::SetEnvironmentVariable('HERMES_HOME_BRIDGE_BIND_HOST', $BridgeBindHost, 'Machine')
+    [Environment]::SetEnvironmentVariable('HERMES_HOME_BRIDGE_PORT', [string] $BridgePort, 'Machine')
+    [Environment]::SetEnvironmentVariable('HERMES_HOME_BRIDGE_ROUTE_ID', $BridgeRouteId.Trim(), 'Machine')
     [Environment]::SetEnvironmentVariable('HERMES_HOME_ADMIN_TOKEN_FILE', $tokenPath, 'Machine')
     if ($CredentialRootSecretFile) {
         if (-not (Test-Path -LiteralPath $CredentialRootSecretFile -PathType Leaf)) {
@@ -296,6 +312,8 @@ try {
     Write-Output "Hermes Home installed under $root"
     Write-Output "Prometheus configuration backup: $backup"
     Write-Output "Scheduled task: $TaskName"
+    Write-Output "Bridge listener: $BridgeBindHost`:$BridgePort"
+    Write-Output "Bridge route ID: $($BridgeRouteId.Trim())"
 }
 catch {
     if ($taskWasRunning) {

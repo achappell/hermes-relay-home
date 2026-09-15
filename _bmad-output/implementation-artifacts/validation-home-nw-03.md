@@ -37,3 +37,30 @@ transport contract now document that exact environment.
   known/uncertain outcomes and do not retry uncertain input.
 - Route-roaming, Household Identity proof, browser tickets, live Hermes
   integration, and physical hardware remain outside this story's evidence.
+
+## Deployment follow-up evidence
+
+Validated 2026-09-15 from the deployment-wiring worktree. The Windows
+installer was parsed by PowerShell and run on CaticornQueen with:
+
+```powershell
+.\install.ps1 -WheelPath .\hermes_relay_home-0.1.0-py3-none-any.whl `
+  -BridgeBindHost 127.0.0.1 -BridgePort 8766 `
+  -BridgeRouteId caticornqueen-tailnet
+```
+
+Observed results:
+
+- The installed wheel matched SHA-256
+  `1ea94ff95ac1ac956a9966f8202019a0fe6436e441c3bbdc124048f68480d2fc`.
+- The `Hermes Home` scheduled task was running with listeners on
+  `127.0.0.1:8780` and `127.0.0.1:8766`.
+- Machine environment values were `127.0.0.1`, `8766`, and
+  `caticornqueen-tailnet` for the bridge bind host, port, and route ID.
+- The authenticated Prometheus `hermes-home` target reported `up = 1`.
+- Tailscale Serve preserved `/` and proxied the versioned bridge path to
+  `http://127.0.0.1:8766/api/v1/bridge/ws`.
+- An external `wss` upgrade reached Home and returned the safe
+  `hermes_unavailable` result for `conversation.open`; this proves deployment
+  and transport reachability, not a ready Hermes turn. The console runtime has
+  no injected bridge factory yet.
