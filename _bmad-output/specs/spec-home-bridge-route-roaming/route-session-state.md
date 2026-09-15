@@ -12,6 +12,12 @@ claim that the public WebSocket adapter is currently served. The live Story 2
 implementation is the internal `HomeBridge` seam and its separate Standard
 gateway/audio sockets.
 
+The planned front-end wire shape is recorded in
+`bridge-contract.md`; it is coordination material, not a
+claim that the public WebSocket adapter is currently served. The live Story 2
+implementation is the internal `HomeBridge` seam and its separate Standard
+gateway/audio sockets.
+
 ## Records
 
 | Record | Required meaning |
@@ -93,6 +99,12 @@ The v1 endpoint shape is the JSON-RPC and audio framing in
 `bridge-contract.md`. It uses `/api/v1/bridge/ws`, authenticates with
 the `Authorization: Device` header, keeps opaque conversation/turn handles at
 the endpoint, and never exposes the runtime Profile or Hermes Session IDs.
+
+When the planned endpoint adapter is implemented, its JSON audio notifications
+use `method: "audio.frame"` with the original sidecar `kind` values (`start`,
+`end`, `fallback`, and `unavailable`) and carry raw PCM as binary frames between
+the start and terminal notifications. It must not turn those Standard frame
+kinds into new `audio.start`, `audio.end`, or `audio.fallback` Hermes methods.
 
 When the planned endpoint adapter is implemented, its JSON audio notifications
 use `method: "audio.frame"` with the original sidecar `kind` values (`start`,

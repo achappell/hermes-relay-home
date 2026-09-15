@@ -1,7 +1,7 @@
 ---
 id: HOME-NW-02
 title: Pair endpoints with QR enrollment and limited credentials
-status: in-progress
+status: done
 route: dispatch
 baseline_commit: 0519bb7f30aba5f5042b0459b285a4444c7c0f8e
 context:
@@ -55,7 +55,9 @@ existing application and runtime seams:
   file is configured. If neither source is configured, endpoint authentication
   and pairing are disabled. The modes never fall back to one another;
   configuring both sources is a startup error so revocation cannot be bypassed
-  by a static credential.
+  by a static credential. Normal authentication reads durable state without a
+  write transaction; it persists expiry cleanup only when stale records are
+  observed.
 - `api/application.py` exposes the exact Home-owned v1 control plane below.
   Admin actions use the existing Home bearer token; endpoint self-actions use
   `Device` auth bound to the path's `device_id`. Credentials appear only in
@@ -79,8 +81,9 @@ replacement permits the old credential for at most 600 seconds solely to
 retry a lost response. The same request ID returns the same replacement for
 that generation; a different request ID cannot mint another replacement.
 Explicit revocation invalidates both generations and retry material
-immediately. Re-enrollment creates a new credential generation and invalidates
-the prior one.
+immediately. Re-enrollment creates a new credential generation, invalidates
+the prior one, and emits the redacted revocation event after the durable
+transition commits.
 
 ### v1 control-plane routes
 
@@ -162,27 +165,28 @@ immediately.
 
 ## Tasks & Acceptance
 
-- [ ] Add pure lifecycle types and transitions for offer, request, approval,
+- [x] Add pure lifecycle types and transitions for offer, request, approval,
   consumption, expiry, re-enrollment, rotation, replacement, and revocation,
   including confirmation-code and secure-storage semantics.
-- [ ] Add SQLite persistence with schema migration, atomic transitions, keyed
+- [x] Add SQLite persistence with schema migration, atomic transitions, keyed
   digests, encrypted short-lived retry material, and restart recovery.
-- [ ] Add durable `Device` authentication with scope and constant-time
+- [x] Add durable `Device` authentication with scope and constant-time
   comparison; enforce mutually exclusive paired and legacy modes so revoked
   credentials cannot reach a static fallback.
-- [ ] Add the exact admin/endpoint control-plane handlers and stable error
+- [x] Add the exact admin/endpoint control-plane handlers and stable error
   mappings listed above, without changing the legacy configuration contract.
-- [ ] Enforce `wake_claim` capability and approved-room scope before the
+- [x] Enforce `wake_claim` capability and approved-room scope before the
   arbitration engine admits a durable-credential claim.
-- [ ] Add a redacted `RevocationObserver`/event port, committing revocation
+- [x] Add a redacted `RevocationObserver`/event port, committing revocation
   before best-effort active-work notification.
-- [ ] Wire settings and secret loading; keep credentials out of repr, logs,
+- [x] Wire settings and secret loading; keep credentials out of repr, logs,
   errors, metrics, and serialized snapshots; reject invalid root-secret files.
-- [ ] Cover single-use codes, approval boundaries, idempotent rotation,
+- [x] Cover single-use codes, approval boundaries, idempotent rotation,
   overlap expiry, re-enrollment, secure-storage rejection, scope enforcement,
   revocation observers, restart recovery, and HTTP error behavior with focused
   tests.
-- [ ] Run focused tests, `ruff check src tests`, and `ruff format --check src tests`; record results in
+- [x] Run focused tests, `ruff check src tests`, and
+  `ruff format --check src tests`; record results in
   `_bmad-output/implementation-artifacts/validation-home-nw-02.md`.
 
 Acceptance requires that an unapproved scan cannot grant access; only a
@@ -196,7 +200,26 @@ checks pass without changing NW-03 or sibling repositories.
 
 ## Implementation Notes
 
-Pending implementation.
+Implemented the Home-owned pairing boundary in the domain, SQLite, auth, HTTP,
+and runtime layers. Pairing uses a five-minute keyed enrollment code and
+trusted-admin approval; credentials are opaque, scoped to `wake_claim`, and
+stored only as keyed digests. Rotation retry material is AES-256-GCM encrypted
+and short-lived; the old credential is accepted only for the matching renewal
+retry, not for new wake claims. Paired and legacy authentication modes are
+explicit and mutually exclusive.
+
+The configuration store remains the authority for current Rooms and Devices;
+this story does not create or modify a configuration Device record during
+consumption. Profile mappings remain display-only as specified for NW-05.
+
+## Verification
+
+- `uv run --no-cache --no-project --python 3.14 --with pytest --with cryptography -- python -m pytest -q tests/test_credentials.py tests/test_credentials_api.py tests/test_runtime.py` — 46 passed.
+- `uv run --no-cache --no-project --python 3.14 --with pytest --with cryptography -- python -m pytest -q` — 172 passed.
+- `uv run --no-cache --no-project --python 3.14 --with ruff --with cryptography -- ruff check src tests` — all checks passed.
+- `uv run --no-cache --no-project --python 3.14 --with ruff --with cryptography -- ruff format --check src tests` — 34 files already formatted.
+- `uv lock --check` — resolved 10 packages.
+- `git diff --check` — passed.
 
 ## Open Questions
 
@@ -215,7 +238,74 @@ bridge route and envelope.
   display-only Profile mapping data.
 - 2026-09-14 — Owner approved the implementation scope; status moved to
   `ready-for-dev`.
+- 2026-09-14 — Implemented the approved lifecycle, persistence, control-plane,
+  scope, and runtime changes; verification is green and the story is in review.
+- 2026-09-14 — Completed the independent review, applied patch findings, and
+  marked the story done; future-slice findings are recorded in the triage log.
+- 2026-09-14 — Closed the follow-up review gaps for re-enrollment observer
+  delivery, malformed state, read-only authentication, explicit null reasons,
+  and verification-count drift.
 
 ## Review Triage
 
 Owner-approved; implementation may proceed.
+
+## Review Triage Log
+
+### Blind Hunter
+
+- B1 — Verdict: medium; route: patch. The Windows installer used `uv pip install --no-deps` while the new runtime imports `cryptography`; the installer now installs wheel dependencies.
+- B2 — Verdict: medium; route: patch. The installer had no paired-mode setup path; it now accepts an operator-created, ACL-protected root-secret file and still leaves authentication disabled by default when no source is supplied.
+- B3 — Verdict: low; route: patch. The required validation artifact was absent; `validation-home-nw-02.md` now records the observed checks and is linked from `story-index.yaml`.
+- B4 — Verdict: medium; route: defer. `cancelled` exists in the canonical lifecycle, but cancellation is absent from the approved NW-02 route table and task list; it is recorded for a future control-plane slice.
+- B5 — Verdict: medium; route: defer. Consumption creates credential identity while the canonical configuration remains a separate authority, and the approved request shape lacks the profile and priority data needed to create a Device; the binding decision is recorded for a future slice.
+- B6 — Verdict: false. An unknown requested room can remain display-only in a pending request, but approval rejects any room absent from the current configuration before credential use; no access is granted by submission.
+- B7 — Verdict: false. The current configuration schema makes wake mappings household-wide and supplies Room through the Device record; there is no mapping-level Room for this story to validate.
+- B8 — Verdict: medium; route: patch. Lifecycle clocks were captured before the storage mutation lock; transition timestamps now come from inside the atomic mutation callback.
+- B9 — Verdict: false. Service paths check replacement status and overlap before decryption and clear material on expiry/revocation; an offline process has no execution point at which to rewrite SQLite, and the stored ciphertext is not usable through the service after the deadline.
+- B10 — Verdict: medium; route: patch. Repeating revocation previously returned another success/event; already-all-revoked devices now return `conflict`, covered by the domain test.
+- B11 — Verdict: medium; route: patch. Corrupt request records could escape the listing handler; redaction conversion now sits inside the durable-error boundary and returns `503 service_unavailable`.
+- B12 — Verdict: medium; route: patch. The HTTP server and JSON adapter now reject bodies over 1 MiB; identifier/profile bounds remain in place, while pagination and retention are not part of the first-pilot contract.
+- B13 — Verdict: false. Initial issuance is explicitly one-time and has no retry-idempotency contract; only replacement rotation responses receive the lost-response retry path.
+- B14 — Verdict: false. Approval may read configuration before its credential transaction, but current wake authorization is checked against the arbitration snapshot and current configuration, so a stale approval cannot grant a removed or moved Room.
+
+### Verification Gap Reviewer
+
+- V1 — Verdict: low; route: patch. Pending consumption lacked adoption coverage; a domain regression test now proves it returns `conflict` without creating a credential.
+- V2 — Verdict: low; route: patch. Issuance-time secure-storage rejection lacked coverage; a test now proves an approved request with unsupported storage leaves issuance untouched.
+- V3 — Verdict: low; route: patch. The service/API approval path lacked a broader-scope regression; a service test now proves the request remains pending when the approved scope exceeds the request.
+- V4 — Verdict: low; route: patch. New admin routes lacked unauthorized coverage; a parameterized test now checks every admin route returns `401` and leaves state unchanged.
+- V5 — Verdict: low; route: patch. Ninety-day expiry lacked a boundary test; a test now advances exactly to expiry and verifies authentication fails.
+- V6 — Verdict: low; route: patch. Early renewal lacked coverage; a test now verifies it returns `conflict` without replacement material.
+- V7 — Verdict: low; route: patch. Runtime wiring lacked restart adoption coverage; a test now issues through one runtime, recreates it, and authenticates through the reopened credential store.
+- V8 — Verdict: low; route: patch. Observer ordering was asserted only after return; the observer test now reads durable state from inside the callback and sees `revoked`.
+- V9 — Verdict: low; route: patch. Only ciphertext tampering was tested; the tamper test now covers ciphertext, request ID, device ID, and generation metadata.
+- V10 — Verdict: low; route: defer. The durable adapter's bridge-consumer test belongs with the later NW-03 bridge route, which the approved NW-02 scope explicitly leaves unchanged.
+- V11 — Verdict: false. The later approval guard rejects unavailable rooms, and a submitted pending request has no authority; early rejection of the display request is not required by the approved transition boundary.
+
+### Edge Case Hunter
+
+- E1 — Verdict: medium; route: patch. Scope was checked against one configuration read and arbitration against another; authorization is now passed into arbitration so the Room/capability check uses the same admitted snapshot.
+- E2 — Verdict: high; route: patch. Revocation or replacement during the arbitration window could otherwise leave an admitted claim grantable; the handler now revalidates before finalization and before delivering the decision, with a regression test for revocation during the window.
+- E3 — Verdict: maybe-false; route: defer. A guessable client request ID could expose a replacement to a holder of the old credential, but the approved contract does not say IDs are secrets or prescribe entropy; the endpoint protocol must settle that security property.
+- E4 — Verdict: medium; route: patch. This duplicates B10's repeated-revocation finding; the all-revoked conflict guard and observer-count assertion fix the shared root cause.
+- E5 — Verdict: medium; route: patch. Generic configuration-store runtime failures during approval were not mapped to the stable envelope; approval now maps those durable failures to `503`.
+- E6 — Verdict: medium; route: patch. Timestamp conversion accepted non-finite values and could overflow on huge integers; `_timestamp` now rejects both, and service clocks use the same finite validation.
+- E7 — Verdict: medium; route: patch. The network handler previously read arbitrary declared body sizes; it now rejects invalid or over-limit `Content-Length` before reading, with the application retaining the same cap for direct callers.
+- E8 — Verdict: false. Credential state has no prior persisted version in the baseline; schema version `1` is the initial durable schema and unknown versions fail closed rather than being silently misread.
+- E9 — Verdict: low; route: patch. The required validation file was missing; it is now present, populated from observed results, and indexed.
+- E10 — Verdict: medium; route: patch. `HTTPResponse`'s default repr could include one-time material; the body field is now excluded from repr, while transport serialization still returns the intended one-time response.
+
+### Follow-up corrective review
+
+- R1 — Re-enrollment now emits the redacted revocation event after its durable
+  credential transition, with a regression assertion for event identity and
+  generation.
+- R2 — Credential record lists reject non-object entries during durable-state
+  decoding, preserving the redacted `503 service_unavailable` boundary.
+- R3 — Normal credential authentication uses a read-only state read; a write
+  is reserved for observed expiry cleanup, with regression coverage for both
+  paths.
+- R4 — Admin rejection and revocation reject an explicitly null `reason` while
+  still accepting an omitted optional reason; verification counts now match
+  the commands actually run.

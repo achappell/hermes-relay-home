@@ -9,7 +9,7 @@ development_status:
   spec-home-service-foundation: done
   next-wave: in-progress
   home-nw-01-standard-compatibility-boundary: ready-for-dev
-  home-nw-02-pairing-limited-credentials: in-progress
+  home-nw-02-pairing-limited-credentials: review
   home-nw-03-approved-local-bridge-route: ready-for-dev
   home-nw-04-route-roaming-identity-proof: backlog
   home-nw-05-profile-mappings-conversation-claims: backlog

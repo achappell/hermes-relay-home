@@ -43,8 +43,13 @@ Standard Hermes bridge seam is now covered by deterministic JSON/PCM fixtures;
 its endpoint envelope and route binding remain intentionally open as specified
 in the route-roaming BMAD companion
 [`bridge-contract.md`](_bmad-output/specs/spec-home-bridge-route-roaming/bridge-contract.md).
-Device credential provisioning, LAN binding policy, and hardware acoustic
-calibration remain follow-up work.
+Endpoint pairing now supports five-minute approval codes, scoped durable
+credentials, renewal, rotation, and revocation. Configure paired mode with
+`HERMES_HOME_CREDENTIAL_ROOT_SECRET_FILE` pointing to an operator-provided
+64-character hex file; the service never creates that root secret. Static
+device credentials remain an explicit legacy mode, and the two modes cannot be
+configured together. LAN binding policy and hardware acoustic calibration
+remain follow-up work.
 
 ## BMAD ownership
 
@@ -60,7 +65,7 @@ The project targets Python 3.14 and uses the standard library for SQLite and
 the initial HTTP server. Run the focused checks with:
 
 ```sh
-uv run --no-project --python 3.14 --with pytest -- python -m pytest -q
+uv run --no-project --python 3.14 --with pytest --with cryptography -- python -m pytest -q
 uvx --from ruff ruff check src tests
 uvx --from ruff ruff format --check src tests
 ```

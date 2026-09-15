@@ -17,6 +17,7 @@ stories:
     title: Pair endpoints with QR enrollment and limited credentials
     kind: next-wave
     spec: _bmad-output/implementation-artifacts/spec-home-nw-02-pairing-credentials.md
+    validation: _bmad-output/implementation-artifacts/validation-home-nw-02.md
     github_issue: https://github.com/achappell/hermes-relay-home/issues/12
     horizon: now
   - id: HOME-NW-03

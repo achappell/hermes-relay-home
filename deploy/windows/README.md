@@ -28,6 +28,17 @@ $wheel = Get-ChildItem .\hermes_relay_home-*.whl | Select-Object -First 1
 .\install.ps1 -WheelPath $wheel.FullName
 ```
 
+To enable paired mode, create the operator-owned 64-character hexadecimal
+root-secret file first and pass it explicitly:
+
+```powershell
+.\install.ps1 -WheelPath $wheel.FullName -CredentialRootSecretFile C:\ProgramData\HermesHome\secrets\credential-root
+```
+
+The installer never creates that root secret. Without it, and without the
+legacy `-DeviceCredentialsFile` option, endpoint authentication remains
+disabled. The two credential modes cannot be supplied together.
+
 The installer is idempotent: it preserves the existing admin token, replaces only its marked
 Prometheus job, validates the candidate configuration with `promtool`, saves a
 timestamped backup, and restarts the Prometheus service.

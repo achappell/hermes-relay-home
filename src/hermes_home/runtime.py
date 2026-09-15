@@ -12,6 +12,8 @@ from pathlib import Path
 from hermes_home.api.application import HomeApplication
 from hermes_home.api.server import create_server
 from hermes_home.domain.arbitration import ArbitrationEngine
+from hermes_home.domain.credentials import CredentialService
+from hermes_home.storage.credentials import SQLiteCredentialStore
 from hermes_home.storage.sqlite import SQLiteConfigurationStore
 
 
@@ -31,6 +33,16 @@ class RuntimeSettings:
     admin_token: str = field(repr=False)
     device_credentials_file: Path | None
     device_credentials: dict[str, str] = field(repr=False)
+    credential_root_secret_file: Path | None = None
+    credential_root_secret: bytes | None = field(default=None, repr=False)
+
+    @property
+    def auth_mode(self) -> str:
+        if self.credential_root_secret is not None:
+            return "paired"
+        if self.device_credentials_file is not None:
+            return "legacy"
+        return "disabled"
 
 
 @dataclass(slots=True)
@@ -39,9 +51,12 @@ class HomeRuntime:
 
     server: ThreadingHTTPServer
     store: SQLiteConfigurationStore
+    credential_store: SQLiteCredentialStore | None = None
 
     def close(self) -> None:
         self.server.server_close()
+        if self.credential_store is not None:
+            self.credential_store.close()
         self.store.close()
 
 
@@ -84,6 +99,22 @@ def load_settings(
         device_credentials_file = None
         device_credentials = {}
 
+    credential_root_value = values.get("HERMES_HOME_CREDENTIAL_ROOT_SECRET_FILE")
+    if credential_root_value and credential_root_value.strip():
+        credential_root_secret_file = _path_value(
+            credential_root_value,
+            default=None,
+            name="credential root secret file",
+        )
+        credential_root_secret = _read_root_secret(credential_root_secret_file)
+    else:
+        credential_root_secret_file = None
+        credential_root_secret = None
+    if credential_root_secret is not None and device_credentials_file is not None:
+        raise RuntimeConfigurationError(
+            "credential sources cannot be configured together"
+        )
+
     return RuntimeSettings(
         data_dir=data_dir,
         database_path=database_path,
@@ -93,20 +124,38 @@ def load_settings(
         admin_token=admin_token,
         device_credentials_file=device_credentials_file,
         device_credentials=device_credentials,
+        credential_root_secret_file=credential_root_secret_file,
+        credential_root_secret=credential_root_secret,
     )
 
 
 def create_runtime(settings: RuntimeSettings) -> HomeRuntime:
     """Build the application, server, and durable store for one process."""
+    if (
+        settings.credential_root_secret is not None
+        and settings.device_credentials_file is not None
+    ):
+        raise RuntimeConfigurationError(
+            "credential sources cannot be configured together"
+        )
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     store = SQLiteConfigurationStore(settings.database_path)
+    credential_store = None
     try:
+        credential_service = None
+        if settings.credential_root_secret is not None:
+            credential_store = SQLiteCredentialStore(settings.database_path)
+            credential_service = CredentialService(
+                store=credential_store,
+                root_secret=settings.credential_root_secret,
+            )
         engine = ArbitrationEngine(configuration=store.read)
         application = HomeApplication(
             configuration_store=store,
             arbitration_engine=engine,
             admin_token=settings.admin_token,
             device_credentials=settings.device_credentials,
+            credential_service=credential_service,
         )
         server = create_server(
             application,
@@ -114,9 +163,15 @@ def create_runtime(settings: RuntimeSettings) -> HomeRuntime:
             port=settings.port,
         )
     except Exception:
+        if credential_store is not None:
+            credential_store.close()
         store.close()
         raise
-    return HomeRuntime(server=server, store=store)
+    return HomeRuntime(
+        server=server,
+        store=store,
+        credential_store=credential_store,
+    )
 
 
 def run(settings: RuntimeSettings | None = None) -> None:
@@ -166,6 +221,23 @@ def _read_secret(path: Path) -> str:
         raise RuntimeConfigurationError("cannot read admin token file") from error
     if not secret:
         raise RuntimeConfigurationError("admin token must not be blank")
+    return secret
+
+
+def _read_root_secret(path: Path) -> bytes:
+    try:
+        encoded = path.read_text(encoding="utf-8").strip()
+        if len(encoded) != 64:
+            raise ValueError("root secret must contain 64 hex characters")
+        secret = bytes.fromhex(encoded)
+    except (OSError, ValueError) as error:
+        raise RuntimeConfigurationError(
+            "cannot read credential root secret file"
+        ) from error
+    if len(secret) != 32:
+        raise RuntimeConfigurationError(
+            "credential root secret must contain 64 hex characters"
+        )
     return secret
 
 
