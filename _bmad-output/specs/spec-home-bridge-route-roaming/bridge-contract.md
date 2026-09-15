@@ -19,7 +19,7 @@ The table separates that stock wire from Home-owned behavior:
 
 | Layer | Vanilla Hermes Agent `0.21.1` | Home bridge behavior |
 | --- | --- | --- |
-| JSON/session socket | `/api/ws`, JSON-RPC 2.0; `gateway.ready`, `gateway.ping`, `session.create`, `session.resume`, `prompt.submit`, `session.interrupt`, and advertised `command.dispatch` | `HomeBridge` opens this socket with a server-held token and maps the result into Home state. |
+| JSON/session socket | `/api/ws`, JSON-RPC 2.0; `gateway.ready`, `gateway.ping`, `session.create`, `session.resume`, `prompt.submit`, `session.interrupt`, `commands.catalog`, and advertised `command.dispatch` | `HomeBridge` opens this socket with a server-held token, discovers commands from `commands.catalog`, and maps the result into Home state. |
 | Standard events | JSON-RPC notification `method: "event"` with `params.type` and `params.payload` | Home preserves the Standard `type` and semantic payload, then adds opaque Home conversation/turn correlation in its own envelope. |
 | Response audio | Separate `/api/audio/speak-stream`; JSON `type: "start"`, raw signed-16 little-endian PCM, then `type: "end"` or `type: "fallback"` | Home associates the sidecar with a Home turn and exposes typed `AudioFrame` values; the local endpoint uses `audio.frame` only as a Home transport notification. |
 | Authentication | Stock client path uses the Hermes bearer in the WebSocket URL as `?token=` | Home keeps that bearer server-side. Front ends use a Home Device credential or a short-lived browser upgrade ticket. |
@@ -61,7 +61,7 @@ methods are:
 | `next_audio()` | Returns typed `AudioFrame` values from the separate Standard `/api/audio/speak-stream` sidecar. |
 | `interrupt()` | Requests interruption; the matching Standard terminal event remains the completion authority. |
 | `respond_prompt(event, response)` | Maps a validated approval, clarify, secret, or sudo response to the matching Standard operation. |
-| `dispatch_command(name, arg)` | Dispatches only a command advertised by `gateway.ready`. |
+| `dispatch_command(name, arg)` | Dispatches only a command advertised by Standard `commands.catalog`. |
 | `ping()` | Exercises the Standard liveness operation. It is not a substitute for a timing signal. |
 
 `BridgeStatus.to_endpoint()`, `BridgeTurn.to_endpoint()`, and

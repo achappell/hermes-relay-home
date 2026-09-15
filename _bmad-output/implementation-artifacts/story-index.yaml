@@ -11,6 +11,7 @@ stories:
     title: Pin and prove the Standard Hermes compatibility boundary
     kind: next-wave
     spec: _bmad-output/specs/spec-standard-hermes-compatibility-migration/SPEC.md
+    validation: _bmad-output/implementation-artifacts/validation-home-nw-01.md
     github_issue: https://github.com/achappell/hermes-relay-home/issues/11
     horizon: now
   - id: HOME-NW-02

@@ -22,8 +22,40 @@ from hermes_home.bridge import (
 
 
 class FakeJsonSocket:
-    def __init__(self, incoming: list[dict[str, object]]) -> None:
-        self.incoming = deque(incoming)
+    def __init__(
+        self,
+        incoming: list[dict[str, object]],
+        *,
+        catalog_pairs: list[str] | None = None,
+        inject_catalog: bool = True,
+    ) -> None:
+        queued = list(incoming)
+        self._catalog_pairs = tuple(catalog_pairs or ())
+        self._inject_catalog = inject_catalog
+        if inject_catalog and queued and _is_gateway_ready(queued[0]):
+            shifted = []
+            for queued_frame in queued[1:]:
+                shifted_frame = dict(queued_frame)
+                response_id = shifted_frame.get("id")
+                if isinstance(response_id, str) and response_id.startswith("home-"):
+                    suffix = response_id.removeprefix("home-")
+                    if suffix.isdigit():
+                        shifted_frame["id"] = f"home-{int(suffix) + 1}"
+                shifted.append(shifted_frame)
+            pairs = [
+                [f"/{name.lstrip('/')}", f"fixture command {name}"]
+                for name in self._catalog_pairs
+            ]
+            queued = [
+                queued[0],
+                {
+                    "jsonrpc": "2.0",
+                    "id": "home-1",
+                    "result": {"pairs": pairs},
+                },
+                *shifted,
+            ]
+        self.incoming = deque(queued)
         self.sent: list[dict[str, object]] = []
         self.closed = False
 
@@ -38,6 +70,15 @@ class FakeJsonSocket:
 
     def close(self) -> None:
         self.closed = True
+
+
+def _is_gateway_ready(frame: dict[str, object]) -> bool:
+    params = frame.get("params")
+    return (
+        frame.get("method") == "event"
+        and isinstance(params, dict)
+        and params.get("type") == "gateway.ready"
+    )
 
 
 class FakeAudioSocket:
@@ -71,7 +112,7 @@ class FakeSocketFactory:
 
 class CrossReadJsonSocket(FakeJsonSocket):
     def __init__(self, incoming: list[dict[str, object]]) -> None:
-        super().__init__(incoming)
+        super().__init__(incoming, inject_catalog=False)
 
     def receive_json(self, timeout: float | None = None) -> dict[str, object]:
         del timeout
@@ -92,8 +133,13 @@ class CommandLossJsonSocket(FakeJsonSocket):
 
 
 class BlockingCommandSocket(FakeJsonSocket):
-    def __init__(self, incoming: list[dict[str, object]]) -> None:
-        super().__init__(incoming)
+    def __init__(
+        self,
+        incoming: list[dict[str, object]],
+        *,
+        catalog_pairs: list[str] | None = None,
+    ) -> None:
+        super().__init__(incoming, catalog_pairs=catalog_pairs)
         self.command_started = Event()
         self.release_command = Event()
 
@@ -107,6 +153,9 @@ class BlockingCommandSocket(FakeJsonSocket):
 
 
 class SilentJsonSocket(FakeJsonSocket):
+    def __init__(self, incoming: list[dict[str, object]]) -> None:
+        super().__init__(incoming, inject_catalog=False)
+
     def receive_json(self, timeout: float | None = None) -> dict[str, object]:
         if self.incoming:
             return self.incoming.popleft()
@@ -213,7 +262,6 @@ def test_bridge_ready_keeps_hermes_credential_and_session_identity_server_side()
                 "gateway.ready",
                 {
                     "heartbeat": True,
-                    "capabilities": {"commands": ["status"]},
                 },
             ),
             {
@@ -225,7 +273,8 @@ def test_bridge_ready_keeps_hermes_credential_and_session_identity_server_side()
                     "messages": [],
                 },
             },
-        ]
+        ],
+        catalog_pairs=["status"],
     )
     gateway_factory = FakeSocketFactory(gateway_socket)
     authenticator = StaticCredentialAuthenticator(
@@ -269,9 +318,15 @@ def test_bridge_ready_keeps_hermes_credential_and_session_identity_server_side()
         {
             "jsonrpc": "2.0",
             "id": "home-1",
+            "method": "commands.catalog",
+            "params": {},
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": "home-2",
             "method": "session.create",
             "params": {"source": "home", "profile": "family"},
-        }
+        },
     ]
 
 
@@ -408,18 +463,24 @@ def test_bridge_resumes_a_granted_session_instead_of_creating_a_new_one():
         {
             "jsonrpc": "2.0",
             "id": "home-1",
+            "method": "commands.catalog",
+            "params": {},
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": "home-2",
             "method": "session.resume",
             "params": {
                 "session_id": "stored-hermes-1",
                 "source": "home",
                 "profile": "family",
             },
-        }
+        },
     ]
     reconnect = bridge.reconnect(headers={"Authorization": "Device device-secret"})
 
     assert reconnect.status == "ready"
-    assert resumed_socket.sent[0]["params"]["session_id"] == "stored-hermes-1"
+    assert resumed_socket.sent[-1]["params"]["session_id"] == "stored-hermes-1"
 
 
 def test_bridge_forwards_a_standard_turn_and_separate_pcm_sidecar():
@@ -427,7 +488,7 @@ def test_bridge_forwards_a_standard_turn_and_separate_pcm_sidecar():
         [
             _event(
                 "gateway.ready",
-                {"capabilities": {"commands": ["status"]}},
+                {},
             ),
             {
                 "jsonrpc": "2.0",
@@ -469,7 +530,8 @@ def test_bridge_forwards_a_standard_turn_and_separate_pcm_sidecar():
                     "payload": {"status": "completed"},
                 },
             },
-        ]
+        ],
+        catalog_pairs=["status"],
     )
     audio_socket = FakeAudioSocket(
         [
@@ -506,7 +568,7 @@ def test_bridge_forwards_a_standard_turn_and_separate_pcm_sidecar():
     assert turn.turn_id == "home-turn-1"
     assert gateway_socket.sent[-1] == {
         "jsonrpc": "2.0",
-        "id": "home-2",
+        "id": "home-3",
         "method": "prompt.submit",
         "params": {
             "session_id": "runtime-hermes-1",
@@ -557,7 +619,7 @@ def test_bridge_dispatches_only_a_command_advertised_by_standard_gateway():
         [
             _event(
                 "gateway.ready",
-                {"capabilities": {"commands": ["status"]}},
+                {},
             ),
             {
                 "jsonrpc": "2.0",
@@ -569,7 +631,8 @@ def test_bridge_dispatches_only_a_command_advertised_by_standard_gateway():
                 "id": "home-2",
                 "result": {"accepted": True, "command_id": "command-1"},
             },
-        ]
+        ],
+        catalog_pairs=["status"],
     )
     bridge = HomeBridge(
         gateway_url="wss://hermes.example/api/ws",
@@ -597,7 +660,7 @@ def test_bridge_dispatches_only_a_command_advertised_by_standard_gateway():
     }
     assert gateway_socket.sent[-1] == {
         "jsonrpc": "2.0",
-        "id": "home-2",
+        "id": "home-3",
         "method": "command.dispatch",
         "params": {
             "session_id": "runtime-hermes-1",
@@ -610,13 +673,14 @@ def test_bridge_dispatches_only_a_command_advertised_by_standard_gateway():
 def test_bridge_marks_command_transport_loss_before_reporting_it():
     gateway_socket = CommandLossJsonSocket(
         [
-            _event("gateway.ready", {"capabilities": {"commands": ["status"]}}),
+            _event("gateway.ready", {}),
             {
                 "jsonrpc": "2.0",
                 "id": "home-1",
                 "result": {"session_id": "runtime-hermes-1"},
             },
-        ]
+        ],
+        catalog_pairs=["status"],
     )
     bridge = HomeBridge(
         gateway_url="wss://hermes.example/api/ws",
@@ -646,13 +710,14 @@ def test_bridge_marks_command_transport_loss_before_reporting_it():
 def test_old_command_loss_cannot_clobber_a_newly_opened_bridge():
     first_socket = BlockingCommandSocket(
         [
-            _event("gateway.ready", {"capabilities": {"commands": ["status"]}}),
+            _event("gateway.ready", {}),
             {
                 "jsonrpc": "2.0",
                 "id": "home-1",
                 "result": {"session_id": "runtime-hermes-1"},
             },
-        ]
+        ],
+        catalog_pairs=["status"],
     )
     second_socket = FakeJsonSocket(
         [
@@ -764,7 +829,7 @@ def test_bridge_waits_for_standard_terminal_event_after_interrupt_acknowledgemen
     assert bridge.active_turn_id == "home-turn-1"
     assert gateway_socket.sent[-1] == {
         "jsonrpc": "2.0",
-        "id": "home-3",
+        "id": "home-4",
         "method": "session.interrupt",
         "params": {"session_id": "runtime-hermes-1"},
     }
@@ -802,9 +867,15 @@ def test_bridge_reconnects_by_resuming_without_replaying_uncertain_prompt():
             {
                 "jsonrpc": "2.0",
                 "id": "home-2",
+                "result": {"accepted": True, "command_id": "reconnected-command"},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "home-3",
                 "result": {"accepted": True},
             },
-        ]
+        ],
+        catalog_pairs=["status"],
     )
     gateway_factory = SequencedSocketFactory(first_socket, resumed_socket)
     bridge = HomeBridge(
@@ -842,15 +913,27 @@ def test_bridge_reconnects_by_resuming_without_replaying_uncertain_prompt():
         {
             "jsonrpc": "2.0",
             "id": "home-1",
+            "method": "commands.catalog",
+            "params": {},
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": "home-2",
             "method": "session.resume",
             "params": {
                 "session_id": "stored-hermes-1",
                 "source": "home",
                 "profile": "family",
             },
-        }
+        },
     ]
     assert bridge.state == "ready"
+
+    assert result.capabilities["commands"] == ["status"]
+    assert bridge.dispatch_command("status") == {
+        "accepted": True,
+        "command_id": "reconnected-command",
+    }
 
     bridge.submit_prompt("Fresh action")
     assert resumed_socket.sent[-1]["method"] == "prompt.submit"
@@ -1160,7 +1243,7 @@ def test_bridge_resolves_a_structured_prompt_with_its_correlation_id():
     assert result == {"resolved": True}
     assert gateway_socket.sent[-1] == {
         "jsonrpc": "2.0",
-        "id": "home-3",
+        "id": "home-4",
         "method": "approval.respond",
         "params": {
             "session_id": "runtime-hermes-1",
@@ -1592,6 +1675,7 @@ def test_bridge_reconnect_discards_active_turn_without_replaying_it():
     assert bridge.active_turn_id is None
     bridge.submit_prompt("Fresh action")
     assert [frame["method"] for frame in resumed_socket.sent] == [
+        "commands.catalog",
         "session.resume",
         "prompt.submit",
     ]
@@ -2044,7 +2128,10 @@ def test_bridge_rejects_whitespace_only_prompt_without_sending_it():
 
     with pytest.raises(ValueError, match="non-empty"):
         bridge.submit_prompt("   \t")
-    assert [frame["method"] for frame in gateway_socket.sent] == ["session.create"]
+    assert [frame["method"] for frame in gateway_socket.sent] == [
+        "commands.catalog",
+        "session.create",
+    ]
 
 
 def test_bridge_does_not_treat_an_explicit_interrupt_rejection_as_completion():
@@ -2100,7 +2187,8 @@ def test_standard_gateway_rejects_a_response_without_result_or_error():
         [
             _event("gateway.ready", {"capabilities": {}}),
             {"jsonrpc": "2.0", "id": "home-1"},
-        ]
+        ],
+        inject_catalog=False,
     )
     client = StandardGatewayClient(
         url="wss://hermes.example/api/ws",
@@ -2498,7 +2586,10 @@ def test_bridge_revalidates_the_home_grant_before_submitting():
         bridge.submit_prompt("Do not send")
 
     assert bridge.state == "unavailable"
-    assert [frame["method"] for frame in gateway_socket.sent] == ["session.create"]
+    assert [frame["method"] for frame in gateway_socket.sent] == [
+        "commands.catalog",
+        "session.create",
+    ]
 
 
 def test_bridge_maps_a_revoked_resolver_status_to_stale_conversation():
@@ -2570,7 +2661,7 @@ def test_bridge_never_uses_a_runtime_session_id_as_a_resume_identity():
 def test_bridge_converts_a_result_level_command_rejection():
     gateway_socket = FakeJsonSocket(
         [
-            _event("gateway.ready", {"capabilities": {"commands": ["status"]}}),
+            _event("gateway.ready", {}),
             {
                 "jsonrpc": "2.0",
                 "id": "home-1",
@@ -2581,7 +2672,8 @@ def test_bridge_converts_a_result_level_command_rejection():
                 "id": "home-2",
                 "result": {"status": "rejected", "message": "busy"},
             },
-        ]
+        ],
+        catalog_pairs=["status"],
     )
     bridge = _make_bridge(FakeSocketFactory(gateway_socket))
     bridge.open(
@@ -2676,7 +2768,7 @@ def test_bridge_maps_structured_prompt_responses_and_rejects_stale_ones(
     assert bridge.respond_prompt(prompt, response) == {"status": "ok"}
     assert gateway_socket.sent[-1] == {
         "jsonrpc": "2.0",
-        "id": "home-3",
+        "id": "home-4",
         "method": operation,
         "params": {
             "session_id": "runtime-hermes-1",
@@ -3089,3 +3181,318 @@ def test_bridge_does_not_make_text_submission_wait_for_optional_audio_setup():
     assert gateway_socket.sent[-1]["method"] == "prompt.submit"
     assert audio_factory.started.wait(timeout=1)
     audio_factory.release.set()
+
+
+def test_bridge_discovers_commands_from_the_pinned_standard_catalog():
+    gateway_socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {"heartbeat": True, "skin": "home"}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {
+                    "pairs": [["/status", "Show session status"]],
+                    "commands": {"/status": {"argument_mode": "text", "desktop": None}},
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "home-2",
+                "result": {"session_id": "runtime-hermes-1"},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "home-3",
+                "result": {"accepted": True, "command_id": "command-1"},
+            },
+        ],
+        inject_catalog=False,
+    )
+    bridge = _make_bridge(FakeSocketFactory(gateway_socket))
+
+    status = bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle="opaque-conversation-1",
+    )
+
+    assert status.capabilities == {
+        "commands": ["status"],
+        "heartbeat": True,
+        "timing": "absent",
+    }
+    assert [frame["method"] for frame in gateway_socket.sent] == [
+        "commands.catalog",
+        "session.create",
+    ]
+    assert gateway_socket.sent[0]["params"] == {}
+    assert bridge.dispatch_command("status") == {
+        "accepted": True,
+        "command_id": "command-1",
+    }
+
+    with pytest.raises(BridgeCapabilityUnavailable):
+        bridge.dispatch_command("not-advertised")
+
+
+def test_bridge_ignores_gateway_ready_commands_when_standard_catalog_is_empty():
+    gateway_socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {"capabilities": {"commands": ["status"]}}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {"pairs": []},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "home-2",
+                "result": {"session_id": "runtime-hermes-1"},
+            },
+        ],
+        inject_catalog=False,
+    )
+    bridge = _make_bridge(FakeSocketFactory(gateway_socket))
+
+    status = bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle="opaque-conversation-1",
+    )
+
+    assert status.capabilities["commands"] == []
+    with pytest.raises(BridgeCapabilityUnavailable):
+        bridge.dispatch_command("status")
+
+
+@pytest.mark.parametrize(
+    "pairs",
+    [
+        [["/status"]],
+        [["status", "Missing slash"]],
+        [["/status", 42]],
+    ],
+    ids=["pair-too-short", "name-missing-slash", "description-not-text"],
+)
+def test_bridge_fails_closed_for_malformed_standard_command_catalog_pairs(pairs):
+    gateway_socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {"capabilities": {"commands": ["status"]}}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {"pairs": pairs},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "home-2",
+                "result": {"session_id": "runtime-hermes-1"},
+            },
+        ],
+        inject_catalog=False,
+    )
+    bridge = _make_bridge(FakeSocketFactory(gateway_socket))
+
+    status = bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle="opaque-conversation-1",
+    )
+
+    assert status.capabilities["commands"] == []
+    with pytest.raises(BridgeCapabilityUnavailable):
+        bridge.dispatch_command("status")
+
+
+@pytest.mark.parametrize(
+    "catalog_response",
+    [
+        {"result": {"categories": []}},
+        {"error": {"code": -32601, "message": "method not found"}},
+    ],
+    ids=["catalog-missing", "catalog-rejected"],
+)
+def test_bridge_fails_closed_when_the_standard_command_catalog_is_unavailable(
+    catalog_response: dict[str, object],
+):
+    gateway_socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {"heartbeat": True}),
+            {"jsonrpc": "2.0", "id": "home-1", **catalog_response},
+            {
+                "jsonrpc": "2.0",
+                "id": "home-2",
+                "result": {"session_id": "runtime-hermes-1"},
+            },
+        ],
+        inject_catalog=False,
+    )
+    bridge = _make_bridge(FakeSocketFactory(gateway_socket))
+
+    status = bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle="opaque-conversation-1",
+    )
+
+    assert status.status == "ready"
+    assert status.capabilities["commands"] == []
+    with pytest.raises(BridgeCapabilityUnavailable):
+        bridge.dispatch_command("status")
+
+
+def test_bridge_preserves_text_when_the_separate_audio_socket_returns_fallback():
+    gateway_socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {"pairs": []},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "home-2",
+                "result": {"session_id": "runtime-hermes-1"},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "home-3",
+                "result": {"accepted": True},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "event",
+                "params": {"type": "message.start", "session_id": "runtime-hermes-1"},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "event",
+                "params": {
+                    "type": "message.delta",
+                    "session_id": "runtime-hermes-1",
+                    "payload": {"text": "Readable text survives."},
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "event",
+                "params": {
+                    "type": "message.complete",
+                    "session_id": "runtime-hermes-1",
+                    "payload": {"status": "completed"},
+                },
+            },
+        ],
+        inject_catalog=False,
+    )
+    audio_socket = FakeAudioSocket(
+        [
+            {"type": "start", "sample_rate": 24_000, "channels": 1},
+            b"\x01\x02",
+            {"type": "fallback", "reason": "speech unavailable"},
+        ]
+    )
+    bridge = _make_bridge(
+        FakeSocketFactory(gateway_socket),
+        audio_factory=FakeAudioSocketFactory(audio_socket),
+    )
+    bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle="opaque-conversation-1",
+    )
+    bridge.submit_prompt("Keep the text")
+
+    assert bridge.next_event().type == "message.start"
+    text_event = bridge.next_event()
+    assert text_event.payload == {"text": "Readable text survives."}
+    assert bridge.next_audio().kind == "start"
+    assert bridge.next_audio().data == b"\x01\x02"
+    assert bridge.next_audio().kind == "fallback"
+    assert bridge.next_audio().kind == "unavailable"
+
+    assert bridge.next_event().type == "message.complete"
+    assert bridge.state == "ready"
+    assert audio_socket.closed is True
+
+
+def test_bridge_preserves_pin_shaped_prompt_identity_until_terminal_completion():
+    gateway_socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {"pairs": []},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "home-2",
+                "result": {"session_id": "runtime-hermes-1"},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "home-3",
+                "result": {"accepted": True},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "event",
+                "params": {"type": "message.start", "session_id": "runtime-hermes-1"},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "event",
+                "params": {
+                    "type": "approval.request",
+                    "session_id": "runtime-hermes-1",
+                    "payload": {
+                        "turn_id": "standard-turn-1",
+                        "request_id": "approval-1",
+                        "sensitivity": "high",
+                        "question": "Run the action?",
+                    },
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "home-4",
+                "result": {"status": "ok"},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "event",
+                "params": {
+                    "type": "message.complete",
+                    "session_id": "runtime-hermes-1",
+                    "payload": {"status": "completed"},
+                },
+            },
+        ],
+        inject_catalog=False,
+    )
+    bridge = _make_bridge(FakeSocketFactory(gateway_socket))
+    bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle="opaque-conversation-1",
+    )
+    bridge.submit_prompt("Run the action")
+
+    assert bridge.next_event().type == "message.start"
+    prompt = bridge.next_event()
+    assert prompt.type == "approval.request"
+    assert prompt.turn_id == "home-turn-1"
+    assert prompt.correlation_id == "approval-1"
+    assert prompt.payload["turn_id"] == "standard-turn-1"
+    assert prompt.payload["sensitivity"] == "high"
+
+    assert bridge.respond_prompt(prompt, {"choice": "allow"}) == {"status": "ok"}
+    assert gateway_socket.sent[-1] == {
+        "jsonrpc": "2.0",
+        "id": "home-4",
+        "method": "approval.respond",
+        "params": {
+            "session_id": "runtime-hermes-1",
+            "request_id": "approval-1",
+            "choice": "allow",
+        },
+    }
+    assert bridge.next_event().type == "message.complete"
+    assert bridge.active_turn_id is None
+    assert bridge.state == "ready"

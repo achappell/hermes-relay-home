@@ -1,6 +1,6 @@
 schema_version: 1
 generated: 2026-09-12
-last_updated: 2026-09-14
+last_updated: 2026-09-15
 project: hermes-relay-home
 tracking_system: file-system
 status_authority: local
@@ -8,7 +8,7 @@ story_location: _bmad-output/implementation-artifacts
 development_status:
   spec-home-service-foundation: done
   next-wave: in-progress
-  home-nw-01-standard-compatibility-boundary: ready-for-dev
+  home-nw-01-standard-compatibility-boundary: done
   home-nw-02-pairing-limited-credentials: review
   home-nw-03-approved-local-bridge-route: done
   home-nw-04-route-roaming-identity-proof: backlog
