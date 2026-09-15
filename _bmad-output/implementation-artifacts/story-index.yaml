@@ -23,7 +23,8 @@ stories:
   - id: HOME-NW-03
     title: Serve the versioned Home bridge over one approved local route
     kind: next-wave
-    spec: _bmad-output/specs/spec-home-bridge-route-roaming/SPEC.md
+    spec: _bmad-output/implementation-artifacts/spec-home-nw-03-approved-local-bridge-route.md
+    validation: _bmad-output/implementation-artifacts/validation-home-nw-03.md
     github_issue: https://github.com/achappell/hermes-relay-home/issues/13
     horizon: now
   - id: HOME-NW-04

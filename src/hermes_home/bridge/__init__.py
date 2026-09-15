@@ -1,5 +1,18 @@
 """Home-owned adapters for the supported Hermes session boundary."""
 
+from hermes_home.bridge.endpoint import (
+    BRIDGE_WS_PATH,
+    HOME_BRIDGE_PATH,
+    HOME_BRIDGE_SCHEMA,
+    MAX_BRIDGE_MESSAGE_BYTES,
+    MAX_MESSAGE_SIZE,
+    BridgeEndpoint,
+    BridgeFactory,
+    BridgeRoute,
+    HomeBridgeEndpoint,
+    RouteDescriptor,
+    WebSocketConnection,
+)
 from hermes_home.bridge.standard import (
     AudioFrame,
     AudioSocket,
@@ -22,14 +35,22 @@ from hermes_home.bridge.standard import (
 )
 
 __all__ = [
+    "BRIDGE_WS_PATH",
+    "HOME_BRIDGE_PATH",
+    "HOME_BRIDGE_SCHEMA",
+    "MAX_BRIDGE_MESSAGE_BYTES",
+    "MAX_MESSAGE_SIZE",
     "AudioFrame",
     "AudioSocket",
     "AudioSocketFactory",
     "BridgeAuthorizationError",
     "BridgeCapabilityUnavailable",
+    "BridgeEndpoint",
     "BridgeEvent",
+    "BridgeFactory",
     "BridgeProtocolError",
     "BridgeRequestRejected",
+    "BridgeRoute",
     "BridgeStatus",
     "BridgeTimeoutError",
     "BridgeTransportError",
@@ -37,7 +58,10 @@ __all__ = [
     "ConversationGrant",
     "GatewayRPCError",
     "HomeBridge",
+    "HomeBridgeEndpoint",
     "JsonSocket",
     "JsonSocketFactory",
+    "RouteDescriptor",
     "StandardGatewayClient",
+    "WebSocketConnection",
 ]

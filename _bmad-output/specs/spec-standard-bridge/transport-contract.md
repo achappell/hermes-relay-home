@@ -7,18 +7,19 @@ define the public Home route envelope.
 ## Implementation status
 
 Story 2 implements the framework-independent `HomeBridge` seam and
-deterministic fake-gateway/fake-audio fixtures. It does not serve the public
-Home WebSocket, select routes, establish Household Identity proof, or provide
-browser credential bootstrap. The front-end target for those later adapters is
-the route-roaming companion
+deterministic fake-gateway/fake-audio fixtures. HOME-NW-03 now serves the local
+Home WebSocket slice; route selection, Household Identity proof, and browser
+credential bootstrap remain outside that story. The front-end target for the
+broader route-roaming work is the companion
 [`bridge-contract.md`](../spec-home-bridge-route-roaming/bridge-contract.md).
 
 `BridgeStatus.to_endpoint()`, `BridgeTurn.to_endpoint()`, and
 `BridgeEvent.to_endpoint()` are current Home domain dictionaries, not public
-JSON-RPC envelopes. The planned adapter must wrap them, preserve Standard event
-meaning, and add the Home-only route/authentication boundary without exposing
-Profile IDs, runtime Session IDs, or credentials. The planned endpoint is not a
-claim that this Story 2 seam is live at `/api/v1/bridge/ws`.
+JSON-RPC envelopes. The route adapter wraps them, preserves Standard event
+meaning, and adds the Home-only route/authentication boundary without exposing
+Profile IDs, runtime Session IDs, or credentials. The live local route at
+`/api/v1/bridge/ws` is still separate from the framework-independent Story 2
+seam.
 
 ## Boundary records
 
@@ -101,8 +102,8 @@ The bridge contract is verified with injected JSON and audio socket ports and
 deterministic fixtures. The focused and full Home checks use:
 
 ```sh
-uv run --python 3.14 --no-project --with pytest -- python -m pytest -q
+uv run --no-cache --no-project --python 3.14 --with pytest --with cryptography --with 'websockets>=17,<18' -- python -m pytest -q
 ```
 
-Live Hermes, physical hardware, and the final Home route envelope are separate
-validation gates owned by later slices.
+Live Hermes, physical hardware, and route-roaming/browser deployment are
+separate validation gates owned by later slices.

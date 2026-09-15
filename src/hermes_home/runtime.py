@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from threading import Thread
+
+from websockets.sync.server import Server
 
 from hermes_home.api.application import HomeApplication
+from hermes_home.api.bridge_server import create_bridge_server
 from hermes_home.api.server import create_server
+from hermes_home.bridge.endpoint import BridgeRoute
 from hermes_home.domain.arbitration import ArbitrationEngine
 from hermes_home.domain.credentials import CredentialService
 from hermes_home.storage.credentials import SQLiteCredentialStore
@@ -35,6 +40,9 @@ class RuntimeSettings:
     device_credentials: dict[str, str] = field(repr=False)
     credential_root_secret_file: Path | None = None
     credential_root_secret: bytes | None = field(default=None, repr=False)
+    bridge_bind_host: str | None = None
+    bridge_port: int = 8766
+    bridge_route_id: str = "local"
 
     @property
     def auth_mode(self) -> str:
@@ -52,8 +60,21 @@ class HomeRuntime:
     server: ThreadingHTTPServer
     store: SQLiteConfigurationStore
     credential_store: SQLiteCredentialStore | None = None
+    bridge_server: Server | None = None
+    bridge_thread: Thread | None = field(default=None, repr=False)
+    _closed: bool = field(default=False, init=False, repr=False)
 
     def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self.bridge_server is not None:
+            try:
+                self.bridge_server.shutdown()
+            except Exception as error:  # noqa: BLE001 - shutdown is best effort
+                del error
+        if self.bridge_thread is not None:
+            self.bridge_thread.join(timeout=2)
         self.server.server_close()
         if self.credential_store is not None:
             self.credential_store.close()
@@ -115,6 +136,14 @@ def load_settings(
             "credential sources cannot be configured together"
         )
 
+    bridge_bind_host = values.get("HERMES_HOME_BRIDGE_BIND_HOST", "127.0.0.1").strip()
+    if not bridge_bind_host:
+        raise RuntimeConfigurationError("bridge bind host must not be blank")
+    bridge_port = _port_value(values.get("HERMES_HOME_BRIDGE_PORT", "8766"))
+    bridge_route_id = values.get("HERMES_HOME_BRIDGE_ROUTE_ID", "local").strip()
+    if not bridge_route_id:
+        raise RuntimeConfigurationError("bridge route ID must not be blank")
+
     return RuntimeSettings(
         data_dir=data_dir,
         database_path=database_path,
@@ -126,10 +155,18 @@ def load_settings(
         device_credentials=device_credentials,
         credential_root_secret_file=credential_root_secret_file,
         credential_root_secret=credential_root_secret,
+        bridge_bind_host=bridge_bind_host,
+        bridge_port=bridge_port,
+        bridge_route_id=bridge_route_id,
     )
 
 
-def create_runtime(settings: RuntimeSettings) -> HomeRuntime:
+def create_runtime(
+    settings: RuntimeSettings,
+    *,
+    bridge_factory: Callable[[], object] | None = None,
+    bridge_server_factory: Callable[..., Server] | None = None,
+) -> HomeRuntime:
     """Build the application, server, and durable store for one process."""
     if (
         settings.credential_root_secret is not None
@@ -141,6 +178,10 @@ def create_runtime(settings: RuntimeSettings) -> HomeRuntime:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     store = SQLiteConfigurationStore(settings.database_path)
     credential_store = None
+    server: ThreadingHTTPServer | None = None
+    bridge_server = None
+    bridge_thread = None
+    bridge_thread_started = False
     try:
         credential_service = None
         if settings.credential_root_secret is not None:
@@ -162,7 +203,30 @@ def create_runtime(settings: RuntimeSettings) -> HomeRuntime:
             host=settings.bind_host,
             port=settings.port,
         )
+        server_factory = bridge_server_factory or create_bridge_server
+        bridge_server = server_factory(
+            bridge_factory=bridge_factory,
+            route=BridgeRoute(id=settings.bridge_route_id),
+            host=settings.bridge_bind_host or settings.bind_host,
+            port=settings.bridge_port,
+        )
+        bridge_thread = Thread(
+            target=bridge_server.serve_forever,
+            name="hermes-home-bridge-server",
+            daemon=True,
+        )
+        bridge_thread.start()
+        bridge_thread_started = True
     except Exception:
+        if bridge_server is not None:
+            try:
+                bridge_server.shutdown()
+            except Exception as error:  # noqa: BLE001 - shutdown is best effort
+                del error
+        if bridge_thread is not None and bridge_thread_started:
+            bridge_thread.join(timeout=2)
+        if server is not None:
+            server.server_close()
         if credential_store is not None:
             credential_store.close()
         store.close()
@@ -171,6 +235,8 @@ def create_runtime(settings: RuntimeSettings) -> HomeRuntime:
         server=server,
         store=store,
         credential_store=credential_store,
+        bridge_server=bridge_server,
+        bridge_thread=bridge_thread,
     )
 
 

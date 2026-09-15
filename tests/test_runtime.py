@@ -3,6 +3,7 @@ import json
 import threading
 
 import pytest
+from websockets.sync.client import connect
 
 from hermes_home.domain.credentials import CredentialService
 from hermes_home.runtime import (
@@ -133,6 +134,119 @@ def test_load_settings_reports_disabled_endpoint_auth_without_a_device_source(
     assert settings.auth_mode == "disabled"
     assert settings.device_credentials == {}
     assert settings.device_credentials_file is None
+
+
+def test_load_settings_reads_the_sibling_bridge_listener_settings(tmp_path) -> None:
+    token_file = tmp_path / "admin-token"
+    token_file.write_text("admin-secret", encoding="utf-8")
+
+    settings = load_settings(
+        {
+            "HERMES_HOME_ADMIN_TOKEN_FILE": str(token_file),
+            "HERMES_HOME_BIND_HOST": "127.0.0.1",
+            "HERMES_HOME_BRIDGE_BIND_HOST": "127.0.0.1",
+            "HERMES_HOME_BRIDGE_PORT": "8876",
+            "HERMES_HOME_BRIDGE_ROUTE_ID": "approved-local",
+        }
+    )
+
+    assert settings.bridge_bind_host == "127.0.0.1"
+    assert settings.bridge_port == 8876
+    assert settings.bridge_route_id == "approved-local"
+
+
+def test_create_runtime_forwards_the_configured_bridge_route_and_listener(
+    tmp_path,
+) -> None:
+    token_file = tmp_path / "admin-token"
+    token_file.write_text("admin-secret", encoding="utf-8")
+    settings = load_settings(
+        {
+            "HERMES_HOME_DATA_DIR": str(tmp_path / "data"),
+            "HERMES_HOME_ADMIN_TOKEN_FILE": str(token_file),
+            "HERMES_HOME_BIND_HOST": "127.0.0.1",
+            "HERMES_HOME_PORT": "0",
+            "HERMES_HOME_BRIDGE_BIND_HOST": "127.0.0.1",
+            "HERMES_HOME_BRIDGE_PORT": "8877",
+            "HERMES_HOME_BRIDGE_ROUTE_ID": "configured-local",
+        }
+    )
+    captured = {}
+
+    class FakeBridgeServer:
+        def serve_forever(self) -> None:
+            return None
+
+        def shutdown(self) -> None:
+            captured["shutdown"] = True
+
+    def fake_bridge_server_factory(**kwargs):
+        captured.update(kwargs)
+        return FakeBridgeServer()
+
+    runtime = create_runtime(
+        settings,
+        bridge_factory=lambda: object(),
+        bridge_server_factory=fake_bridge_server_factory,
+    )
+    try:
+        assert captured["host"] == "127.0.0.1"
+        assert captured["port"] == 8877
+        assert captured["route"].to_endpoint() == {
+            "class": "home",
+            "id": "configured-local",
+        }
+        assert captured["bridge_factory"] is not None
+    finally:
+        runtime.close()
+
+    assert captured["shutdown"] is True
+
+
+def test_create_runtime_owns_a_safe_unavailable_bridge_listener(tmp_path) -> None:
+    token_file = tmp_path / "admin-token"
+    token_file.write_text("admin-secret", encoding="utf-8")
+    settings = load_settings(
+        {
+            "HERMES_HOME_DATA_DIR": str(tmp_path / "data"),
+            "HERMES_HOME_ADMIN_TOKEN_FILE": str(token_file),
+            "HERMES_HOME_PORT": "0",
+            "HERMES_HOME_BRIDGE_PORT": "0",
+            "HERMES_HOME_BRIDGE_ROUTE_ID": "runtime-local",
+        }
+    )
+    runtime = create_runtime(settings)
+    assert runtime.bridge_server is not None
+    assert runtime.bridge_thread is not None
+
+    try:
+        port = runtime.bridge_server.socket.getsockname()[1]
+        with connect(
+            f"ws://127.0.0.1:{port}/api/v1/bridge/ws",
+            additional_headers={"Authorization": "Device endpoint-secret"},
+        ) as client:
+            client.send(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "schema": 1,
+                        "id": "open-1",
+                        "method": "conversation.open",
+                        "params": {"conversation_handle": "opaque-handle"},
+                    }
+                )
+            )
+            response = json.loads(client.recv())
+            assert response["result"] == {
+                "schema": 1,
+                "status": "unavailable",
+                "conversation_handle": "opaque-handle",
+                "reason": "hermes_unavailable",
+            }
+    finally:
+        runtime.close()
+
+    assert not runtime.bridge_thread.is_alive()
 
 
 def test_create_runtime_wires_paired_enrollment_routes(tmp_path) -> None:
