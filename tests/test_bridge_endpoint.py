@@ -187,6 +187,7 @@ def test_open_wraps_safe_ready_status_with_the_injected_home_route() -> None:
                     "heartbeat": True,
                     "timing": "absent",
                 },
+                "unresolved_turn": False,
             },
         }
         assert bridge.open_calls == [(HEADERS, HANDLE)]

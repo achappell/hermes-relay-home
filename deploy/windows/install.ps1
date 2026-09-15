@@ -18,7 +18,10 @@ param(
     [string] $TaskName = 'Hermes Home',
     [string] $UvPath = '',
     [string] $DeviceCredentialsFile = '',
-    [string] $CredentialRootSecretFile = ''
+    [string] $CredentialRootSecretFile = '',
+    [string] $StandardGatewayUrl = '',
+    [string] $StandardTokenFile = '',
+    [string] $ConversationGrantsFile = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -237,6 +240,35 @@ if ([string]::IsNullOrWhiteSpace($BridgeRouteId)) {
 if ($BridgeRouteId -match '[\r\n]') {
     throw 'BridgeRouteId must not contain line breaks'
 }
+$standardConfigured = (
+    -not [string]::IsNullOrWhiteSpace($StandardGatewayUrl) -or
+    -not [string]::IsNullOrWhiteSpace($StandardTokenFile) -or
+    -not [string]::IsNullOrWhiteSpace($ConversationGrantsFile)
+)
+if ($standardConfigured -and (
+        [string]::IsNullOrWhiteSpace($StandardGatewayUrl) -or
+        [string]::IsNullOrWhiteSpace($StandardTokenFile) -or
+        [string]::IsNullOrWhiteSpace($ConversationGrantsFile)
+    )) {
+    throw 'Standard bridge settings require StandardGatewayUrl, StandardTokenFile, and ConversationGrantsFile'
+}
+if ($standardConfigured -and -not ($DeviceCredentialsFile -or $CredentialRootSecretFile)) {
+    throw 'Standard bridge settings require DeviceCredentialsFile or CredentialRootSecretFile'
+}
+if ($standardConfigured) {
+    try {
+        $standardUri = [System.Uri] $StandardGatewayUrl
+    }
+    catch {
+        throw 'StandardGatewayUrl must be a valid ws or wss URL ending in /api/ws'
+    }
+    if ($standardUri.Scheme -notin @('ws', 'wss') -or
+        [string]::IsNullOrWhiteSpace($standardUri.Host) -or
+        $standardUri.AbsolutePath.TrimEnd('/') -ne '/api/ws' -or
+        $standardUri.Fragment) {
+        throw 'StandardGatewayUrl must be a ws or wss URL ending in /api/ws without a fragment'
+    }
+}
 
 if (-not (Test-Path -LiteralPath $runnerSource -PathType Leaf)) {
     throw "The deployment bundle is missing run.ps1 beside install.ps1"
@@ -303,6 +335,37 @@ try {
         [Environment]::SetEnvironmentVariable('HERMES_HOME_DEVICE_CREDENTIALS_FILE', $null, 'Machine')
     }
 
+    if ($standardConfigured) {
+        if (-not (Test-Path -LiteralPath $StandardTokenFile -PathType Leaf)) {
+            throw "Standard token file was not found: $StandardTokenFile"
+        }
+        $standardTokenPath = (Resolve-Path -LiteralPath $StandardTokenFile).Path
+        $standardToken = (Get-Content -LiteralPath $standardTokenPath -Raw).Trim()
+        if (-not $standardToken) {
+            throw "Standard token file is blank: $standardTokenPath"
+        }
+        Set-SecretFileAcl -Path $standardTokenPath
+
+        if (-not (Test-Path -LiteralPath $ConversationGrantsFile -PathType Leaf)) {
+            $grantsParent = Split-Path -Parent $ConversationGrantsFile
+            if ($grantsParent) {
+                New-Item -ItemType Directory -Path $grantsParent -Force | Out-Null
+            }
+            $emptyGrants = '{"schema":1,"grants":[]}'
+            [System.IO.File]::WriteAllText($ConversationGrantsFile, $emptyGrants)
+        }
+        $conversationGrantsPath = (Resolve-Path -LiteralPath $ConversationGrantsFile).Path
+        Set-SecretFileAcl -Path $conversationGrantsPath
+        [Environment]::SetEnvironmentVariable('HERMES_HOME_STANDARD_GATEWAY_URL', $StandardGatewayUrl.Trim(), 'Machine')
+        [Environment]::SetEnvironmentVariable('HERMES_HOME_STANDARD_TOKEN_FILE', $standardTokenPath, 'Machine')
+        [Environment]::SetEnvironmentVariable('HERMES_HOME_CONVERSATION_GRANTS_FILE', $conversationGrantsPath, 'Machine')
+    }
+    else {
+        [Environment]::SetEnvironmentVariable('HERMES_HOME_STANDARD_GATEWAY_URL', $null, 'Machine')
+        [Environment]::SetEnvironmentVariable('HERMES_HOME_STANDARD_TOKEN_FILE', $null, 'Machine')
+        [Environment]::SetEnvironmentVariable('HERMES_HOME_CONVERSATION_GRANTS_FILE', $null, 'Machine')
+    }
+
     $backup = Update-PrometheusConfig -ConfigPath $PrometheusConfigPath -PrometheusTokenPath $tokenPath -TargetHost $BindHost -TargetPort $Port
     Register-HermesHomeTask -Name $TaskName -RunnerPath $runnerPath -WorkingDirectory $root
     Start-ScheduledTask -TaskName $TaskName
@@ -314,6 +377,10 @@ try {
     Write-Output "Scheduled task: $TaskName"
     Write-Output "Bridge listener: $BridgeBindHost`:$BridgePort"
     Write-Output "Bridge route ID: $($BridgeRouteId.Trim())"
+    if ($standardConfigured) {
+        Write-Output "Standard pilot target: $($StandardGatewayUrl.Trim())"
+        Write-Output "Conversation grants: $conversationGrantsPath"
+    }
 }
 catch {
     if ($taskWasRunning) {

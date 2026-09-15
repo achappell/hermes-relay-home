@@ -43,6 +43,10 @@ class RuntimeSettings:
     bridge_bind_host: str | None = None
     bridge_port: int = 8766
     bridge_route_id: str = "local"
+    standard_gateway_url: str | None = None
+    standard_token_file: Path | None = None
+    standard_token: str | None = field(default=None, repr=False)
+    conversation_grants_file: Path | None = None
 
     @property
     def auth_mode(self) -> str:
@@ -144,6 +148,43 @@ def load_settings(
     if not bridge_route_id:
         raise RuntimeConfigurationError("bridge route ID must not be blank")
 
+    standard_gateway_url = values.get("HERMES_HOME_STANDARD_GATEWAY_URL", "").strip()
+    standard_token_file_value = values.get("HERMES_HOME_STANDARD_TOKEN_FILE", "")
+    grants_file_value = values.get("HERMES_HOME_CONVERSATION_GRANTS_FILE", "")
+    standard_configured = bool(
+        standard_gateway_url or standard_token_file_value or grants_file_value
+    )
+    if standard_configured and not (
+        standard_gateway_url and standard_token_file_value and grants_file_value
+    ):
+        raise RuntimeConfigurationError(
+            "Standard bridge settings require gateway URL, token file, and grants file"
+        )
+    if standard_configured:
+        standard_token_file = _path_value(
+            standard_token_file_value,
+            default=None,
+            name="Standard token file",
+        )
+        conversation_grants_file = _path_value(
+            grants_file_value,
+            default=None,
+            name="conversation grants file",
+        )
+        try:
+            standard_token = standard_token_file.read_text(encoding="utf-8").strip()
+        except OSError as error:
+            raise RuntimeConfigurationError(
+                "cannot read Standard token file"
+            ) from error
+        if not standard_token:
+            raise RuntimeConfigurationError("Standard token must not be blank")
+    else:
+        standard_gateway_url = None
+        standard_token_file = None
+        standard_token = None
+        conversation_grants_file = None
+
     return RuntimeSettings(
         data_dir=data_dir,
         database_path=database_path,
@@ -158,6 +199,10 @@ def load_settings(
         bridge_bind_host=bridge_bind_host,
         bridge_port=bridge_port,
         bridge_route_id=bridge_route_id,
+        standard_gateway_url=standard_gateway_url,
+        standard_token_file=standard_token_file,
+        standard_token=standard_token,
+        conversation_grants_file=conversation_grants_file,
     )
 
 
@@ -198,6 +243,22 @@ def create_runtime(
             device_credentials=settings.device_credentials,
             credential_service=credential_service,
         )
+        if bridge_factory is None and settings.standard_gateway_url is not None:
+            if (
+                settings.standard_token is None
+                or settings.conversation_grants_file is None
+            ):
+                raise RuntimeConfigurationError(
+                    "Standard bridge settings are incomplete"
+                )
+            from hermes_home.bridge.production import create_standard_bridge_factory
+
+            bridge_factory = create_standard_bridge_factory(
+                gateway_url=settings.standard_gateway_url,
+                hermes_token=settings.standard_token,
+                grants_file=settings.conversation_grants_file,
+                device_authenticator=application.device_authenticator,
+            )
         server = create_server(
             application,
             host=settings.bind_host,

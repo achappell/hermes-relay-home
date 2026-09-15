@@ -74,3 +74,5 @@ uvx --from ruff ruff format --check src tests
 Monitoring setup is documented in [`observability/README.md`](observability/README.md).
 The native Windows deployment path is documented in
 [`deploy/windows/README.md`](deploy/windows/README.md).
+The Standard-backed Home pilot process and tailnet route are documented in
+[`deploy/ops/README.md`](deploy/ops/README.md).

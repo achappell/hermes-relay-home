@@ -35,8 +35,10 @@ transport contract now document that exact environment.
   credential-shaped values are not emitted.
 - Prompt, control, event, reconnect, and audio failure paths preserve typed
   known/uncertain outcomes and do not retry uncertain input.
-- Route-roaming, Household Identity proof, browser tickets, live Hermes
-  integration, and physical hardware remain outside this story's evidence.
+- Route-roaming, Household Identity proof, browser tickets, and physical
+  hardware remain outside this story's evidence. The deployment follow-up
+  below is an operator-managed Sprint 1 pilot, not final roaming or claim
+  authority.
 
 ## Deployment follow-up evidence
 
@@ -64,3 +66,32 @@ Observed results:
   `hermes_unavailable` result for `conversation.open`; this proves deployment
   and transport reachability, not a ready Hermes turn. The console runtime has
   no injected bridge factory yet.
+
+## Current Sprint 1 pilot evidence
+
+Validated 2026-09-15 after the tailnet access rule was saved. The first direct
+Tailscale mapping reached Standard but received HTTP 403 because Hermes's
+loopback Host guard correctly rejected the public Serve hostname. The checked-
+in loopback relay now keeps both sides bounded: it validates the existing
+Standard token, binds only to `127.0.0.1:9121`, and opens the upstream socket to
+the loopback Standard listener on `127.0.0.1:9120`.
+
+Observed results:
+
+- The media-server Standard LaunchAgent and relay LaunchAgent were both
+  running for Profile `amanda`.
+- Tailscale Serve remained tailnet-only and mapped `/api/ws` and the separate
+  `/api/audio/speak-stream` route to the relay; the existing `/` mapping was
+  unchanged.
+- CaticornQueen reached the media server on TCP 8443 after the ACL change.
+- The real CaticornQueen → Home → Tailscale → relay → Standard
+  `conversation.open` returned `status: ready`, `unresolved_turn: false`,
+  `interrupt: true`, `timing: absent`, and `audio: true`. Session identity and
+  credential values were not emitted into the evidence.
+- A direct external upgrade of Standard's response-audio WebSocket succeeded.
+- No prompt, agent turn, physical-device action, or audio stream was sent
+  during this readiness check. Text-turn, interrupt, reconnect/no-replay, and
+  audio-failure evidence remain the next validation work for STD-3.
+- Current Home verification after the relay change: `229 passed`; Ruff lint
+  and format checks passed; both launchd plist files and shell wrappers
+  parsed successfully.

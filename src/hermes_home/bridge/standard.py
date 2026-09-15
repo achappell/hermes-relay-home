@@ -6,7 +6,7 @@ import math
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from threading import Condition, Event, Lock, RLock, Thread, current_thread
 from typing import Protocol
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -714,6 +714,7 @@ class HomeBridge:
         conversation_resolver: Callable[[str, str], ConversationGrant | None],
         gateway_socket_factory: JsonSocketFactory,
         audio_socket_factory: AudioSocketFactory | None = None,
+        session_persistor: Callable[[ConversationGrant, str], None] | None = None,
         request_id_factory: Callable[[int], str] | None = None,
         turn_id_factory: Callable[[int], str] | None = None,
         audio_timeout: float | None = 30.0,
@@ -724,6 +725,7 @@ class HomeBridge:
         self._conversation_resolver = conversation_resolver
         self._gateway_socket_factory = gateway_socket_factory
         self._audio_socket_factory = audio_socket_factory
+        self._session_persistor = session_persistor
         self._request_id_factory = request_id_factory
         self._turn_id_factory = turn_id_factory or (lambda index: f"home-turn-{index}")
         self._audio_timeout = _validate_timeout(audio_timeout, "audio timeout")
@@ -878,6 +880,16 @@ class HomeBridge:
         if grant.session_id and durable_session_id not in (None, grant.session_id):
             gateway.close()
             return self._open_failure(conversation_handle, "conversation_mismatch")
+        if durable_session_id is not None:
+            try:
+                if self._session_persistor is not None:
+                    self._session_persistor(grant, durable_session_id)
+                grant = replace(grant, session_id=durable_session_id)
+            except OSError, RuntimeError, TypeError, ValueError:
+                gateway.close()
+                return self._open_failure(
+                    conversation_handle, "authorization_unavailable"
+                )
 
         with self._state_lock:
             if self._active_turn is not None:
@@ -920,7 +932,11 @@ class HomeBridge:
         return BridgeStatus(
             "ready",
             conversation_handle,
-            capabilities=_capabilities(ready_payload, commands=advertised_commands),
+            capabilities=_capabilities(
+                ready_payload,
+                commands=advertised_commands,
+                audio=self._audio_socket_factory is not None,
+            ),
         )
 
     def _open_failure(self, conversation_handle: str, reason: str) -> BridgeStatus:
@@ -1032,6 +1048,14 @@ class HomeBridge:
         if durable_session_id not in (None, resume_session_id):
             gateway.close()
             return self._reconnect_failure(handle, "conversation_mismatch")
+        if durable_session_id is not None:
+            try:
+                if self._session_persistor is not None:
+                    self._session_persistor(refreshed, durable_session_id)
+                refreshed = replace(refreshed, session_id=durable_session_id)
+            except OSError, RuntimeError, TypeError, ValueError:
+                gateway.close()
+                return self._reconnect_failure(handle, "authorization_unavailable")
 
         with self._state_lock:
             self._gateway = gateway
@@ -1048,7 +1072,11 @@ class HomeBridge:
         return BridgeStatus(
             "ready",
             handle,
-            capabilities=_capabilities(ready_payload, commands=advertised_commands),
+            capabilities=_capabilities(
+                ready_payload,
+                commands=advertised_commands,
+                audio=self._audio_socket_factory is not None,
+            ),
             unresolved_turn=unresolved_turn,
         )
 
@@ -2305,13 +2333,18 @@ def _durable_session_id(payload: Mapping[str, object]) -> str | None:
 
 
 def _capabilities(
-    payload: Mapping[str, object], *, commands: list[str] | None = None
+    payload: Mapping[str, object],
+    *,
+    commands: list[str] | None = None,
+    audio: bool = False,
 ) -> dict[str, object]:
     capabilities = payload.get("capabilities")
     source = capabilities if isinstance(capabilities, Mapping) else payload
     result: dict[str, object] = {
         "commands": list(commands) if commands is not None else [],
         "timing": "absent",
+        "interrupt": True,
+        "audio": audio,
     }
     heartbeat = source.get("heartbeat")
     if not isinstance(heartbeat, bool):
