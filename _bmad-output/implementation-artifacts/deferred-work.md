@@ -17,3 +17,13 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-home-nw-02-pairing-credentials.md`
   summary: Exercise the durable authenticator through the Standard bridge consumer.
   evidence: The persistent adapter now preserves the existing ID-returning seam, but bridge integration is owned by the later NW-03 route/bridge slice.
+
+## Deferred from: code review of spec-home-nw-06-diagnostics-incident-review.md (2026-09-15)
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-home-nw-06-diagnostics-incident-review.md`
+  summary: Expose `IncidentCaptureService` through the Home runtime/API.
+  evidence: The endpoint-native evidence contract and trusted-surface role model are open decisions in the canonical diagnostics specification; no Home capture route is defined in this slice.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-home-nw-06-diagnostics-incident-review.md`
+  summary: Define whether storage failures and duplicate IDs belong in `rejected_event_count` or a separate loss/availability counter.
+  evidence: The current diagnostics status vocabulary does not distinguish these cases, so changing the counter without a contract would make status interpretation ambiguous.

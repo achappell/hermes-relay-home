@@ -23,6 +23,7 @@ from hermes_home.bridge.standard import (
     BridgeTurn,
     GatewayRPCError,
 )
+from hermes_home.observability.diagnostics import DiagnosticEvent, DiagnosticsRecorder
 
 HOME_BRIDGE_PATH = "/api/v1/bridge/ws"
 BRIDGE_WS_PATH = HOME_BRIDGE_PATH
@@ -204,6 +205,7 @@ class BridgeEndpoint:
         headers: Mapping[str, str] | None = None,
         route: Mapping[str, object] | BridgeRoute | None = None,
         max_message_size: int = MAX_BRIDGE_MESSAGE_BYTES,
+        diagnostics: DiagnosticsRecorder | None = None,
     ) -> None:
         if type(max_message_size) is not int or max_message_size <= 0:
             raise ValueError("Home bridge message size must be positive")
@@ -212,6 +214,7 @@ class BridgeEndpoint:
         self._headers = dict(headers or {})
         self._route = _safe_route(route)
         self._max_message_size = max_message_size
+        self._diagnostics = diagnostics
         self._send_lock = threading.Lock()
         self._state_lock = threading.RLock()
         self._stop = threading.Event()
@@ -232,6 +235,7 @@ class BridgeEndpoint:
         self._event_thread: threading.Thread | None = None
         self._audio_thread: threading.Thread | None = None
         self._audio_turn_id: str | None = None
+        self._turn_correlations: dict[str, str] = {}
 
     @property
     def conversation_handle(self) -> str | None:
@@ -319,6 +323,7 @@ class BridgeEndpoint:
             self._bridge = None
             event_thread = self._event_thread
             audio_thread = self._audio_thread
+            self._turn_correlations.clear()
         if bridge is not None:
             try:
                 bridge.close()
@@ -417,7 +422,23 @@ class BridgeEndpoint:
         text = params["text"]
         if type(text) is not str or not text.strip():
             raise _RequestError("invalid_request", rpc_code=-32602)
-        self._require_ready()
+        correlation_id = (
+            None
+            if self._diagnostics is None
+            else self._diagnostics.new_correlation_id()
+        )
+        try:
+            self._require_ready()
+        except _RequestError as error:
+            if correlation_id is not None:
+                self._record_diagnostic(
+                    correlation_id,
+                    source="endpoint",
+                    phase="turn",
+                    outcome="unavailable",
+                    failure_code=error.code,
+                )
+            raise
         self._wait_for_stale_audio()
         with self._state_lock:
             if self._active_turn_id is not None:
@@ -428,9 +449,24 @@ class BridgeEndpoint:
             with self._state_lock:
                 self._submitting_turn = False
             raise _RequestError("hermes_unavailable")
+        if correlation_id is not None:
+            self._record_diagnostic(
+                correlation_id,
+                source="endpoint",
+                phase="turn",
+                outcome="started",
+            )
         try:
             turn = bridge.submit_prompt(text)
         except Exception as error:  # noqa: BLE001 - injected bridge is untrusted
+            if correlation_id is not None:
+                self._record_diagnostic(
+                    correlation_id,
+                    source="home",
+                    phase="turn",
+                    outcome="failed",
+                    failure_code=_normalize_code(_bridge_error(error)[0]),
+                )
             self._raise_bridge_error(error)
         finally:
             with self._state_lock:
@@ -447,10 +483,20 @@ class BridgeEndpoint:
                 self._mark_unavailable("protocol_error")
                 raise _RequestError("protocol_error", delivery="uncertain")
             terminal_seen = turn_id in self._terminal_turn_ids
+            if correlation_id is not None:
+                self._turn_correlations[turn_id] = correlation_id
             self._active_turn_id = turn_id
             self._known_turn_ids.add(turn_id)
             if not terminal_seen:
                 self._audio_turn_id = turn_id
+        if correlation_id is not None:
+            self._record_diagnostic(
+                correlation_id,
+                source="home",
+                phase="turn",
+                outcome="accepted",
+                turn_id=turn_id,
+            )
         if terminal_seen:
             self._maybe_release_turn(turn_id)
         else:
@@ -630,6 +676,7 @@ class BridgeEndpoint:
                     self._retired_turn_ids.clear()
                     self._retired_turn_order.clear()
                     self._pending_prompts.clear()
+                    self._turn_correlations.clear()
             self._readiness_changed.set()
             if (
                 audio_thread_to_join is not None
@@ -798,9 +845,22 @@ class BridgeEndpoint:
                         ),
                         None,
                     )
-        if event.turn_id is not None and _is_terminal_event(event.type, safe_payload):
+        terminal_event = event.turn_id is not None and _is_terminal_event(
+            event.type, safe_payload
+        )
+        if terminal_event:
+            assert event.turn_id is not None
             with self._state_lock:
+                correlation_id = self._turn_correlations.get(event.turn_id)
                 self._terminal_turn_ids.add(event.turn_id)
+            if correlation_id is not None:
+                self._record_diagnostic(
+                    correlation_id,
+                    source="hermes",
+                    phase="turn",
+                    outcome=_terminal_diagnostic_outcome(safe_payload),
+                    turn_id=event.turn_id,
+                )
             self._maybe_release_turn(event.turn_id)
         params: dict[str, object] = {
             "schema": HOME_BRIDGE_SCHEMA,
@@ -841,15 +901,35 @@ class BridgeEndpoint:
                 try:
                     frame = bridge.next_audio()
                 except BridgeTimeoutError:
+                    self._record_audio_diagnostic(
+                        turn_id,
+                        outcome="unavailable",
+                        failure_code="transport_timeout",
+                    )
                     self._send_audio_unavailable(turn_id, "transport_timeout")
                     break
                 except TimeoutError:
+                    self._record_audio_diagnostic(
+                        turn_id,
+                        outcome="unavailable",
+                        failure_code="transport_timeout",
+                    )
                     self._send_audio_unavailable(turn_id, "transport_timeout")
                     break
                 except BridgeTransportError, ConnectionError, EOFError, OSError:
+                    self._record_audio_diagnostic(
+                        turn_id,
+                        outcome="unavailable",
+                        failure_code="transport_unavailable",
+                    )
                     self._send_audio_unavailable(turn_id, "transport_unavailable")
                     break
                 except Exception:  # noqa: BLE001 - audio sidecar failure is typed
+                    self._record_audio_diagnostic(
+                        turn_id,
+                        outcome="unavailable",
+                        failure_code="protocol_error",
+                    )
                     self._send_audio_unavailable(turn_id, "protocol_error")
                     break
                 try:
@@ -859,7 +939,12 @@ class BridgeEndpoint:
                         started=started,
                         ended=ended,
                     )
-                except _RequestError:
+                except _RequestError as error:
+                    self._record_audio_diagnostic(
+                        turn_id,
+                        outcome="unavailable",
+                        failure_code=error.code,
+                    )
                     self._send_audio_unavailable(turn_id, "protocol_error")
                     break
                 try:
@@ -871,7 +956,38 @@ class BridgeEndpoint:
                         self._send_binary(outgoing)
                     else:
                         self._send_json(outgoing)
+                    if kind == "start":
+                        self._record_audio_diagnostic(
+                            turn_id,
+                            outcome="started",
+                        )
+                    elif kind == "pcm":
+                        self._record_audio_diagnostic(
+                            turn_id,
+                            outcome="accepted",
+                            byte_count=len(outgoing),
+                        )
+                    elif kind == "end":
+                        self._record_audio_diagnostic(
+                            turn_id,
+                            outcome="completed",
+                        )
+                    else:
+                        self._record_audio_diagnostic(
+                            turn_id,
+                            outcome="unavailable",
+                            failure_code=(
+                                "audio_fallback"
+                                if kind == "fallback"
+                                else "audio_unavailable"
+                            ),
+                        )
                 except Exception:  # noqa: BLE001 - close after a failed send
+                    self._record_audio_diagnostic(
+                        turn_id,
+                        outcome="unavailable",
+                        failure_code="transport_unavailable",
+                    )
                     self._mark_unavailable("transport_unavailable")
                     self.close()
                     break
@@ -1006,11 +1122,71 @@ class BridgeEndpoint:
                     self._retired_turn_ids.add(turn_id)
                 self._known_turn_ids.discard(turn_id)
                 self._terminal_turn_ids.discard(turn_id)
+                self._turn_correlations.pop(turn_id, None)
                 self._pending_prompts = {
                     key: event
                     for key, event in self._pending_prompts.items()
                     if key[1] != turn_id
                 }
+
+    def _record_audio_diagnostic(
+        self,
+        turn_id: str,
+        *,
+        outcome: str,
+        failure_code: str | None = None,
+        byte_count: int | None = None,
+    ) -> None:
+        with self._state_lock:
+            correlation_id = self._turn_correlations.get(turn_id)
+        if correlation_id is None:
+            return
+        self._record_diagnostic(
+            correlation_id,
+            source="hermes",
+            phase="audio",
+            outcome=outcome,
+            failure_code=failure_code,
+            turn_id=turn_id,
+            byte_count=byte_count,
+        )
+
+    def _record_diagnostic(
+        self,
+        correlation_id: str,
+        *,
+        source: str,
+        phase: str,
+        outcome: str,
+        failure_code: str | None = None,
+        turn_id: str | None = None,
+        byte_count: int | None = None,
+    ) -> None:
+        if self._diagnostics is None:
+            return
+        fields: dict[str, object] = {
+            "route_class": "home",
+            "route_id": self._diagnostics.route_identity(self._route.id),
+        }
+        if failure_code is not None:
+            fields["failure_code"] = failure_code
+        if turn_id is not None:
+            fields["turn_fingerprint"] = self._diagnostics.fingerprint(turn_id)
+        if byte_count is not None:
+            fields["byte_count"] = byte_count
+        try:
+            self._diagnostics.record(
+                DiagnosticEvent.create(
+                    correlation_id=correlation_id,
+                    source=source,
+                    phase=phase,
+                    outcome=outcome,
+                    occurred_at=self._diagnostics.now(),
+                    **fields,
+                )
+            )
+        except Exception as error:  # noqa: BLE001 - telemetry cannot block bridge work
+            del error
 
     def _send_json(self, payload: dict[str, object]) -> None:
         message = json.dumps(
@@ -1419,6 +1595,17 @@ def _is_terminal_event(event_type: str, payload: Mapping[str, object]) -> bool:
     return status is None or (
         type(status) is str and status.lower() in _TERMINAL_STATUSES
     )
+
+
+def _terminal_diagnostic_outcome(payload: Mapping[str, object]) -> str:
+    status = payload.get("status")
+    if isinstance(status, str):
+        normalized = status.casefold()
+        if normalized in {"interrupted", "cancelled", "canceled", "aborted", "stopped"}:
+            return "interrupted"
+        if normalized in {"failed", "error", "timeout", "timed_out", "timed-out"}:
+            return "failed"
+    return "completed"
 
 
 def _safe_public_mapping(value: Mapping[object, object]) -> dict[str, object]:

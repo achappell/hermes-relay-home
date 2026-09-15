@@ -13,7 +13,7 @@ development_status:
   home-nw-03-approved-local-bridge-route: done
   home-nw-04-route-roaming-identity-proof: backlog
   home-nw-05-profile-mappings-conversation-claims: backlog
-  home-nw-06-diagnostics-incident-review: ready-for-dev
+  home-nw-06-diagnostics-incident-review: done
   home-nw-07-typed-choice-authority: backlog
   home-nw-08-watch-safe-preview: backlog
   home-nw-09-device-health-check: backlog

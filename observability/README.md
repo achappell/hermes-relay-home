@@ -6,6 +6,35 @@ route/status, request duration, configuration revision and publish outcomes,
 and wake-claim/arbitration outcomes. Device IDs, claim IDs, credentials,
 transcripts, prompts, and audio are deliberately absent.
 
+## Household diagnostics
+
+NW-06 adds a separate, content-safe review boundary alongside the metrics
+endpoint:
+
+- `GET /api/v1/diagnostics/status` is available to the admin or an
+  authenticated Home device. It reports whether diagnostics are enabled, the
+  queued safe-event count, collector reachability, the last successful upload,
+  bounded-loss counters, and the retention policy.
+- `GET /api/v1/diagnostics/timeline/{correlation_id}` is admin-only. It returns
+  the ordered, versioned lifecycle events for one opaque correlation ID.
+
+Automatic events contain typed lifecycle facts, approved route labels, opaque
+fingerprints, durations, byte counts, and upload state. They reject prompts,
+transcripts, raw audio, credentials, keys, Sensitive Entry values, private
+notifications, and reversible household identifiers. The local SQLite review
+store retains detailed events for 14 days and bounds the queue; safe metrics
+retain for 30 days. A collector is an injected port, so a collector outage
+leaves the local queue and status honest without retrying or replaying a live
+Hermes turn.
+
+Incident capture is a separate explicit path. Home fixes the endpoint/current
+task scope, preview-before-approval rule, seven-day bundle deadline, and
+preserve/delete audit transitions through `IncidentCaptureService`. Endpoint
+adapters supply any private ring-buffer evidence, while sealing and bundle
+upload remain injected ports until the final encrypted store and trusted
+review roles are selected. A failed turn never uploads incident evidence by
+itself.
+
 ## Scrape
 
 Run Prometheus where it can reach the Home service and configure the admin

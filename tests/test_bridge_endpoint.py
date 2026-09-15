@@ -18,6 +18,10 @@ from hermes_home.bridge import (
     BridgeTransportError,
     BridgeTurn,
 )
+from hermes_home.observability.diagnostics import (
+    DiagnosticsRecorder,
+    InMemoryDiagnosticsStore,
+)
 
 HANDLE = "opaque-home-handle"
 ROUTE = {"class": "home", "id": "approved-route-label"}
@@ -524,6 +528,111 @@ def test_audio_notifications_preserve_start_metadata_and_binary_pcm() -> None:
         endpoint.close()
 
 
+def test_bridge_records_audio_facts_without_retaining_pcm() -> None:
+    class FixedRecorder(DiagnosticsRecorder):
+        def new_correlation_id(self) -> str:
+            return "corr-audio"
+
+    connection = FakeConnection()
+    bridge = FakeBridge()
+    bridge.audio.extend(
+        [
+            AudioFrame(
+                "start",
+                turn_id="home-turn-1",
+                sample_rate=24000,
+                channels=1,
+                sample_width=2,
+                byte_order="little",
+            ),
+            AudioFrame("pcm", turn_id="home-turn-1", data=b"\x01\x00\x02\x00"),
+            AudioFrame("end", turn_id="home-turn-1"),
+        ]
+    )
+    bridge.audio_ready.set()
+    recorder = FixedRecorder(store=InMemoryDiagnosticsStore(), clock=lambda: 100.0)
+    endpoint = BridgeEndpoint(
+        connection,
+        bridge,
+        headers=HEADERS,
+        route=ROUTE,
+        diagnostics=recorder,
+    )
+
+    try:
+        _open(endpoint)
+        _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="prompt-1",
+            method="prompt.submit",
+            params={"conversation_handle": HANDLE, "text": "speak"},
+        )
+        _wait_for(lambda: endpoint._audio_thread is None)
+
+        timeline = recorder.timeline("corr-audio")
+
+        assert [(event.phase, event.outcome) for event in timeline] == [
+            ("turn", "started"),
+            ("turn", "accepted"),
+            ("audio", "started"),
+            ("audio", "accepted"),
+            ("audio", "completed"),
+        ]
+        assert timeline[3].byte_count == 4
+        serialized = json.dumps([event.to_dict() for event in timeline])
+        assert "private prompt" not in serialized
+        assert "\\x01" not in serialized
+        assert "\\x02" not in serialized
+    finally:
+        endpoint.close()
+
+
+def test_bridge_records_audio_unavailability_without_retrying_the_turn() -> None:
+    class FixedRecorder(DiagnosticsRecorder):
+        def new_correlation_id(self) -> str:
+            return "corr-audio-timeout"
+
+    class TimeoutAudioBridge(FakeBridge):
+        def next_audio(self, *, timeout: float | None = None) -> AudioFrame:
+            del timeout
+            raise BridgeTimeoutError("audio timed out")
+
+    connection = FakeConnection()
+    bridge = TimeoutAudioBridge()
+    recorder = FixedRecorder(store=InMemoryDiagnosticsStore(), clock=lambda: 100.0)
+    endpoint = BridgeEndpoint(
+        connection,
+        bridge,
+        headers=HEADERS,
+        route=ROUTE,
+        diagnostics=recorder,
+    )
+
+    try:
+        _open(endpoint)
+        response = _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="prompt-1",
+            method="prompt.submit",
+            params={"conversation_handle": HANDLE, "text": "once"},
+        )
+        assert response["result"]["status"] == "submitted"
+        _wait_for(lambda: endpoint._audio_thread is None)
+
+        timeline = recorder.timeline("corr-audio-timeout")
+
+        assert timeline[-1].phase == "audio"
+        assert timeline[-1].outcome == "unavailable"
+        assert timeline[-1].failure_code == "transport_timeout"
+        assert bridge.prompt_calls == ["once"]
+    finally:
+        endpoint.close()
+
+
 def test_schema_and_deep_json_validation_fail_closed() -> None:
     connection = FakeConnection()
     bridge = FakeBridge()
@@ -717,6 +826,212 @@ def test_reconnect_clears_the_previous_endpoint_turn_without_resubmitting_it() -
         )
         assert second["result"]["turn_id"] == "home-turn-2"
         assert bridge.prompt_calls == ["uncertain", "fresh"]
+    finally:
+        endpoint.close()
+
+
+def test_bridge_records_one_safe_correlation_timeline_without_endpoint_content() -> (
+    None
+):
+    class FixedRecorder(DiagnosticsRecorder):
+        def new_correlation_id(self) -> str:
+            return "corr-bridge"
+
+    connection = FakeConnection()
+    bridge = FakeBridge()
+    recorder = FixedRecorder(
+        store=InMemoryDiagnosticsStore(),
+        clock=lambda: 100.0,
+    )
+    endpoint = BridgeEndpoint(
+        connection,
+        bridge,
+        headers=HEADERS,
+        route=ROUTE,
+        diagnostics=recorder,
+    )
+
+    try:
+        _open(endpoint)
+        _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="prompt-1",
+            method="prompt.submit",
+            params={"conversation_handle": HANDLE, "text": "private prompt"},
+        )
+
+        timeline = recorder.timeline("corr-bridge")
+
+        assert [event.outcome for event in timeline] == ["started", "accepted"]
+        assert {event.source for event in timeline} == {"endpoint", "home"}
+        serialized = json.dumps([event.to_dict() for event in timeline])
+        assert "private prompt" not in serialized
+        assert "endpoint-secret" not in serialized
+        assert "profile_id" not in serialized
+    finally:
+        endpoint.close()
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_outcome"),
+    [("completed", "completed"), ("interrupted", "interrupted")],
+)
+def test_bridge_records_terminal_hermes_outcome_on_the_same_correlation(
+    status: str,
+    expected_outcome: str,
+) -> None:
+    class FixedRecorder(DiagnosticsRecorder):
+        def new_correlation_id(self) -> str:
+            return "corr-terminal"
+
+    connection = FakeConnection()
+    bridge = FakeBridge()
+    recorder = FixedRecorder(store=InMemoryDiagnosticsStore(), clock=lambda: 100.0)
+    endpoint = BridgeEndpoint(
+        connection,
+        bridge,
+        headers=HEADERS,
+        route=ROUTE,
+        diagnostics=recorder,
+    )
+
+    try:
+        _open(endpoint)
+        _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="prompt-1",
+            method="prompt.submit",
+            params={"conversation_handle": HANDLE, "text": "private prompt"},
+        )
+        endpoint._event_payload(
+            BridgeEvent(
+                HANDLE,
+                "message.complete",
+                {"status": status, "profile_id": "hidden"},
+                turn_id="home-turn-1",
+            )
+        )
+
+        timeline = recorder.timeline("corr-terminal")
+
+        assert [event.outcome for event in timeline] == [
+            "started",
+            "accepted",
+            expected_outcome,
+        ]
+        assert timeline[-1].source == "hermes"
+        assert timeline[-1].turn_fingerprint is not None
+        assert "home-turn-1" not in json.dumps([event.to_dict() for event in timeline])
+    finally:
+        endpoint.close()
+
+
+def test_bridge_records_a_timed_out_prompt_without_retrying_it() -> None:
+    class FixedRecorder(DiagnosticsRecorder):
+        def new_correlation_id(self) -> str:
+            return "corr-timeout"
+
+    connection = FakeConnection()
+    bridge = FailingPromptBridge()
+    recorder = FixedRecorder(store=InMemoryDiagnosticsStore(), clock=lambda: 100.0)
+    endpoint = BridgeEndpoint(
+        connection,
+        bridge,
+        headers=HEADERS,
+        route=ROUTE,
+        diagnostics=recorder,
+    )
+
+    try:
+        _open(endpoint)
+        response = _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="prompt-1",
+            method="prompt.submit",
+            params={"conversation_handle": HANDLE, "text": "once"},
+        )
+
+        assert response["error"]["data"]["code"] == "transport_timeout"
+        timeline = recorder.timeline("corr-timeout")
+        assert [event.outcome for event in timeline] == ["started", "failed"]
+        assert timeline[-1].failure_code == "transport_timeout"
+        assert bridge.prompt_calls == ["once"]
+    finally:
+        endpoint.close()
+
+
+def test_diagnostics_rejection_cannot_change_bridge_delivery() -> None:
+    connection = FakeConnection()
+    bridge = FakeBridge()
+    recorder = DiagnosticsRecorder(
+        store=InMemoryDiagnosticsStore(),
+        clock=lambda: 100.0,
+    )
+    endpoint = BridgeEndpoint(
+        connection,
+        bridge,
+        headers=HEADERS,
+        route={"class": "home", "id": "unsafe route label"},
+        diagnostics=recorder,
+    )
+
+    try:
+        _open(endpoint)
+        response = _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="prompt-1",
+            method="prompt.submit",
+            params={"conversation_handle": HANDLE, "text": "once"},
+        )
+
+        assert response["result"]["status"] == "submitted"
+        assert bridge.prompt_calls == ["once"]
+    finally:
+        endpoint.close()
+
+
+def test_bridge_records_unavailable_turns_without_submitting_them() -> None:
+    class FixedRecorder(DiagnosticsRecorder):
+        def new_correlation_id(self) -> str:
+            return "corr-unavailable"
+
+    connection = FakeConnection()
+    bridge = FakeBridge()
+    bridge.status = BridgeStatus("unavailable", HANDLE, "hermes_unavailable")
+    recorder = FixedRecorder(store=InMemoryDiagnosticsStore(), clock=lambda: 100.0)
+    endpoint = BridgeEndpoint(
+        connection,
+        bridge,
+        headers=HEADERS,
+        route=ROUTE,
+        diagnostics=recorder,
+    )
+
+    try:
+        _open(endpoint)
+        response = _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="prompt-1",
+            method="prompt.submit",
+            params={"conversation_handle": HANDLE, "text": "once"},
+        )
+
+        assert response["error"]["data"]["code"] == "hermes_unavailable"
+        timeline = recorder.timeline("corr-unavailable")
+        assert [
+            (event.phase, event.outcome, event.failure_code) for event in timeline
+        ] == [("turn", "unavailable", "hermes_unavailable")]
+        assert bridge.prompt_calls == []
     finally:
         endpoint.close()
 

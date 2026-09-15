@@ -30,6 +30,46 @@ _METRIC_DEFINITIONS = {
         "gauge",
         "Currently observed active configuration revision.",
     ),
+    "hermes_home_diagnostics_collector_reachable": (
+        "gauge",
+        "Whether the configured diagnostics collector is reachable.",
+    ),
+    "hermes_home_diagnostics_events_dropped_total": (
+        "counter",
+        "Automatic diagnostic events dropped by the bounded local store.",
+    ),
+    "hermes_home_diagnostics_events_rejected_total": (
+        "counter",
+        "Automatic diagnostic events rejected by schema or storage policy.",
+    ),
+    "hermes_home_diagnostics_events_total": (
+        "counter",
+        "Automatic diagnostic events accepted by source and outcome.",
+    ),
+    "hermes_home_diagnostics_last_upload_timestamp_seconds": (
+        "gauge",
+        "Unix timestamp of the last successful diagnostics upload.",
+    ),
+    "hermes_home_diagnostics_queue_depth": (
+        "gauge",
+        "Number of safe diagnostic events awaiting upload.",
+    ),
+    "hermes_home_diagnostics_ring_entries_evicted_total": (
+        "counter",
+        "Private ring-buffer evidence entries evicted by capacity.",
+    ),
+    "hermes_home_diagnostics_ring_entries_expired_total": (
+        "counter",
+        "Private ring-buffer evidence entries expired by age.",
+    ),
+    "hermes_home_diagnostics_ring_entries_out_of_order_total": (
+        "counter",
+        "Private ring-buffer evidence entries dropped as stale.",
+    ),
+    "hermes_home_diagnostics_uploads_total": (
+        "counter",
+        "Safe diagnostic upload attempts by outcome.",
+    ),
     "hermes_home_http_request_duration_seconds": (
         "histogram",
         "HTTP request duration in seconds.",
