@@ -39,9 +39,10 @@ revisioned SQLite configuration storage, deterministic bounded wake arbitration,
 credential-bound contract translation, a loopback-by-default threaded HTTP
 server, an executable Python 3.14 runtime, and admin-authenticated Prometheus
 metrics with provisionable Grafana dashboards. The framework-independent
-Standard Hermes bridge seam is now covered by deterministic JSON/PCM fixtures;
-its endpoint envelope and route binding remain intentionally open as specified
-in the route-roaming BMAD companion
+Standard Hermes bridge seam is now covered by deterministic JSON/PCM fixtures,
+and HOME-NW-03 serves its safe endpoint envelope on one configured local route;
+route discovery, identity proof, browser bootstrap, and roaming remain
+intentionally open as specified in the route-roaming BMAD companion
 [`bridge-contract.md`](_bmad-output/specs/spec-home-bridge-route-roaming/bridge-contract.md).
 Endpoint pairing now supports five-minute approval codes, scoped durable
 credentials, renewal, rotation, and revocation. Configure paired mode with
@@ -65,7 +66,7 @@ The project targets Python 3.14 and uses the standard library for SQLite and
 the initial HTTP server. Run the focused checks with:
 
 ```sh
-uv run --no-project --python 3.14 --with pytest --with cryptography -- python -m pytest -q
+uv run --no-project --python 3.14 --with pytest --with cryptography --with 'websockets>=17,<18' -- python -m pytest -q
 uvx --from ruff ruff check src tests
 uvx --from ruff ruff format --check src tests
 ```

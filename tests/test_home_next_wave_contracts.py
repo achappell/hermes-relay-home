@@ -47,7 +47,7 @@ def test_route_roaming_contract_targets_pinned_standard_transport():
     assert "No `speech_timing` event in the pinned baseline" in route_state
 
 
-def test_bridge_contract_separates_the_live_seam_from_the_planned_endpoint():
+def test_bridge_contract_separates_the_live_seam_from_route_roaming_work():
     bridge_contract = (
         SPECS / "spec-home-bridge-route-roaming" / "bridge-contract.md"
     ).read_text()
@@ -55,8 +55,13 @@ def test_bridge_contract_separates_the_live_seam_from_the_planned_endpoint():
         SPECS / "spec-standard-bridge" / "transport-contract.md"
     ).read_text()
 
-    assert "> Status: planned endpoint-adapter contract." in bridge_contract
-    assert "endpoint route is live" in bridge_contract
+    assert "> Status: the local endpoint-adapter slice is live in HOME-NW-03." in (
+        bridge_contract
+    )
+    assert (
+        "discovery, identity proof, browser bootstrap, and roaming remain future work."
+        in bridge_contract
+    )
     assert "Vanilla Hermes Agent `0.21.1`" in bridge_contract
     assert "not vanilla Hermes methods or fields" in bridge_contract
     assert "conversation.reconnect" in bridge_contract
@@ -64,7 +69,7 @@ def test_bridge_contract_separates_the_live_seam_from_the_planned_endpoint():
     assert '"method": "audio.frame"' in bridge_contract
     assert "audio.start" in bridge_contract
     assert "There are no public `audio.start`" in bridge_contract
-    assert "planned endpoint is not a" in standard_bridge
+    assert "The live local route at" in standard_bridge
     assert "/api/v1/bridge/ws" in standard_bridge
 
 

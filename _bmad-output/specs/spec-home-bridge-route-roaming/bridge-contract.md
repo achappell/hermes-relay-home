@@ -1,13 +1,13 @@
 # Home bridge contract v1
 
-> Status: planned endpoint-adapter contract. Story 2 implements the
-> framework-independent `HomeBridge` seam described below; this repository does
-> not yet serve the public WebSocket or browser bootstrap route described in
-> this document.
+> Status: the local endpoint-adapter slice is live in HOME-NW-03. Story 2
+> implements the framework-independent `HomeBridge` seam described below, and
+> HOME-NW-03 serves it on one explicitly configured local WebSocket route. Route
+> discovery, identity proof, browser bootstrap, and roaming remain future work.
 
-This page gives front ends a stable target for the later Home route adapter. It
-does not mean that the endpoint route is live. Until that adapter lands, a
-connection refusal or `404` for `/api/v1/bridge/ws` is an implementation-status
+This page gives front ends the stable contract for the Home route adapter. The
+local `/api/v1/bridge/ws` route is live for the HOME-NW-03 slice; a connection
+refusal or `404` outside that configured listener is an implementation-status
 signal, not proof that a device credential or conversation handle is invalid.
 
 ## Compatibility classification
@@ -21,7 +21,7 @@ The table separates that stock wire from Home-owned behavior:
 | --- | --- | --- |
 | JSON/session socket | `/api/ws`, JSON-RPC 2.0; `gateway.ready`, `gateway.ping`, `session.create`, `session.resume`, `prompt.submit`, `session.interrupt`, and advertised `command.dispatch` | `HomeBridge` opens this socket with a server-held token and maps the result into Home state. |
 | Standard events | JSON-RPC notification `method: "event"` with `params.type` and `params.payload` | Home preserves the Standard `type` and semantic payload, then adds opaque Home conversation/turn correlation in its own envelope. |
-| Response audio | Separate `/api/audio/speak-stream`; JSON `type: "start"`, raw signed-16 little-endian PCM, then `type: "end"` or `type: "fallback"` | Home associates the sidecar with a Home turn and exposes typed `AudioFrame` values; the planned endpoint uses `audio.frame` only as a Home transport notification. |
+| Response audio | Separate `/api/audio/speak-stream`; JSON `type: "start"`, raw signed-16 little-endian PCM, then `type: "end"` or `type: "fallback"` | Home associates the sidecar with a Home turn and exposes typed `AudioFrame` values; the local endpoint uses `audio.frame` only as a Home transport notification. |
 | Authentication | Stock client path uses the Hermes bearer in the WebSocket URL as `?token=` | Home keeps that bearer server-side. Front ends use a Home Device credential or a short-lived browser upgrade ticket. |
 | Timing | No authoritative `speech_timing` or word-offset event | Home reports `timing: "absent"` until a separately verified playback-clock/duration adapter exists. |
 | Identity/recovery | Standard runtime and durable Session identifiers are part of the server protocol | Home resolves Profile/session context from an opaque conversation grant, hides runtime identity, and owns no-replay reconnect state. |
@@ -30,7 +30,7 @@ The table separates that stock wire from Home-owned behavior:
 `bridge.ping`, the Home `schema: 1` field, route objects, Device
 authentication, browser tickets, `unresolved_turn`, and the `audio.frame`
 notification are not vanilla Hermes methods or fields. A front end must send
-those to the future Home adapter, never directly to the vanilla `/api/ws`
+those to the local Home adapter, never directly to the vanilla `/api/ws`
 socket. Conversely, the Home adapter must translate its calls to the stock
 Standard operations above rather than inventing a second Hermes protocol.
 
@@ -66,7 +66,7 @@ methods are:
 
 `BridgeStatus.to_endpoint()`, `BridgeTurn.to_endpoint()`, and
 `BridgeEvent.to_endpoint()` currently return Home domain dictionaries, not
-JSON-RPC envelopes. A future route adapter must wrap those domain values in the
+JSON-RPC envelopes. The route adapter must wrap those domain values in the
 wire contract below; a front end must not assume that calling the Python seam
 means a public route already exists.
 
@@ -124,7 +124,7 @@ wss://<selected-approved-route>/api/v1/bridge/ws
 The route selector chooses only an approved route, proves the same Household
 Identity, and reports the selected route separately from bridge and turn state.
 The final discovery, identity-proof, TLS, and public reverse-proxy deployment
-remain route-roaming work; they are not implemented by Story 2.
+remain route-roaming work; they are not implemented by HOME-NW-03.
 
 Native clients or a trusted client proxy send the Home credential on the
 upgrade request:
@@ -169,7 +169,7 @@ device header; it must not put the device credential in the WebSocket URL.
 
 ## JSON-RPC envelope
 
-The planned endpoint uses JSON-RPC 2.0 with Home `schema: 1` on every
+The local endpoint uses JSON-RPC 2.0 with Home `schema: 1` on every
 Home-owned JSON frame. Requests use a unique client-generated `id`. Hermes
 credentials and runtime Standard session identifiers never appear in a frame.
 
@@ -249,7 +249,7 @@ model input and must not be converted into a new `prompt.submit`.
 
 ### Events
 
-The planned adapter sends Standard events as JSON-RPC notifications. The
+The local adapter sends Standard events as JSON-RPC notifications. The
 Standard `event.type`, semantic payload, order, cumulative-preview meaning,
 turn ownership, and prompt correlation are preserved:
 
@@ -274,7 +274,7 @@ turn ownership, and prompt correlation are preserved:
 “Preserve the payload” does not mean “forward every key.” The current internal
 sanitizer recursively removes `session_id`, `runtime_session_id`,
 `stored_session_id`, and `session_key`; it does not provide a general public
-credential/Profile scrubber. The future route adapter must allowlist its Home
+credential/Profile scrubber. The route adapter must allowlist its Home
 envelope and remove or reject Profile IDs, credentials, bearer tokens, runtime
 session identities, and other server-only fields before serialization. A
 front end must not treat `BridgeEvent.to_endpoint()` as a complete public
@@ -339,7 +339,7 @@ a ready route must not be reported as proof that a prior turn was delivered.
 ## Response audio
 
 The implemented bridge reads Standard response audio from the separate
-`/api/audio/speak-stream` sidecar. The planned endpoint adapter keeps the
+`/api/audio/speak-stream` sidecar. The local endpoint adapter keeps the
 Standard frame kinds rather than renaming them into new Hermes events. It uses
 JSON `audio.frame` notifications for sidecar control frames and raw binary
 frames for PCM:
@@ -404,8 +404,8 @@ endpoint adapter as later work.
 Stories that consume this boundary must read the Home BMAD context before
 planning or changing a client adapter. Read it in this order:
 
-1. This `bridge-contract.md` for the endpoint-facing target and its live/not-
-   live status.
+1. This `bridge-contract.md` for the endpoint-facing contract and its local
+   live status versus future roaming work.
 2. `SPEC.md` and `route-session-state.md` in this directory for route priority,
    Household Identity, connection state, and uncertain-turn rules.
 3. `../spec-standard-hermes-compatibility-migration/standard-baseline.md` for
@@ -424,10 +424,10 @@ Home dependency context is in
 ~/Development/hermes-relay-home/_bmad-output/specs/spec-home-bridge-route-roaming/bridge-contract.md
 and its linked companions. Read those files before planning. Treat the
 vanilla Standard 0.21.1 rows as Hermes-owned and the Home envelope, Device
-credential, route, reconnect, and redaction rows as Home-owned. The public Home
-adapter is not live in the current Home revision, so do not claim live route
-integration or invent a second Hermes protocol. Keep this surface's existing
-session/presentation boundary and record fake/live evidence in this repository.
+credential, route, reconnect, and redaction rows as Home-owned. The local Home
+adapter is live in HOME-NW-03; do not claim route-roaming integration or invent
+a second Hermes protocol. Keep this surface's existing session/presentation
+boundary and record fake/live evidence in this repository.
 ```
 
 The next-wave front-end stories consume the same contract with different local
@@ -442,7 +442,7 @@ evidence:
 Each agent owns its repository's implementation and validation. A Home contract
 reference is an upstream dependency, not permission to edit Home status records,
 copy the server-held Hermes credential into a client, or mark another surface
-complete. If the planned endpoint adapter is still absent, a front-end story
+complete. If the local endpoint is absent from a deployment, a front-end story
 may build its adapter against a fake Home bridge and record the live route as a
 blocked integration gate; it must not silently fall back to direct Hermes
 bearer access as the Home implementation.
