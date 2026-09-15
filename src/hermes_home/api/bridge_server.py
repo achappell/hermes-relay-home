@@ -14,6 +14,7 @@ from hermes_home.bridge.endpoint import (
     BridgeEndpoint,
     BridgeRoute,
 )
+from hermes_home.observability.diagnostics import DiagnosticsRecorder
 
 __all__ = [
     "BRIDGE_WS_PATH",
@@ -29,6 +30,7 @@ def create_bridge_server(
     host: str = "127.0.0.1",
     port: int = 8766,
     websocket_serve: Callable[..., Server] | None = None,
+    diagnostics: DiagnosticsRecorder | None = None,
 ) -> Server:
     """Create the local Home WebSocket server.
 
@@ -67,6 +69,7 @@ def create_bridge_server(
             headers=headers,
             route=safe_route,
             max_message_size=MAX_BRIDGE_MESSAGE_BYTES,
+            diagnostics=diagnostics,
         )
         endpoint.run()
 

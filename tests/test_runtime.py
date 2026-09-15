@@ -6,6 +6,7 @@ import pytest
 from websockets.sync.client import connect
 
 from hermes_home.domain.credentials import CredentialService
+from hermes_home.observability.diagnostics import DiagnosticEvent
 from hermes_home.runtime import (
     RuntimeConfigurationError,
     create_runtime,
@@ -506,3 +507,39 @@ def test_create_runtime_serves_the_authenticated_metrics_endpoint(tmp_path) -> N
         runtime.server.shutdown()
         runtime.close()
         thread.join(timeout=2)
+
+
+def test_create_runtime_persists_the_shared_diagnostics_timeline_across_restart(
+    tmp_path,
+) -> None:
+    token_file = tmp_path / "admin-token"
+    token_file.write_text("admin-secret", encoding="utf-8")
+    settings = load_settings(
+        {
+            "HERMES_HOME_DATA_DIR": str(tmp_path / "data"),
+            "HERMES_HOME_ADMIN_TOKEN_FILE": str(token_file),
+            "HERMES_HOME_PORT": "0",
+            "HERMES_HOME_BRIDGE_PORT": "0",
+        }
+    )
+    runtime = create_runtime(settings)
+    runtime.diagnostics.record(
+        DiagnosticEvent.create(
+            event_id="event-runtime",
+            correlation_id="corr-runtime",
+            source="home",
+            phase="turn",
+            outcome="unavailable",
+            occurred_at=runtime.diagnostics.now(),
+            failure_code="hermes_unavailable",
+        )
+    )
+    runtime.close()
+
+    restarted = create_runtime(settings)
+    try:
+        timeline = restarted.diagnostics.timeline("corr-runtime")
+        assert [event.event_id for event in timeline] == ["event-runtime"]
+        assert timeline[0].failure_code == "hermes_unavailable"
+    finally:
+        restarted.close()

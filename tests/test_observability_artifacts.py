@@ -4,6 +4,17 @@ from pathlib import Path
 OBSERVABILITY = Path(__file__).parents[1] / "observability"
 
 
+def test_diagnostics_review_boundary_is_documented_without_content_logging() -> None:
+    readme = (OBSERVABILITY / "README.md").read_text()
+
+    assert "GET /api/v1/diagnostics/status" in readme
+    assert "GET /api/v1/diagnostics/timeline/{correlation_id}" in readme
+    assert "14 days" in readme
+    assert "30 days" in readme
+    assert "raw audio" in readme
+    assert "preview-before-approval" in readme
+
+
 def test_grafana_dashboards_are_valid_and_reference_the_home_metrics() -> None:
     for name, uid in (
         ("hermes-home-overview.json", "hermes-home-overview"),

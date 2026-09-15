@@ -18,6 +18,13 @@ from hermes_home.domain.credentials import (
     CredentialStateError,
     CredentialValidationError,
 )
+from hermes_home.observability.diagnostics import (
+    DiagnosticEvent,
+    DiagnosticsRecorder,
+    DiagnosticStoreError,
+    DiagnosticValidationError,
+    InMemoryDiagnosticsStore,
+)
 from hermes_home.observability.metrics import MetricsRegistry
 from hermes_home.storage.credentials import CredentialStoreError
 from hermes_home.storage.sqlite import ConfigurationStoreError, RevisionConflict
@@ -46,6 +53,7 @@ class HomeApplication:
         clock: Callable[[], float] = time.monotonic,
         sleeper: Callable[[float], None] = time.sleep,
         metrics: MetricsRegistry | None = None,
+        diagnostics: DiagnosticsRecorder | None = None,
     ) -> None:
         self._configuration_store = configuration_store
         self._arbitration_engine = arbitration_engine
@@ -63,6 +71,10 @@ class HomeApplication:
         self._clock = clock
         self._sleeper = sleeper
         self._metrics = metrics or MetricsRegistry()
+        self._diagnostics = diagnostics or DiagnosticsRecorder(
+            store=InMemoryDiagnosticsStore(),
+            metrics=self._metrics,
+        )
         try:
             snapshot = self._configuration_store.read()
         except OSError, RuntimeError, TypeError, ValueError:
@@ -85,13 +97,27 @@ class HomeApplication:
     ) -> HTTPResponse:
         request_path = path.split("?", 1)[0]
         started = time.perf_counter()
+        correlation_id = self._diagnostics.new_correlation_id()
         try:
             response = self._dispatch(method, request_path, headers, body)
         except OSError, RuntimeError, TypeError, ValueError:
             self._record_http(method, request_path, 500, started)
+            self._record_diagnostic(
+                correlation_id,
+                path=request_path,
+                status=500,
+                started=started,
+            )
             raise
         self._record_http(method, request_path, response.status, started)
         self._record_outcome(method, request_path, response)
+        self._record_diagnostic(
+            correlation_id,
+            path=request_path,
+            status=response.status,
+            started=started,
+            response=response,
+        )
         return response
 
     def _dispatch(
@@ -116,8 +142,16 @@ class HomeApplication:
             return self._post_enrollment_request(headers, body)
         elif path == "/metrics" and method == "GET":
             return self._get_metrics(headers)
+        elif path == "/api/v1/diagnostics/status" and method == "GET":
+            return self._get_diagnostics_status(headers)
         else:
             parts = path.split("/")
+            if (
+                len(parts) == 6
+                and parts[1:5] == ["api", "v1", "diagnostics", "timeline"]
+                and method == "GET"
+            ):
+                return self._get_diagnostics_timeline(headers, parts[5])
             if len(parts) == 7 and parts[1:5] == [
                 "api",
                 "v1",
@@ -501,6 +535,43 @@ class HomeApplication:
             content_type="text/plain; version=0.0.4; charset=utf-8",
         )
 
+    def _get_diagnostics_status(
+        self,
+        headers: Mapping[str, str],
+    ) -> HTTPResponse:
+        if not (
+            self._authenticator.authenticate_admin(headers)
+            or self._authenticator.authenticate_device(headers) is not None
+        ):
+            return _error(401, "unauthorized")
+        try:
+            status = self._diagnostics.status()
+        except DiagnosticStoreError:
+            return _error(503, "service_unavailable")
+        return HTTPResponse(200, status.to_dict())
+
+    def _get_diagnostics_timeline(
+        self,
+        headers: Mapping[str, str],
+        correlation_id: str,
+    ) -> HTTPResponse:
+        if not self._authenticator.authenticate_admin(headers):
+            return _error(401, "unauthorized")
+        try:
+            events = self._diagnostics.timeline(correlation_id)
+        except DiagnosticStoreError:
+            return _error(503, "service_unavailable")
+        except DiagnosticValidationError:
+            return _error(400, "invalid_request")
+        return HTTPResponse(
+            200,
+            {
+                "schema": 1,
+                "correlation_id": correlation_id,
+                "events": [event.to_dict() for event in events],
+            },
+        )
+
     def _put_configuration(
         self,
         headers: Mapping[str, str],
@@ -653,6 +724,41 @@ class HomeApplication:
             labels=labels,
         )
 
+    def _record_diagnostic(
+        self,
+        correlation_id: str,
+        *,
+        path: str,
+        status: int,
+        started: float,
+        response: HTTPResponse | None = None,
+    ) -> None:
+        if path == "/metrics" or path.startswith("/api/v1/diagnostics/"):
+            return
+        if 200 <= status < 300:
+            outcome = "completed"
+        elif status >= 500:
+            outcome = "failed"
+        else:
+            outcome = "rejected"
+        failure_code = None if response is None else _response_error_code(response)
+        try:
+            self._diagnostics.record(
+                DiagnosticEvent.create(
+                    correlation_id=correlation_id,
+                    source="home",
+                    phase="request",
+                    outcome=outcome,
+                    occurred_at=self._diagnostics.now(),
+                    duration_ms=max(0, round((time.perf_counter() - started) * 1000)),
+                    failure_code=failure_code,
+                    route_class="home",
+                    route_id=_metric_route(path),
+                )
+            )
+        except Exception as error:  # noqa: BLE001 - telemetry cannot block HTTP work
+            del error
+
     def _record_outcome(
         self,
         method: str,
@@ -799,10 +905,13 @@ def _error(status: int, code: str) -> HTTPResponse:
 
 
 def _metric_route(path: str) -> str:
+    if path.startswith("/api/v1/diagnostics/timeline/"):
+        return "diagnostics_timeline"
     return {
         "/api/v1/configuration": "configuration",
         "/api/v1/wake-claims": "wake_claims",
         "/metrics": "metrics",
+        "/api/v1/diagnostics/status": "diagnostics_status",
     }.get(path, "other")
 
 

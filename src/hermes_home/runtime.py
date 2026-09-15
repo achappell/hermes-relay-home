@@ -18,7 +18,10 @@ from hermes_home.api.server import create_server
 from hermes_home.bridge.endpoint import BridgeRoute
 from hermes_home.domain.arbitration import ArbitrationEngine
 from hermes_home.domain.credentials import CredentialService
+from hermes_home.observability.diagnostics import DiagnosticsRecorder
+from hermes_home.observability.metrics import MetricsRegistry
 from hermes_home.storage.credentials import SQLiteCredentialStore
+from hermes_home.storage.diagnostics import SQLiteDiagnosticsStore
 from hermes_home.storage.sqlite import SQLiteConfigurationStore
 
 
@@ -63,6 +66,8 @@ class HomeRuntime:
 
     server: ThreadingHTTPServer
     store: SQLiteConfigurationStore
+    diagnostics_store: SQLiteDiagnosticsStore
+    diagnostics: DiagnosticsRecorder
     credential_store: SQLiteCredentialStore | None = None
     bridge_server: Server | None = None
     bridge_thread: Thread | None = field(default=None, repr=False)
@@ -82,6 +87,7 @@ class HomeRuntime:
         self.server.server_close()
         if self.credential_store is not None:
             self.credential_store.close()
+        self.diagnostics_store.close()
         self.store.close()
 
 
@@ -222,12 +228,19 @@ def create_runtime(
         )
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     store = SQLiteConfigurationStore(settings.database_path)
+    diagnostics_store: SQLiteDiagnosticsStore | None = None
     credential_store = None
     server: ThreadingHTTPServer | None = None
     bridge_server = None
     bridge_thread = None
     bridge_thread_started = False
     try:
+        diagnostics_store = SQLiteDiagnosticsStore(settings.database_path)
+        metrics = MetricsRegistry()
+        diagnostics = DiagnosticsRecorder(
+            store=diagnostics_store,
+            metrics=metrics,
+        )
         credential_service = None
         if settings.credential_root_secret is not None:
             credential_store = SQLiteCredentialStore(settings.database_path)
@@ -242,6 +255,8 @@ def create_runtime(
             admin_token=settings.admin_token,
             device_credentials=settings.device_credentials,
             credential_service=credential_service,
+            metrics=metrics,
+            diagnostics=diagnostics,
         )
         if bridge_factory is None and settings.standard_gateway_url is not None:
             if (
@@ -270,6 +285,7 @@ def create_runtime(
             route=BridgeRoute(id=settings.bridge_route_id),
             host=settings.bridge_bind_host or settings.bind_host,
             port=settings.bridge_port,
+            diagnostics=diagnostics,
         )
         bridge_thread = Thread(
             target=bridge_server.serve_forever,
@@ -290,11 +306,16 @@ def create_runtime(
             server.server_close()
         if credential_store is not None:
             credential_store.close()
+        if diagnostics_store is not None:
+            diagnostics_store.close()
         store.close()
         raise
+    assert diagnostics_store is not None
     return HomeRuntime(
         server=server,
         store=store,
+        diagnostics_store=diagnostics_store,
+        diagnostics=diagnostics,
         credential_store=credential_store,
         bridge_server=bridge_server,
         bridge_thread=bridge_thread,
