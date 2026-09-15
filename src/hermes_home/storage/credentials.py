@@ -121,6 +121,9 @@ def _decode_state(serialized: object) -> dict[str, object]:
     if not isinstance(state, dict) or state.get("schema") != 1:
         raise CredentialStoreError("credential state schema is invalid")
     for key in ("offers", "requests", "credentials", "replacements"):
-        if not isinstance(state.get(key), list):
+        records = state.get(key)
+        if not isinstance(records, list) or any(
+            not isinstance(record, dict) for record in records
+        ):
             raise CredentialStoreError("credential state shape is invalid")
     return state

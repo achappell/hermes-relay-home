@@ -374,34 +374,52 @@ class CredentialService:
             return None
         digest = self._digest(credential)
 
-        def find_device(state: dict[str, object]) -> AuthenticatedDevice | None:
+        def find_device(
+            state: dict[str, object],
+            *,
+            clean_expired: bool,
+        ) -> tuple[AuthenticatedDevice | None, bool]:
             now = self._now()
-            credentials = _records(state, "credentials")
+            cleanup_needed = False
             for replacement in _records(state, "replacements"):
                 if replacement.get("status") == "active" and now >= _timestamp(
                     replacement.get("overlap_until")
                 ):
-                    _invalidate_replacement(replacement, "expired")
+                    cleanup_needed = True
+                    if clean_expired:
+                        _invalidate_replacement(replacement, "expired")
             found: AuthenticatedDevice | None = None
-            for record in credentials:
+            for record in _records(state, "credentials"):
                 status = record.get("status")
                 expires_at = _timestamp(record.get("expires_at"))
                 overlap_until = _timestamp(record.get("overlap_until", 0.0))
-                if status == "active" and now >= expires_at:
-                    record["status"] = "expired"
+                expired = (status == "active" and now >= expires_at) or (
+                    status == "replaced" and now >= overlap_until
+                )
+                if expired:
+                    cleanup_needed = True
                     status = "expired"
-                elif status == "replaced" and now >= overlap_until:
-                    status = "expired"
-                    record["status"] = status
+                    if clean_expired:
+                        record["status"] = status
                 equal = hmac.compare_digest(str(record.get("digest", "")), digest)
                 accepted = status == "active" or (
                     allow_replaced and status == "replaced" and now < overlap_until
                 )
                 if equal and accepted:
                     found = _authenticated_device(record)
+            return found, cleanup_needed
+
+        found, cleanup_needed = find_device(
+            self._store.read_state(), clean_expired=False
+        )
+        if not cleanup_needed:
             return found
 
-        return self._store.mutate(find_device)
+        def clean_state(state: dict[str, object]) -> AuthenticatedDevice | None:
+            found, _ = find_device(state, clean_expired=True)
+            return found
+
+        return self._store.mutate(clean_state)
 
     def list_requests(self) -> tuple[EnrollmentRequest, ...]:
         """Return redacted enrollment request metadata for the admin surface."""
@@ -496,7 +514,9 @@ class CredentialService:
             raise CredentialValidationError("platform secure storage is required")
         digest = self._digest(enrollment_code)
 
-        def consume(state: dict[str, object]) -> CredentialMaterial:
+        def consume(
+            state: dict[str, object],
+        ) -> tuple[CredentialMaterial, RevocationEvent | None]:
             now = self._now()
             request = _find_record_by_id(_records(state, "requests"), request_id)
             if request is None:
@@ -530,6 +550,7 @@ class CredentialService:
                 for item in credentials
                 if item.get("endpoint_id") == request["endpoint_id"]
             ]
+            revocation_event: RevocationEvent | None = None
             if matching:
                 device_id = _identifier(matching[0]["device_id"], "device_id")
                 generation = (
@@ -545,6 +566,11 @@ class CredentialService:
                 for replacement in _records(state, "replacements"):
                     if replacement.get("device_id") == device_id:
                         _invalidate_replacement(replacement, "revoked")
+                revocation_event = RevocationEvent(
+                    device_id=device_id,
+                    generation=generation - 1,
+                    reason="re-enrollment",
+                )
             else:
                 device_id = _identifier(self._id_factory(), "device_id")
                 generation = 1
@@ -564,15 +590,20 @@ class CredentialService:
             )
             request["status"] = "consumed"
             offer["status"] = "consumed"
-            return CredentialMaterial(
-                device_id=device_id,
-                credential=token,
-                generation=generation,
-                expires_at=expires_at,
-                scope=approved_scope,
+            return (
+                CredentialMaterial(
+                    device_id=device_id,
+                    credential=token,
+                    generation=generation,
+                    expires_at=expires_at,
+                    scope=approved_scope,
+                ),
+                revocation_event,
             )
 
-        return self._store.mutate(consume)
+        material, revocation_event = self._store.mutate(consume)
+        self._notify_revocation(revocation_event)
+        return material
 
     def renew(
         self,
@@ -762,15 +793,19 @@ class CredentialService:
             )
 
         event = self._store.mutate(mark_revoked)
-        if self._revocation_observer is not None:
-            try:  # The durable revocation commit must not depend on observers.
-                self._revocation_observer.on_revoked(event)
-            except Exception as error:  # noqa: BLE001
-                LOGGER.debug(
-                    "revocation observer failed: %s",
-                    type(error).__name__,
-                )
+        self._notify_revocation(event)
         return event
+
+    def _notify_revocation(self, event: RevocationEvent | None) -> None:
+        if event is None or self._revocation_observer is None:
+            return
+        try:  # The durable revocation commit must not depend on observers.
+            self._revocation_observer.on_revoked(event)
+        except Exception as error:  # noqa: BLE001
+            LOGGER.debug(
+                "revocation observer failed: %s",
+                type(error).__name__,
+            )
 
     def _digest(self, token: str) -> str:
         return self._protector.digest(token)

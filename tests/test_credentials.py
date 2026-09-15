@@ -8,7 +8,10 @@ from hermes_home.domain.credentials import (
     CredentialStateError,
     CredentialValidationError,
 )
-from hermes_home.storage.credentials import SQLiteCredentialStore
+from hermes_home.storage.credentials import (
+    InMemoryCredentialStore,
+    SQLiteCredentialStore,
+)
 
 
 def test_approved_scope_must_be_a_subset_of_the_requested_scope() -> None:
@@ -523,6 +526,50 @@ def test_active_credential_expires_at_the_ninety_day_boundary(tmp_path) -> None:
         store.close()
 
 
+def test_authentication_uses_a_read_only_credential_store() -> None:
+    class ReadOnlyStore:
+        def __init__(self) -> None:
+            self._store = InMemoryCredentialStore()
+            self.sealed = False
+
+        def read_state(self):
+            return self._store.read_state()
+
+        def mutate(self, mutation):
+            if self.sealed:
+                raise AssertionError("authentication opened a write transaction")
+            return self._store.mutate(mutation)
+
+    root_secret = b"r" * 32
+    protector = CredentialProtector(root_secret)
+    store = ReadOnlyStore()
+    store.mutate(
+        lambda state: state["credentials"].append(
+            {
+                "device_id": "device-1",
+                "endpoint_id": "endpoint-1",
+                "generation": 1,
+                "status": "active",
+                "issued_at": 1_000.0,
+                "expires_at": 2_000.0,
+                "digest": protector.digest("device-secret"),
+                "scope": {"rooms": ["kitchen"], "capabilities": ["wake_claim"]},
+            }
+        )
+    )
+    store.sealed = True
+    service = CredentialService(
+        store=store,
+        root_secret=root_secret,
+        clock=lambda: 1_000.0,
+    )
+
+    authenticated = service.authenticate_device("device-secret")
+
+    assert authenticated is not None
+    assert authenticated.device_id == "device-1"
+
+
 def test_early_renewal_is_rejected_without_creating_replacement(tmp_path) -> None:
     store = SQLiteCredentialStore(tmp_path / "home.sqlite3")
     service = CredentialService(
@@ -571,6 +618,7 @@ def test_early_renewal_is_rejected_without_creating_replacement(tmp_path) -> Non
 def test_reenrollment_keeps_endpoint_binding_but_invalidates_the_old_credential(
     tmp_path,
 ) -> None:
+    notifications = []
     store = SQLiteCredentialStore(tmp_path / "home.sqlite3")
     identifiers = iter(["offer-1", "request-1", "device-1", "offer-2", "request-2"])
     tokens = iter(
@@ -589,6 +637,9 @@ def test_reenrollment_keeps_endpoint_binding_but_invalidates_the_old_credential(
         id_factory=identifiers.__next__,
         token_factory=tokens.__next__,
         confirmation_factory=iter(["ABCD2345", "EFGH6789"]).__next__,
+        revocation_observer=type(
+            "Observer", (), {"on_revoked": notifications.append}
+        )(),
     )
 
     def pair(code: str, endpoint_token: str):
@@ -631,6 +682,10 @@ def test_reenrollment_keeps_endpoint_binding_but_invalidates_the_old_credential(
         replacement_record = store.read_state()["replacements"][0]
         assert replacement_record["status"] == "revoked"
         assert replacement_record["ciphertext"] == ""
+        assert len(notifications) == 1
+        assert notifications[0].device_id == first.device_id
+        assert notifications[0].generation == replacement.generation
+        assert notifications[0].reason == "re-enrollment"
         with pytest.raises(CredentialStateError, match="expired_or_consumed"):
             service.rotate(
                 device_id=first.device_id,

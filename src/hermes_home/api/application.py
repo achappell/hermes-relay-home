@@ -345,7 +345,7 @@ class HomeApplication:
                 {"schema", "reason"},
                 optional_fields={"reason"},
             )
-            reason = request.get("reason")
+            reason = _optional_reason(request)
             enrollment = self._credential_service.reject_request(
                 request_id, reason=reason
             )
@@ -459,7 +459,7 @@ class HomeApplication:
                 optional_fields={"reason"},
             )
             event = self._credential_service.revoke(
-                device_id, reason=request.get("reason")
+                device_id, reason=_optional_reason(request)
             )
         except CredentialStateError as error:
             return _credential_error(error)
@@ -706,6 +706,16 @@ def _json_object(body: bytes | str) -> dict[str, object]:
 def _require_schema(request: Mapping[str, object]) -> None:
     if type(request.get("schema")) is not int or request["schema"] != 1:
         raise ValueError("unsupported schema")
+
+
+def _optional_reason(request: Mapping[str, object]) -> str | None:
+    """Treat an omitted reason differently from an explicitly null reason."""
+    if "reason" not in request:
+        return None
+    reason = request["reason"]
+    if type(reason) is not str:
+        raise ValueError("reason must be a string when supplied")
+    return reason
 
 
 def _credential_error(error: CredentialStateError) -> HTTPResponse:

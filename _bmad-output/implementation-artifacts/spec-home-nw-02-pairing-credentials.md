@@ -55,7 +55,9 @@ existing application and runtime seams:
   file is configured. If neither source is configured, endpoint authentication
   and pairing are disabled. The modes never fall back to one another;
   configuring both sources is a startup error so revocation cannot be bypassed
-  by a static credential.
+  by a static credential. Normal authentication reads durable state without a
+  write transaction; it persists expiry cleanup only when stale records are
+  observed.
 - `api/application.py` exposes the exact Home-owned v1 control plane below.
   Admin actions use the existing Home bearer token; endpoint self-actions use
   `Device` auth bound to the path's `device_id`. Credentials appear only in
@@ -79,8 +81,9 @@ replacement permits the old credential for at most 600 seconds solely to
 retry a lost response. The same request ID returns the same replacement for
 that generation; a different request ID cannot mint another replacement.
 Explicit revocation invalidates both generations and retry material
-immediately. Re-enrollment creates a new credential generation and invalidates
-the prior one.
+immediately. Re-enrollment creates a new credential generation, invalidates
+the prior one, and emits the redacted revocation event after the durable
+transition commits.
 
 ### v1 control-plane routes
 
@@ -211,11 +214,12 @@ consumption. Profile mappings remain display-only as specified for NW-05.
 
 ## Verification
 
-- `uv run --no-cache --no-project --python 3.14 --with pytest --with cryptography -- python -m pytest -q tests/test_credentials.py tests/test_credentials_api.py` — 17 passed.
-- `uv run --no-cache --no-project --python 3.14 --with pytest --with cryptography -- python -m pytest -q` — 150 passed.
+- `uv run --no-cache --no-project --python 3.14 --with pytest --with cryptography -- python -m pytest -q tests/test_credentials.py tests/test_credentials_api.py tests/test_runtime.py` — 46 passed.
+- `uv run --no-cache --no-project --python 3.14 --with pytest --with cryptography -- python -m pytest -q` — 171 passed.
 - `uv run --no-cache --no-project --python 3.14 --with ruff --with cryptography -- ruff check src tests` — all checks passed.
 - `uv run --no-cache --no-project --python 3.14 --with ruff --with cryptography -- ruff format --check src tests` — 34 files already formatted.
 - `uv lock --check` — resolved 10 packages.
+- `git diff --check` — passed.
 
 ## Open Questions
 
@@ -238,6 +242,9 @@ bridge route and envelope.
   scope, and runtime changes; verification is green and the story is in review.
 - 2026-09-14 — Completed the independent review, applied patch findings, and
   marked the story done; future-slice findings are recorded in the triage log.
+- 2026-09-14 — Closed the follow-up review gaps for re-enrollment observer
+  delivery, malformed state, read-only authentication, explicit null reasons,
+  and verification-count drift.
 
 ## Review Triage
 
@@ -288,3 +295,17 @@ Owner-approved; implementation may proceed.
 - E8 — Verdict: false. Credential state has no prior persisted version in the baseline; schema version `1` is the initial durable schema and unknown versions fail closed rather than being silently misread.
 - E9 — Verdict: low; route: patch. The required validation file was missing; it is now present, populated from observed results, and indexed.
 - E10 — Verdict: medium; route: patch. `HTTPResponse`'s default repr could include one-time material; the body field is now excluded from repr, while transport serialization still returns the intended one-time response.
+
+### Follow-up corrective review
+
+- R1 — Re-enrollment now emits the redacted revocation event after its durable
+  credential transition, with a regression assertion for event identity and
+  generation.
+- R2 — Credential record lists reject non-object entries during durable-state
+  decoding, preserving the redacted `503 service_unavailable` boundary.
+- R3 — Normal credential authentication uses a read-only state read; a write
+  is reserved for observed expiry cleanup, with regression coverage for both
+  paths.
+- R4 — Admin rejection and revocation reject an explicitly null `reason` while
+  still accepting an omitted optional reason; verification counts now match
+  the commands actually run.

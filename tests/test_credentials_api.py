@@ -99,6 +99,27 @@ def test_admin_offer_and_endpoint_request_are_reviewable_without_exposing_secret
         assert listed.body["requests"][0]["status"] == "pending"
         assert code not in json.dumps(listed.body)
         assert "credential" not in json.dumps(listed.body)
+        null_reason = application.handle(
+            "POST",
+            f"/api/v1/enrollment/requests/{request.body['request_id']}/reject",
+            {
+                "Authorization": "Bearer admin-secret",
+                "Content-Type": "application/json",
+            },
+            b'{"schema": 1, "reason": null}',
+        )
+        assert null_reason.status == 400
+        assert null_reason.body == {
+            "schema": 1,
+            "error": {"code": "invalid_request"},
+        }
+        still_pending = application.handle(
+            "GET",
+            "/api/v1/enrollment/requests",
+            {"Authorization": "Bearer admin-secret"},
+            b"",
+        )
+        assert still_pending.body["requests"][0]["status"] == "pending"
         rejected = application.handle(
             "POST",
             f"/api/v1/enrollment/requests/{request.body['request_id']}/reject",
@@ -190,6 +211,38 @@ def test_corrupt_enrollment_state_returns_a_redacted_storage_error(tmp_path) -> 
             "/api/v1/enrollment/requests",
             {"Authorization": "Bearer admin-secret"},
             b"",
+        )
+
+        assert response.status == 503
+        assert response.body == {
+            "schema": 1,
+            "error": {"code": "service_unavailable"},
+        }
+    finally:
+        configuration_store.close()
+        credential_store.close()
+
+
+def test_malformed_credential_record_returns_a_redacted_storage_error(tmp_path) -> None:
+    application, configuration_store, credential_store = _paired_application(tmp_path)
+
+    try:
+        credential_store._connection.execute(
+            "UPDATE credential_state SET state = ? WHERE id = 1",
+            (
+                '{"schema": 1, "offers": [], "requests": [], "credentials": [1], "replacements": []}',
+            ),
+        )
+        credential_store._connection.commit()
+
+        response = application.handle(
+            "POST",
+            "/api/v1/devices/device-1/revoke",
+            {
+                "Authorization": "Bearer admin-secret",
+                "Content-Type": "application/json",
+            },
+            b'{"schema": 1}',
         )
 
         assert response.status == 503
@@ -355,6 +408,20 @@ def test_approval_and_consumption_issue_a_credential_with_enforced_scope(
         )
         assert retried_rotation.status == 200
         assert retried_rotation.body["credential"] == "replacement-secret"
+        null_reason = application.handle(
+            "POST",
+            "/api/v1/devices/device-1/revoke",
+            {
+                "Authorization": "Bearer admin-secret",
+                "Content-Type": "application/json",
+            },
+            b'{"schema": 1, "reason": null}',
+        )
+        assert null_reason.status == 400
+        assert null_reason.body == {
+            "schema": 1,
+            "error": {"code": "invalid_request"},
+        }
         revoked = application.handle(
             "POST",
             "/api/v1/devices/device-1/revoke",
