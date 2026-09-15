@@ -13,7 +13,7 @@ the repository's complete test suite and the focused runtime/API/domain set.
 ## Checks
 
 - `uv run --no-cache --no-project --python 3.14 --with pytest --with cryptography -- python -m pytest -q tests/test_credentials.py tests/test_credentials_api.py tests/test_runtime.py` — 46 passed.
-- `uv run --no-cache --no-project --python 3.14 --with pytest --with cryptography -- python -m pytest -q` — 171 passed.
+- `uv run --no-cache --no-project --python 3.14 --with pytest --with cryptography -- python -m pytest -q` — 172 passed.
 - `uv run --no-cache --no-project --python 3.14 --with ruff --with cryptography -- ruff check src tests` — all checks passed.
 - `uv run --no-cache --no-project --python 3.14 --with ruff --with cryptography -- ruff format --check src tests` — 34 files already formatted.
 - `uv lock --check` — resolved 10 packages.
