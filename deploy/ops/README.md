@@ -38,11 +38,18 @@ file with mode `0600` and load the LaunchAgent:
 mkdir -p ~/.hermes/hermes-home-standard-pilot ~/Library/LaunchAgents
 chmod 700 ~/.hermes/hermes-home-standard-pilot
 cp deploy/ops/hermes-standard-home-pilot.sh ~/.hermes/hermes-home-standard-pilot/run.sh
+cp deploy/ops/hermes-standard-home-pilot-proxy.py ~/.hermes/hermes-home-standard-pilot/proxy.py
+cp deploy/ops/hermes-standard-home-pilot-proxy.sh ~/.hermes/hermes-home-standard-pilot/proxy.sh
 cp deploy/ops/com.hermes.home-standard-pilot.plist ~/Library/LaunchAgents/
+cp deploy/ops/com.hermes.home-standard-pilot-proxy.plist ~/Library/LaunchAgents/
 chmod 700 ~/.hermes/hermes-home-standard-pilot/run.sh
+chmod 700 ~/.hermes/hermes-home-standard-pilot/proxy.sh
+chmod 700 ~/.hermes/hermes-home-standard-pilot/proxy.py
 chmod 600 ~/.hermes/hermes-home-standard-pilot/standard-token
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hermes.home-standard-pilot.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hermes.home-standard-pilot-proxy.plist
 launchctl kickstart -k gui/$(id -u)/com.hermes.home-standard-pilot
+launchctl kickstart -k gui/$(id -u)/com.hermes.home-standard-pilot-proxy
 ```
 
 Confirm the process emits `gateway.ready` on a loopback handshake before
@@ -52,11 +59,18 @@ existing Tailscale Serve configuration:
 ```sh
 /usr/local/bin/tailscale serve --bg --https=8443 \
   --set-path=/api/ws \
-  http://127.0.0.1:9120/api/ws
+  http://127.0.0.1:9121/api/ws
+/usr/local/bin/tailscale serve --bg --https=8443 \
+  --set-path=/api/audio/speak-stream \
+  http://127.0.0.1:9121/api/audio/speak-stream
 ```
 
-The resulting Home setting is the tailnet WSS URL ending in `/api/ws`. Keep
-the Standard token on the media server and copy the same value into the
+The relay remains loopback-only. It checks the same Standard token as the
+Home client, then opens a fresh loopback WebSocket to Standard so the public
+Tailscale `Host` header cannot trip Hermes's loopback rebinding guard. The
+second route is required for Home's separate response-audio socket. The
+resulting Home setting is the tailnet WSS URL ending in `/api/ws`. Keep the
+Standard token on the media server and copy the same value into the
 ACL-protected CaticornQueen token file used by the Windows installer. This
 process is the Sprint 1 pilot target; HOME-NW-05 still owns the eventual
 dynamic Profile and claim authority.
