@@ -1,3 +1,4 @@
+import hashlib
 import json
 
 from hermes_home.api.application import HomeApplication
@@ -8,6 +9,10 @@ from hermes_home.observability.diagnostics import (
     InMemoryDiagnosticsStore,
 )
 from hermes_home.storage.sqlite import SQLiteConfigurationStore
+
+
+def _corr(label: str) -> str:
+    return "corr-" + hashlib.sha256(label.encode()).hexdigest()[:32]
 
 
 def _application(tmp_path):
@@ -33,7 +38,7 @@ def test_diagnostics_status_is_available_to_admin_or_authenticated_endpoint(
     try:
         diagnostics.record(
             DiagnosticEvent.create(
-                correlation_id="corr-status",
+                correlation_id=_corr("status"),
                 source="home",
                 phase="telemetry",
                 outcome="queued",
@@ -68,31 +73,27 @@ def test_diagnostics_status_is_available_to_admin_or_authenticated_endpoint(
 def test_admin_timeline_read_returns_ordered_safe_events_only(tmp_path) -> None:
     application, store, diagnostics = _application(tmp_path)
     try:
-        diagnostics.record(
-            DiagnosticEvent.create(
-                event_id="event-02",
-                correlation_id="corr-timeline",
-                source="home",
-                phase="turn",
-                outcome="completed",
-                occurred_at=102.0,
-                duration_ms=20,
-            )
+        later = DiagnosticEvent.create(
+            correlation_id=_corr("timeline"),
+            source="home",
+            phase="turn",
+            outcome="completed",
+            occurred_at=102.0,
+            duration_ms=20,
         )
-        diagnostics.record(
-            DiagnosticEvent.create(
-                event_id="event-01",
-                correlation_id="corr-timeline",
-                source="endpoint",
-                phase="turn",
-                outcome="started",
-                occurred_at=101.0,
-            )
+        earlier = DiagnosticEvent.create(
+            correlation_id=_corr("timeline"),
+            source="endpoint",
+            phase="turn",
+            outcome="started",
+            occurred_at=101.0,
         )
+        diagnostics.record(later)
+        diagnostics.record(earlier)
 
         response = application.handle(
             "GET",
-            "/api/v1/diagnostics/timeline/corr-timeline",
+            f"/api/v1/diagnostics/timeline/{_corr('timeline')}",
             {"Authorization": "Bearer admin-secret"},
             b"",
         )
@@ -100,8 +101,8 @@ def test_admin_timeline_read_returns_ordered_safe_events_only(tmp_path) -> None:
         assert response.status == 200
         assert response.body["schema"] == 1
         assert [event["event_id"] for event in response.body["events"]] == [
-            "event-01",
-            "event-02",
+            earlier.event_id,
+            later.event_id,
         ]
         assert "prompt" not in json.dumps(response.body)
         assert "credential" not in json.dumps(response.body)
@@ -128,7 +129,7 @@ def test_timeline_read_rejects_unsafe_correlation_ids(tmp_path) -> None:
 def test_diagnostics_failure_cannot_change_an_ordinary_http_response(tmp_path) -> None:
     class BrokenDiagnostics:
         def new_correlation_id(self) -> str:
-            return "corr-http"
+            return _corr("http")
 
         def now(self) -> float:
             return 100.0

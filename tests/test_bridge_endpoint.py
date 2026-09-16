@@ -531,7 +531,7 @@ def test_audio_notifications_preserve_start_metadata_and_binary_pcm() -> None:
 def test_bridge_records_audio_facts_without_retaining_pcm() -> None:
     class FixedRecorder(DiagnosticsRecorder):
         def new_correlation_id(self) -> str:
-            return "corr-audio"
+            return "corr-" + "a" * 32
 
     connection = FakeConnection()
     bridge = FakeBridge()
@@ -571,7 +571,7 @@ def test_bridge_records_audio_facts_without_retaining_pcm() -> None:
         )
         _wait_for(lambda: endpoint._audio_thread is None)
 
-        timeline = recorder.timeline("corr-audio")
+        timeline = recorder.timeline("corr-" + "a" * 32)
 
         assert [(event.phase, event.outcome) for event in timeline] == [
             ("turn", "started"),
@@ -592,7 +592,7 @@ def test_bridge_records_audio_facts_without_retaining_pcm() -> None:
 def test_bridge_records_audio_unavailability_without_retrying_the_turn() -> None:
     class FixedRecorder(DiagnosticsRecorder):
         def new_correlation_id(self) -> str:
-            return "corr-audio-timeout"
+            return "corr-" + "b" * 32
 
     class TimeoutAudioBridge(FakeBridge):
         def next_audio(self, *, timeout: float | None = None) -> AudioFrame:
@@ -623,7 +623,7 @@ def test_bridge_records_audio_unavailability_without_retrying_the_turn() -> None
         assert response["result"]["status"] == "submitted"
         _wait_for(lambda: endpoint._audio_thread is None)
 
-        timeline = recorder.timeline("corr-audio-timeout")
+        timeline = recorder.timeline("corr-" + "b" * 32)
 
         assert timeline[-1].phase == "audio"
         assert timeline[-1].outcome == "unavailable"
@@ -835,7 +835,7 @@ def test_bridge_records_one_safe_correlation_timeline_without_endpoint_content()
 ):
     class FixedRecorder(DiagnosticsRecorder):
         def new_correlation_id(self) -> str:
-            return "corr-bridge"
+            return "corr-" + "c" * 32
 
     connection = FakeConnection()
     bridge = FakeBridge()
@@ -862,7 +862,7 @@ def test_bridge_records_one_safe_correlation_timeline_without_endpoint_content()
             params={"conversation_handle": HANDLE, "text": "private prompt"},
         )
 
-        timeline = recorder.timeline("corr-bridge")
+        timeline = recorder.timeline("corr-" + "c" * 32)
 
         assert [event.outcome for event in timeline] == ["started", "accepted"]
         assert {event.source for event in timeline} == {"endpoint", "home"}
@@ -884,7 +884,7 @@ def test_bridge_records_terminal_hermes_outcome_on_the_same_correlation(
 ) -> None:
     class FixedRecorder(DiagnosticsRecorder):
         def new_correlation_id(self) -> str:
-            return "corr-terminal"
+            return "corr-" + "d" * 32
 
     connection = FakeConnection()
     bridge = FakeBridge()
@@ -916,7 +916,7 @@ def test_bridge_records_terminal_hermes_outcome_on_the_same_correlation(
             )
         )
 
-        timeline = recorder.timeline("corr-terminal")
+        timeline = recorder.timeline("corr-" + "d" * 32)
 
         assert [event.outcome for event in timeline] == [
             "started",
@@ -933,7 +933,7 @@ def test_bridge_records_terminal_hermes_outcome_on_the_same_correlation(
 def test_bridge_records_a_timed_out_prompt_without_retrying_it() -> None:
     class FixedRecorder(DiagnosticsRecorder):
         def new_correlation_id(self) -> str:
-            return "corr-timeout"
+            return "corr-" + "e" * 32
 
     connection = FakeConnection()
     bridge = FailingPromptBridge()
@@ -958,7 +958,7 @@ def test_bridge_records_a_timed_out_prompt_without_retrying_it() -> None:
         )
 
         assert response["error"]["data"]["code"] == "transport_timeout"
-        timeline = recorder.timeline("corr-timeout")
+        timeline = recorder.timeline("corr-" + "e" * 32)
         assert [event.outcome for event in timeline] == ["started", "failed"]
         assert timeline[-1].failure_code == "transport_timeout"
         assert bridge.prompt_calls == ["once"]
@@ -1001,7 +1001,7 @@ def test_diagnostics_rejection_cannot_change_bridge_delivery() -> None:
 def test_bridge_records_unavailable_turns_without_submitting_them() -> None:
     class FixedRecorder(DiagnosticsRecorder):
         def new_correlation_id(self) -> str:
-            return "corr-unavailable"
+            return "corr-" + "f" * 32
 
     connection = FakeConnection()
     bridge = FakeBridge()
@@ -1027,7 +1027,7 @@ def test_bridge_records_unavailable_turns_without_submitting_them() -> None:
         )
 
         assert response["error"]["data"]["code"] == "hermes_unavailable"
-        timeline = recorder.timeline("corr-unavailable")
+        timeline = recorder.timeline("corr-" + "f" * 32)
         assert [
             (event.phase, event.outcome, event.failure_code) for event in timeline
         ] == [("turn", "unavailable", "hermes_unavailable")]

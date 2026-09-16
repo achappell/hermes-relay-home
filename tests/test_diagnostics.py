@@ -1,8 +1,11 @@
+import hashlib
 from threading import Event, Thread
 
 import pytest
 
 from hermes_home.observability.diagnostics import (
+    INCIDENT_RETENTION_SECONDS,
+    CaptureRecord,
     CaptureScope,
     CaptureStateError,
     DiagnosticEvent,
@@ -19,6 +22,18 @@ from hermes_home.observability.diagnostics import (
 ENDPOINT_FINGERPRINT = "fp-" + "a" * 24
 TASK_FINGERPRINT = "fp-" + "b" * 24
 OTHER_ENDPOINT_FINGERPRINT = "fp-" + "c" * 24
+
+
+def _corr(label: str) -> str:
+    return "corr-" + hashlib.sha256(label.encode()).hexdigest()[:32]
+
+
+def _evidence_clock(now: float = 100.0):
+    return lambda: now
+
+
+def _event_id(label: str) -> str:
+    return "evt-" + hashlib.sha256(label.encode()).hexdigest()[:32]
 
 
 class AllowCapture:
@@ -43,7 +58,7 @@ def _capture_auth(scope: CaptureScope) -> dict[str, object]:
 
 def test_safe_event_serializes_only_allowed_lifecycle_fields() -> None:
     event = DiagnosticEvent.create(
-        correlation_id="corr-01",
+        correlation_id=_corr("01"),
         source="endpoint",
         phase="turn",
         outcome="started",
@@ -57,7 +72,7 @@ def test_safe_event_serializes_only_allowed_lifecycle_fields() -> None:
     assert event.to_dict() == {
         "schema": 1,
         "event_id": event.event_id,
-        "correlation_id": "corr-01",
+        "correlation_id": _corr("01"),
         "source": "endpoint",
         "phase": "turn",
         "outcome": "started",
@@ -77,8 +92,8 @@ def test_safe_event_rejects_content_bearing_or_unknown_fields() -> None:
         DiagnosticEvent.from_mapping(
             {
                 "schema": 1,
-                "event_id": "event-01",
-                "correlation_id": "corr-01",
+                "event_id": _event_id("01"),
+                "correlation_id": _corr("01"),
                 "source": "home",
                 "phase": "turn",
                 "outcome": "failed",
@@ -97,8 +112,8 @@ def test_recorder_counts_rejected_events_without_raising_to_live_work() -> None:
     accepted = recorder.record(
         {
             "schema": 1,
-            "event_id": "event-01",
-            "correlation_id": "corr-01",
+            "event_id": _event_id("01"),
+            "correlation_id": _corr("01"),
             "source": "home",
             "phase": "turn",
             "outcome": "completed",
@@ -108,8 +123,8 @@ def test_recorder_counts_rejected_events_without_raising_to_live_work() -> None:
     rejected = recorder.record(
         {
             "schema": 1,
-            "event_id": "event-02",
-            "correlation_id": "corr-01",
+            "event_id": _event_id("02"),
+            "correlation_id": _corr("01"),
             "source": "home",
             "phase": "turn",
             "outcome": "completed",
@@ -121,7 +136,7 @@ def test_recorder_counts_rejected_events_without_raising_to_live_work() -> None:
     assert accepted is True
     assert rejected is False
     assert recorder.status().rejected_event_count == 1
-    assert len(recorder.timeline("corr-01")) == 1
+    assert len(recorder.timeline(_corr("01"))) == 1
 
 
 def test_recorder_survives_a_rejection_counter_store_failure() -> None:
@@ -138,8 +153,8 @@ def test_recorder_survives_a_rejection_counter_store_failure() -> None:
         recorder.record(
             {
                 "schema": 1,
-                "event_id": "event-01",
-                "correlation_id": "corr-01",
+                "event_id": _event_id("01"),
+                "correlation_id": _corr("01"),
                 "source": "home",
                 "phase": "turn",
                 "outcome": "completed",
@@ -166,6 +181,45 @@ def test_recorder_survives_a_pending_store_failure_during_flush() -> None:
 
     assert result.uploaded_count == 0
     assert result.collector_reachable is False
+    assert result.failure_code == "storage_unavailable"
+
+
+def test_flush_clears_an_in_flight_batch_when_its_clock_fails() -> None:
+    now = [100.0, 100.0, 100.0, float("nan"), 100.0, 100.0, 100.0]
+
+    class Collector:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def upload(self, events, *, idempotency_key: str) -> UploadAcknowledgement:
+            self.calls += 1
+            return UploadAcknowledgement(
+                idempotency_key=idempotency_key,
+                event_ids=tuple(event.event_id for event in events),
+            )
+
+    collector = Collector()
+    recorder = DiagnosticsRecorder(
+        store=InMemoryDiagnosticsStore(),
+        collector=collector,
+        clock=lambda: now.pop(0),
+    )
+    assert recorder.record(
+        DiagnosticEvent.create(
+            correlation_id=_corr("clock-failure"),
+            source="home",
+            phase="telemetry",
+            outcome="queued",
+            occurred_at=100.0,
+        )
+    )
+
+    first = recorder.flush()
+    second = recorder.flush()
+
+    assert first.failure_code == "storage_unavailable"
+    assert second.uploaded_count == 1
+    assert collector.calls == 2
 
 
 def test_recorder_purges_expired_events_and_exposes_bounded_loss() -> None:
@@ -179,7 +233,7 @@ def test_recorder_purges_expired_events_and_exposes_bounded_loss() -> None:
 
     recorder.record(
         DiagnosticEvent.create(
-            correlation_id="corr-old",
+            correlation_id=_corr("old"),
             source="home",
             phase="turn",
             outcome="completed",
@@ -189,7 +243,7 @@ def test_recorder_purges_expired_events_and_exposes_bounded_loss() -> None:
     now[0] = 100.0
     recorder.record(
         DiagnosticEvent.create(
-            correlation_id="corr-new",
+            correlation_id=_corr("new"),
             source="home",
             phase="turn",
             outcome="completed",
@@ -199,13 +253,13 @@ def test_recorder_purges_expired_events_and_exposes_bounded_loss() -> None:
 
     status = recorder.status()
 
-    assert recorder.timeline("corr-old") == ()
-    assert len(recorder.timeline("corr-new")) == 1
+    assert recorder.timeline(_corr("old")) == ()
+    assert len(recorder.timeline(_corr("new"))) == 1
     assert status.dropped_event_count == 0
 
     recorder.record(
         DiagnosticEvent.create(
-            correlation_id="corr-latest",
+            correlation_id=_corr("latest"),
             source="home",
             phase="turn",
             outcome="completed",
@@ -214,8 +268,8 @@ def test_recorder_purges_expired_events_and_exposes_bounded_loss() -> None:
     )
 
     assert recorder.status().dropped_event_count == 1
-    assert recorder.timeline("corr-new") == ()
-    assert len(recorder.timeline("corr-latest")) == 1
+    assert recorder.timeline(_corr("new")) == ()
+    assert len(recorder.timeline(_corr("latest"))) == 1
 
 
 def test_recorder_flushes_safe_events_and_reports_collector_failure() -> None:
@@ -234,14 +288,16 @@ def test_recorder_flushes_safe_events_and_reports_collector_failure() -> None:
             )
 
     collector = Collector()
+    metrics = MetricsRegistry()
     recorder = DiagnosticsRecorder(
         store=InMemoryDiagnosticsStore(),
         collector=collector,
+        metrics=metrics,
         clock=lambda: 100.0,
     )
     recorder.record(
         DiagnosticEvent.create(
-            correlation_id="corr-upload",
+            correlation_id=_corr("upload"),
             source="home",
             phase="telemetry",
             outcome="queued",
@@ -254,12 +310,21 @@ def test_recorder_flushes_safe_events_and_reports_collector_failure() -> None:
     assert uploaded.uploaded_count == 1
     assert uploaded.collector_reachable is True
     assert recorder.status().queued_event_count == 0
-    assert collector.events[0].correlation_id == "corr-upload"
+    assert collector.events[0].correlation_id == _corr("upload")
+    rendered = metrics.render()
+    assert (
+        'hermes_home_diagnostics_events_total{outcome="queued",source="home"} 1'
+        in rendered
+    )
+    assert 'hermes_home_diagnostics_uploads_total{outcome="success"} 1' in rendered
+    assert "hermes_home_diagnostics_queue_depth 0" in rendered
+    assert "hermes_home_diagnostics_collector_reachable 1" in rendered
+    assert "hermes_home_diagnostics_last_upload_timestamp_seconds 100" in rendered
 
     collector.fail = True
     recorder.record(
         DiagnosticEvent.create(
-            correlation_id="corr-failed-upload",
+            correlation_id=_corr("failed-upload"),
             source="home",
             phase="telemetry",
             outcome="queued",
@@ -279,7 +344,12 @@ def test_incident_capture_previews_a_bounded_scope_before_sealing_and_uploading(
 ):
     now = [100.0]
     scope = CaptureScope(ENDPOINT_FINGERPRINT, TASK_FINGERPRINT)
-    ring = LocalRingBuffer(max_age_seconds=60, max_entries=3, max_bytes=100)
+    ring = LocalRingBuffer(
+        max_age_seconds=60,
+        max_entries=3,
+        max_bytes=100,
+        clock=lambda: now[0],
+    )
     ring.append(scope, b"first", captured_at=30.0)
     ring.append(scope, b"second", captured_at=95.0)
     sealed = []
@@ -327,7 +397,7 @@ def test_incident_capture_is_fixed_to_one_scope_and_audits_preserve_and_delete()
 ):
     scope = CaptureScope(ENDPOINT_FINGERPRINT, TASK_FINGERPRINT)
     other_scope = CaptureScope(OTHER_ENDPOINT_FINGERPRINT, TASK_FINGERPRINT)
-    ring = LocalRingBuffer()
+    ring = LocalRingBuffer(clock=lambda: 100.0)
     ring.append(scope, b"private", captured_at=100.0)
 
     class Sealer:
@@ -367,12 +437,14 @@ def test_incident_capture_is_fixed_to_one_scope_and_audits_preserve_and_delete()
     assert deleted.encrypted_payload is None
     assert captures.audit_log()[-1].action == "delete"
     assert "private" not in repr(deleted)
+    with pytest.raises(CaptureStateError, match="not found"):
+        captures.get(capture.capture_id)
 
 
 def test_uploaded_incident_expires_at_its_seven_day_deadline() -> None:
     now = [100.0]
     scope = CaptureScope(ENDPOINT_FINGERPRINT, TASK_FINGERPRINT)
-    ring = LocalRingBuffer()
+    ring = LocalRingBuffer(clock=lambda: now[0])
     ring.append(scope, b"private", captured_at=100.0)
 
     class Sealer:
@@ -409,7 +481,7 @@ def test_uploaded_incident_expires_at_its_seven_day_deadline() -> None:
 def test_safe_event_rejects_reversible_identifiers_and_untyped_failure_codes() -> None:
     with pytest.raises(DiagnosticValidationError, match="opaque fingerprint"):
         DiagnosticEvent.create(
-            correlation_id="corr-unsafe",
+            correlation_id=_corr("unsafe"),
             source="home",
             phase="turn",
             outcome="failed",
@@ -419,7 +491,7 @@ def test_safe_event_rejects_reversible_identifiers_and_untyped_failure_codes() -
 
     with pytest.raises(DiagnosticValidationError, match="failure code"):
         DiagnosticEvent.create(
-            correlation_id="corr-unsafe",
+            correlation_id=_corr("unsafe"),
             source="home",
             phase="turn",
             outcome="failed",
@@ -429,7 +501,7 @@ def test_safe_event_rejects_reversible_identifiers_and_untyped_failure_codes() -
 
     for failure_code in ("conflict", "expired_or_consumed"):
         event = DiagnosticEvent.create(
-            correlation_id="corr-safe-code",
+            correlation_id=_corr("safe-code"),
             source="home",
             phase="request",
             outcome="rejected",
@@ -440,7 +512,7 @@ def test_safe_event_rejects_reversible_identifiers_and_untyped_failure_codes() -
 
     with pytest.raises(DiagnosticValidationError, match="route ID"):
         DiagnosticEvent.create(
-            correlation_id="corr-unsafe",
+            correlation_id=_corr("unsafe"),
             source="home",
             phase="turn",
             outcome="failed",
@@ -455,7 +527,7 @@ def test_recorder_rejects_an_event_already_past_its_retention_deadline() -> None
         clock=lambda: 100.0,
     )
     event = DiagnosticEvent.create(
-        correlation_id="corr-expired",
+        correlation_id=_corr("expired"),
         source="home",
         phase="turn",
         outcome="completed",
@@ -465,12 +537,18 @@ def test_recorder_rejects_an_event_already_past_its_retention_deadline() -> None
 
     assert recorder.record(event) is False
     assert recorder.status().rejected_event_count == 1
-    assert recorder.timeline("corr-expired") == ()
+    assert recorder.timeline(_corr("expired")) == ()
 
 
 def test_ring_loss_is_timestamp_aware_and_exposed_in_status_and_metrics() -> None:
     scope = CaptureScope(ENDPOINT_FINGERPRINT, TASK_FINGERPRINT)
-    ring = LocalRingBuffer(max_age_seconds=60, max_entries=1, max_bytes=100)
+    ring_now = [101.0]
+    ring = LocalRingBuffer(
+        max_age_seconds=60,
+        max_entries=1,
+        max_bytes=100,
+        clock=lambda: ring_now[0],
+    )
     recorder = DiagnosticsRecorder(
         store=InMemoryDiagnosticsStore(),
         metrics=MetricsRegistry(),
@@ -480,6 +558,7 @@ def test_ring_loss_is_timestamp_aware_and_exposed_in_status_and_metrics() -> Non
 
     ring.append(scope, b"first", captured_at=100.0)
     ring.append(scope, b"second", captured_at=101.0)
+    ring_now[0] = 200.0
     ring.append(scope, b"stale", captured_at=0.0)
     assert [entry.evidence for entry in ring.entries(scope, now=200.0)] == []
 
@@ -508,7 +587,7 @@ def test_flush_uses_the_recorder_bound_as_its_default_batch_limit() -> None:
         clock=lambda: 100.0,
         max_events=2,
     )
-    for correlation_id in ("corr-one", "corr-two"):
+    for correlation_id in (_corr("one"), _corr("two")):
         assert recorder.record(
             DiagnosticEvent.create(
                 correlation_id=correlation_id,
@@ -548,7 +627,7 @@ def test_diagnostics_metrics_failures_never_escape_record_or_flush() -> None:
 
     assert recorder.record(
         DiagnosticEvent.create(
-            correlation_id="corr-metrics",
+            correlation_id=_corr("metrics"),
             source="home",
             phase="turn",
             outcome="completed",
@@ -570,7 +649,7 @@ def test_empty_flush_refreshes_queue_depth_after_expiry_purge() -> None:
     )
     recorder.record(
         DiagnosticEvent.create(
-            correlation_id="corr-expiring",
+            correlation_id=_corr("expiring"),
             source="home",
             phase="turn",
             outcome="queued",
@@ -605,7 +684,7 @@ def test_recorder_does_not_hold_its_lock_during_collector_io() -> None:
     )
     recorder.record(
         DiagnosticEvent.create(
-            correlation_id="corr-blocking-one",
+            correlation_id=_corr("blocking-one"),
             source="home",
             phase="telemetry",
             outcome="queued",
@@ -619,7 +698,7 @@ def test_recorder_does_not_hold_its_lock_during_collector_io() -> None:
 
     assert recorder.record(
         DiagnosticEvent.create(
-            correlation_id="corr-blocking-two",
+            correlation_id=_corr("blocking-two"),
             source="home",
             phase="telemetry",
             outcome="queued",
@@ -662,7 +741,7 @@ def test_upload_retry_reuses_the_same_idempotency_key_after_store_failure() -> N
     )
     recorder.record(
         DiagnosticEvent.create(
-            correlation_id="corr-retry",
+            correlation_id=_corr("retry"),
             source="home",
             phase="telemetry",
             outcome="queued",
@@ -677,7 +756,12 @@ def test_upload_retry_reuses_the_same_idempotency_key_after_store_failure() -> N
 
 def test_ring_quota_remains_bounded_under_continued_activity() -> None:
     scope = CaptureScope(ENDPOINT_FINGERPRINT, TASK_FINGERPRINT)
-    ring = LocalRingBuffer(max_age_seconds=60, max_entries=2, max_bytes=5)
+    ring = LocalRingBuffer(
+        max_age_seconds=60,
+        max_entries=2,
+        max_bytes=5,
+        clock=lambda: 109.0,
+    )
 
     for index in range(10):
         ring.append(scope, bytes([index]), captured_at=100.0 + index)
@@ -691,7 +775,7 @@ def test_ring_quota_remains_bounded_under_continued_activity() -> None:
 
 def test_capture_approval_seals_only_the_selected_preview_entries() -> None:
     scope = CaptureScope(ENDPOINT_FINGERPRINT, TASK_FINGERPRINT)
-    ring = LocalRingBuffer(max_age_seconds=60)
+    ring = LocalRingBuffer(max_age_seconds=60, clock=lambda: 101.0)
     ring.append(scope, b"first", captured_at=100.0)
     ring.append(scope, b"second", captured_at=101.0)
     sealed: list[tuple[bytes, ...]] = []
@@ -751,7 +835,7 @@ def test_incident_capture_requires_authorization_and_current_scope() -> None:
 
 def test_incident_capture_remote_lifecycle_is_injected() -> None:
     scope = CaptureScope(ENDPOINT_FINGERPRINT, TASK_FINGERPRINT)
-    ring = LocalRingBuffer()
+    ring = LocalRingBuffer(clock=lambda: 100.0)
     ring.append(scope, b"private", captured_at=100.0)
     calls: list[tuple[str, str]] = []
 
@@ -853,7 +937,7 @@ def test_incident_capture_cleans_private_state_on_sealing_and_upload_failure() -
             "upload_failed",
         ),
     ):
-        ring = LocalRingBuffer()
+        ring = LocalRingBuffer(clock=lambda: 100.0)
         ring.append(scope, b"private", captured_at=100.0)
         captures = IncidentCaptureService(
             ring_buffer=ring,
@@ -890,7 +974,7 @@ def test_incident_capture_rechecks_expiry_before_upload() -> None:
         def upload(self, bundle) -> None:
             uploaded.append(bundle)
 
-    ring = LocalRingBuffer()
+    ring = LocalRingBuffer(clock=lambda: now[0])
     ring.append(scope, b"private", captured_at=100.0)
     captures = IncidentCaptureService(
         ring_buffer=ring,
@@ -913,7 +997,7 @@ def test_incident_capture_rechecks_expiry_before_upload() -> None:
 
 def test_incident_capture_cancellation_discards_staged_evidence() -> None:
     scope = CaptureScope(ENDPOINT_FINGERPRINT, TASK_FINGERPRINT)
-    ring = LocalRingBuffer()
+    ring = LocalRingBuffer(clock=lambda: 100.0)
     ring.append(scope, b"private", captured_at=100.0)
     captures = IncidentCaptureService(
         ring_buffer=ring,
@@ -935,9 +1019,438 @@ def test_incident_capture_cancellation_discards_staged_evidence() -> None:
 def test_timestamp_overflow_is_reported_as_typed_validation() -> None:
     with pytest.raises(DiagnosticValidationError, match="finite"):
         DiagnosticEvent.create(
-            correlation_id="corr-overflow",
+            correlation_id=_corr("overflow"),
             source="home",
             phase="turn",
             outcome="completed",
             occurred_at=10**1000,
         )
+
+
+def test_event_ids_are_generated_by_home() -> None:
+    event = DiagnosticEvent.create(
+        correlation_id=_corr("generated"),
+        source="home",
+        phase="turn",
+        outcome="started",
+        occurred_at=100.0,
+    )
+
+    assert event.event_id.startswith("evt-")
+    assert len(event.event_id) == len("evt-") + 32
+    with pytest.raises(DiagnosticValidationError, match="generated by Home"):
+        DiagnosticEvent.create(
+            correlation_id=_corr("generated"),
+            event_id=_event_id("caller"),
+            source="home",
+            phase="turn",
+            outcome="started",
+            occurred_at=100.0,
+        )
+
+
+def test_non_default_retention_classes_keep_their_own_deadlines() -> None:
+    now = [100.0]
+    recorder = DiagnosticsRecorder(
+        store=InMemoryDiagnosticsStore(),
+        clock=lambda: now[0],
+    )
+    recorder.record(
+        DiagnosticEvent.create(
+            correlation_id=_corr("metrics-retention"),
+            source="home",
+            phase="telemetry",
+            outcome="queued",
+            occurred_at=100.0,
+            retention_class="metrics",
+        )
+    )
+    recorder.record(
+        DiagnosticEvent.create(
+            correlation_id=_corr("incident-retention"),
+            source="home",
+            phase="incident",
+            outcome="queued",
+            occurred_at=100.0,
+            retention_class="incident",
+        )
+    )
+
+    now[0] = 100.0 + INCIDENT_RETENTION_SECONDS
+    status = recorder.status()
+
+    assert status.queued_event_count == 1
+    assert recorder.timeline(_corr("incident-retention")) == ()
+    assert len(recorder.timeline(_corr("metrics-retention"))) == 1
+
+
+def test_recorder_rejects_an_explicit_deadline_beyond_configured_retention() -> None:
+    recorder = DiagnosticsRecorder(
+        store=InMemoryDiagnosticsStore(),
+        clock=lambda: 100.0,
+        event_retention_seconds=10,
+    )
+    event = DiagnosticEvent.create(
+        correlation_id=_corr("retention-bound"),
+        source="home",
+        phase="turn",
+        outcome="completed",
+        occurred_at=100.0,
+        retention_deadline=111.0,
+    )
+
+    assert recorder.record(event) is False
+    status = recorder.status()
+    assert status.rejected_event_count == 1
+    assert status.to_dict()["retention_seconds"]["events"] == 10
+
+
+def test_ring_rejects_future_entries_and_keeps_scopes_isolated() -> None:
+    scope = CaptureScope(ENDPOINT_FINGERPRINT, TASK_FINGERPRINT)
+    other_scope = CaptureScope(OTHER_ENDPOINT_FINGERPRINT, TASK_FINGERPRINT)
+    ring = LocalRingBuffer(clock=lambda: 100.0)
+
+    with pytest.raises(ValueError, match="future"):
+        ring.append(scope, b"future", captured_at=101.0)
+    ring.append(scope, b"one", captured_at=99.0)
+    ring.append(other_scope, b"two", captured_at=99.0)
+
+    assert [entry.evidence for entry in ring.entries(scope, now=100.0)] == [b"one"]
+    assert [entry.evidence for entry in ring.entries(other_scope, now=100.0)] == [
+        b"two"
+    ]
+
+
+def test_capture_approval_requires_non_empty_typed_selection_and_audits_states() -> (
+    None
+):
+    scope = CaptureScope(ENDPOINT_FINGERPRINT, TASK_FINGERPRINT)
+    ring = LocalRingBuffer(clock=lambda: 100.0)
+    ring.append(scope, b"private", captured_at=100.0)
+
+    class Sealer:
+        def seal(self, evidence, *, capture_id, scope):
+            del evidence, capture_id, scope
+            return b"sealed"
+
+    class Uploader:
+        def upload(self, bundle) -> None:
+            del bundle
+
+    captures = IncidentCaptureService(
+        ring_buffer=ring,
+        sealer=Sealer(),
+        uploader=Uploader(),
+        clock=lambda: 100.0,
+        **_capture_auth(scope),
+    )
+    capture = captures.arm(scope)
+    preview = captures.preview(capture.capture_id)
+
+    with pytest.raises(CaptureStateError, match="at least one"):
+        captures.approve(capture.capture_id, evidence_ids=[])
+
+    captures.approve(
+        capture.capture_id,
+        evidence_ids=[preview.evidence[0].evidence_id],
+    )
+
+    assert [record.outcome for record in captures.audit_log()] == [
+        "accepted",
+        "accepted",
+        "approved",
+        "accepted",
+        "accepted",
+        "uploaded",
+    ]
+
+
+def test_capture_rechecks_current_scope_before_uploading() -> None:
+    scope = CaptureScope(ENDPOINT_FINGERPRINT, TASK_FINGERPRINT)
+    other_scope = CaptureScope(OTHER_ENDPOINT_FINGERPRINT, TASK_FINGERPRINT)
+    current = [scope]
+    uploaded: list[object] = []
+
+    class Current:
+        def current_scope(self):
+            return current[0]
+
+    class Sealer:
+        def seal(self, evidence, *, capture_id, scope):
+            del evidence, capture_id, scope
+            current[0] = other_scope
+            return b"sealed"
+
+    class Uploader:
+        def upload(self, bundle) -> None:
+            uploaded.append(bundle)
+
+    ring = LocalRingBuffer(clock=lambda: 100.0)
+    ring.append(scope, b"private", captured_at=100.0)
+    captures = IncidentCaptureService(
+        ring_buffer=ring,
+        sealer=Sealer(),
+        uploader=Uploader(),
+        clock=lambda: 100.0,
+        authorizer=AllowCapture(),
+        current_task_resolver=Current(),
+    )
+    capture = captures.arm(scope)
+    preview = captures.preview(capture.capture_id)
+
+    with pytest.raises(CaptureStateError, match="not current"):
+        captures.approve(
+            capture.capture_id,
+            evidence_ids=[preview.evidence[0].evidence_id],
+        )
+
+    assert uploaded == []
+    assert captures._captures[capture.capture_id].failure_code == "forbidden"
+
+
+def test_capture_bound_never_evicts_active_records() -> None:
+    scope = CaptureScope(ENDPOINT_FINGERPRINT, TASK_FINGERPRINT)
+    captures = IncidentCaptureService(
+        ring_buffer=LocalRingBuffer(clock=lambda: 100.0),
+        sealer=None,
+        uploader=None,
+        clock=lambda: 100.0,
+        max_capture_records=1,
+        **_capture_auth(scope),
+    )
+    first = captures.arm(scope)
+
+    with pytest.raises(CaptureStateError, match="bound is full"):
+        captures.arm(scope)
+
+    captures.cancel(first.capture_id)
+    second = captures.arm(scope)
+    assert second.capture_id != first.capture_id
+    with pytest.raises(CaptureStateError, match="not found"):
+        captures.get(first.capture_id)
+
+
+def test_remote_lifecycle_failures_leave_local_capture_state_unchanged() -> None:
+    scope = CaptureScope(ENDPOINT_FINGERPRINT, TASK_FINGERPRINT)
+
+    class Sealer:
+        def seal(self, evidence, *, capture_id, scope):
+            del evidence, capture_id, scope
+            return b"sealed"
+
+    class Uploader:
+        def upload(self, bundle) -> None:
+            del bundle
+
+    class FailingLifecycle:
+        def preserve(self, capture_id: str) -> None:
+            del capture_id
+            raise RuntimeError("preserve down")
+
+        def delete(self, capture_id: str) -> None:
+            del capture_id
+            raise RuntimeError("delete down")
+
+    ring = LocalRingBuffer(clock=lambda: 100.0)
+    ring.append(scope, b"private", captured_at=100.0)
+    captures = IncidentCaptureService(
+        ring_buffer=ring,
+        sealer=Sealer(),
+        uploader=Uploader(),
+        bundle_lifecycle=FailingLifecycle(),
+        clock=lambda: 100.0,
+        **_capture_auth(scope),
+    )
+    capture = captures.arm(scope)
+    preview = captures.preview(capture.capture_id)
+    captures.approve(
+        capture.capture_id,
+        evidence_ids=[preview.evidence[0].evidence_id],
+    )
+
+    with pytest.raises(CaptureStateError, match="preserve failed"):
+        captures.preserve(capture.capture_id)
+    assert captures._captures[capture.capture_id].state == "uploaded"
+
+    with pytest.raises(CaptureStateError, match="delete failed"):
+        captures.delete(capture.capture_id)
+    assert captures._captures[capture.capture_id].state == "uploaded"
+    assert [record.outcome for record in captures.audit_log()][-2:] == [
+        "failed",
+        "failed",
+    ]
+
+
+def test_capture_cleans_up_remote_preserve_when_local_scope_recheck_fails() -> None:
+    scope = CaptureScope(ENDPOINT_FINGERPRINT, TASK_FINGERPRINT)
+    other_scope = CaptureScope(OTHER_ENDPOINT_FINGERPRINT, TASK_FINGERPRINT)
+    current = [scope]
+    calls: list[tuple[str, str]] = []
+
+    class Current:
+        def current_scope(self):
+            return current[0]
+
+    class Sealer:
+        def seal(self, evidence, *, capture_id, scope):
+            del evidence, capture_id, scope
+            return b"sealed"
+
+    class Uploader:
+        def upload(self, bundle) -> None:
+            del bundle
+
+    class Lifecycle:
+        def preserve(self, capture_id: str) -> None:
+            calls.append(("preserve", capture_id))
+            current[0] = other_scope
+
+        def delete(self, capture_id: str) -> None:
+            calls.append(("delete", capture_id))
+
+    ring = LocalRingBuffer(clock=lambda: 100.0)
+    ring.append(scope, b"private", captured_at=100.0)
+    captures = IncidentCaptureService(
+        ring_buffer=ring,
+        sealer=Sealer(),
+        uploader=Uploader(),
+        bundle_lifecycle=Lifecycle(),
+        clock=lambda: 100.0,
+        authorizer=AllowCapture(),
+        current_task_resolver=Current(),
+    )
+    capture = captures.arm(scope)
+    preview = captures.preview(capture.capture_id)
+    captures.approve(
+        capture.capture_id,
+        evidence_ids=[preview.evidence[0].evidence_id],
+    )
+
+    with pytest.raises(CaptureStateError, match="not current"):
+        captures.preserve(capture.capture_id)
+
+    assert calls == [("preserve", capture.capture_id), ("delete", capture.capture_id)]
+    assert captures._captures[capture.capture_id].state == "uploaded"
+
+
+def test_uploaded_expiry_requests_remote_deletion() -> None:
+    scope = CaptureScope(ENDPOINT_FINGERPRINT, TASK_FINGERPRINT)
+    now = [100.0]
+    deleted: list[str] = []
+
+    class Sealer:
+        def seal(self, evidence, *, capture_id, scope):
+            del evidence, capture_id, scope
+            return b"sealed"
+
+    class Uploader:
+        def upload(self, bundle) -> None:
+            del bundle
+
+    class Lifecycle:
+        def preserve(self, capture_id: str) -> None:
+            del capture_id
+
+        def delete(self, capture_id: str) -> None:
+            deleted.append(capture_id)
+
+    ring = LocalRingBuffer(clock=lambda: now[0])
+    ring.append(scope, b"private", captured_at=100.0)
+    captures = IncidentCaptureService(
+        ring_buffer=ring,
+        sealer=Sealer(),
+        uploader=Uploader(),
+        bundle_lifecycle=Lifecycle(),
+        clock=lambda: now[0],
+        **_capture_auth(scope),
+    )
+    capture = captures.arm(scope)
+    preview = captures.preview(capture.capture_id)
+    uploaded = captures.approve(
+        capture.capture_id,
+        evidence_ids=[preview.evidence[0].evidence_id],
+    )
+    assert uploaded.retention_deadline is not None
+
+    now[0] = uploaded.retention_deadline
+    assert captures.purge_expired() == 1
+    assert deleted == [capture.capture_id]
+
+
+def test_capture_external_sealing_does_not_hold_capture_lock() -> None:
+    scope = CaptureScope(ENDPOINT_FINGERPRINT, TASK_FINGERPRINT)
+    started = Event()
+    release = Event()
+
+    class Sealer:
+        def seal(self, evidence, *, capture_id, scope):
+            del evidence, capture_id, scope
+            started.set()
+            assert release.wait(timeout=1)
+            return b"sealed"
+
+    class Uploader:
+        def upload(self, bundle) -> None:
+            del bundle
+
+    ring = LocalRingBuffer(clock=lambda: 100.0)
+    ring.append(scope, b"private", captured_at=100.0)
+    captures = IncidentCaptureService(
+        ring_buffer=ring,
+        sealer=Sealer(),
+        uploader=Uploader(),
+        clock=lambda: 100.0,
+        **_capture_auth(scope),
+    )
+    capture = captures.arm(scope)
+    preview = captures.preview(capture.capture_id)
+    result: list[CaptureRecord] = []
+    thread = Thread(
+        target=lambda: result.append(
+            captures.approve(
+                capture.capture_id,
+                evidence_ids=[preview.evidence[0].evidence_id],
+            )
+        )
+    )
+    thread.start()
+    assert started.wait(timeout=1)
+    assert captures.audit_log()
+    release.set()
+    thread.join(timeout=1)
+
+    assert not thread.is_alive()
+    assert result[0].state == "uploaded"
+
+
+def test_malformed_collector_ack_leaves_events_pending_and_reachable_state_honest() -> (
+    None
+):
+    class Collector:
+        def upload(self, events, *, idempotency_key: str) -> UploadAcknowledgement:
+            del events
+            return UploadAcknowledgement(
+                idempotency_key=idempotency_key,
+                event_ids=(_event_id("wrong"),),
+            )
+
+    recorder = DiagnosticsRecorder(
+        store=InMemoryDiagnosticsStore(),
+        collector=Collector(),
+        clock=lambda: 100.0,
+    )
+    assert recorder.record(
+        DiagnosticEvent.create(
+            correlation_id=_corr("ack"),
+            source="home",
+            phase="telemetry",
+            outcome="queued",
+            occurred_at=100.0,
+        )
+    )
+
+    result = recorder.flush()
+
+    assert result.uploaded_count == 0
+    assert result.collector_reachable is False
+    assert recorder.status().queued_event_count == 1
