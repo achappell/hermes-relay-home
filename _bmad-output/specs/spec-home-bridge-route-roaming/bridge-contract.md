@@ -1,14 +1,19 @@
 # Home bridge contract v1
 
-> Status: the local endpoint-adapter slice is live in HOME-NW-03. Story 2
-> implements the framework-independent `HomeBridge` seam described below, and
-> HOME-NW-03 serves it on one explicitly configured local WebSocket route. Route
-> discovery, identity proof, browser bootstrap, and roaming remain future work.
+> Status: the local endpoint-adapter slice is live in HOME-NW-03. HOME-NW-04
+> adds a framework-independent approved-route selector and same-identity proof
+> seam over injected ports. HOME-NW-03 still serves the bridge on one explicitly
+> configured local WebSocket route; production route discovery, cryptographic
+> proof, browser bootstrap, endpoint reconnect orchestration, and deployment
+> remain future work.
 
 This page gives front ends the stable contract for the Home route adapter. The
-local `/api/v1/bridge/ws` route is live for the HOME-NW-03 slice; a connection
-refusal or `404` outside that configured listener is an implementation-status
-signal, not proof that a device credential or conversation handle is invalid.
+local `/api/v1/bridge/ws` route is live for the HOME-NW-03 slice, and HOME-NW-04
+now evaluates caller-provided approved routes in deterministic priority order
+with an injected Household Identity verifier. A connection refusal or `404`
+outside the configured listener is an implementation-status signal, not proof
+that a device credential or conversation handle is invalid; the selector does
+not itself discover or serve public routes.
 
 ## Compatibility classification
 
@@ -121,10 +126,13 @@ The target endpoint path is:
 wss://<selected-approved-route>/api/v1/bridge/ws
 ```
 
-The route selector chooses only an approved route, proves the same Household
-Identity, and reports the selected route separately from bridge and turn state.
-The final discovery, identity-proof, TLS, and public reverse-proxy deployment
-remain route-roaming work; they are not implemented by HOME-NW-03.
+The HOME-NW-04 policy selector chooses only an approved route, compares the
+injected proof with the expected Household Identity, and reports the selected
+route separately from bridge and turn state. It consumes an immutable snapshot;
+it does not discover routes or open the endpoint socket. The final discovery,
+cryptographic proof mechanism, TLS, public reverse-proxy deployment, and
+endpoint reconnect orchestration remain route-roaming work; they are not
+implemented by HOME-NW-03 or HOME-NW-04.
 
 Native clients or a trusted client proxy send the Home credential on the
 upgrade request:
@@ -396,16 +404,19 @@ Front ends should implement the following policy:
    unresolved prompt and never treat reconnect readiness as completion.
 
 This contract preserves the implemented Home/Standard ownership boundary while
-leaving route discovery, identity proof, TLS deployment, and the production
-endpoint adapter as later work.
+leaving route discovery, the cryptographic identity-proof mechanism, TLS
+deployment, and the production endpoint adapter as later work. HOME-NW-04's
+policy seam is deterministic evidence for route ordering and redaction, not a
+claim that production route roaming is deployed.
 
 ## Front-end story handoff
 
 Stories that consume this boundary must read the Home BMAD context before
 planning or changing a client adapter. Read it in this order:
 
-1. This `bridge-contract.md` for the endpoint-facing contract and its local
-   live status versus future roaming work.
+1. This `bridge-contract.md` for the endpoint-facing contract, the live
+   HOME-NW-03 adapter, and the HOME-NW-04 policy seam versus future roaming
+   work.
 2. `SPEC.md` and `route-session-state.md` in this directory for route priority,
    Household Identity, connection state, and uncertain-turn rules.
 3. `../spec-standard-hermes-compatibility-migration/standard-baseline.md` for
@@ -425,8 +436,9 @@ Home dependency context is in
 and its linked companions. Read those files before planning. Treat the
 vanilla Standard 0.21.1 rows as Hermes-owned and the Home envelope, Device
 credential, route, reconnect, and redaction rows as Home-owned. The local Home
-adapter is live in HOME-NW-03; do not claim route-roaming integration or invent
-a second Hermes protocol. Keep this surface's existing session/presentation
+adapter is live in HOME-NW-03 and the deterministic route-policy seam is live
+in HOME-NW-04; do not claim production route-roaming integration or invent a
+second Hermes protocol. Keep this surface's existing session/presentation
 boundary and record fake/live evidence in this repository.
 ```
 

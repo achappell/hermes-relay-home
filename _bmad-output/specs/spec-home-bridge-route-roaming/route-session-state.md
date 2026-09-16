@@ -3,20 +3,21 @@
 This companion carries the route records, bridge boundary, state transitions,
 protocol-preservation matrix, and failure cases for the Home Bridge and Route
 Roaming slice. The planned endpoint envelope is defined in
-`bridge-contract.md`; identity proof and route discovery remain separate
-decisions.
+`bridge-contract.md`; HOME-NW-04 now provides deterministic selection and
+proof-comparison policy over injected ports, while the final identity-proof
+mechanism and route discovery remain separate decisions.
 
 The planned front-end wire shape is recorded in
 `bridge-contract.md`; it is coordination material, not a
-claim that the public WebSocket adapter is currently served. The live Story 2
-implementation is the internal `HomeBridge` seam and its separate Standard
-gateway/audio sockets.
+claim that the public WebSocket adapter is currently served. The live Home
+implementation includes the internal `HomeBridge` seam, its separate Standard
+gateway/audio sockets, and HOME-NW-04's pure route-policy seam.
 
 The planned front-end wire shape is recorded in
 `bridge-contract.md`; it is coordination material, not a
-claim that the public WebSocket adapter is currently served. The live Story 2
-implementation is the internal `HomeBridge` seam and its separate Standard
-gateway/audio sockets.
+claim that the public WebSocket adapter is currently served. The live Home
+implementation includes the internal `HomeBridge` seam, its separate Standard
+gateway/audio sockets, and HOME-NW-04's pure route-policy seam.
 
 ## Records
 
@@ -43,6 +44,11 @@ An endpoint may prefer a newly reachable higher-priority route on a later
 connection boundary, but a route switch does not imply a new household,
 Profile, or turn. The final discovery and identity mechanism is an open
 question and must be added without changing this ordering or ownership rule.
+
+HOME-NW-04 implements the ordered evaluation in steps 2 and 3 as a pure
+selector over a caller-provided immutable route snapshot. Snapshot discovery,
+endpoint connection orchestration, and the cryptographic proof mechanism remain
+deferred.
 
 ## Boundary diagram
 

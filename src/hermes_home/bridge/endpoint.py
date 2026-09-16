@@ -10,6 +10,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
+from hermes_home.bridge.routes import HOME_BRIDGE_PATH
 from hermes_home.bridge.standard import (
     AudioFrame,
     BridgeAuthorizationError,
@@ -25,7 +26,6 @@ from hermes_home.bridge.standard import (
 )
 from hermes_home.observability.diagnostics import DiagnosticEvent, DiagnosticsRecorder
 
-HOME_BRIDGE_PATH = "/api/v1/bridge/ws"
 BRIDGE_WS_PATH = HOME_BRIDGE_PATH
 HOME_BRIDGE_SCHEMA = 1
 MAX_BRIDGE_MESSAGE_BYTES = 1_048_576
