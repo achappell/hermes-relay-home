@@ -1,0 +1,10 @@
+issue_tracking:
+  enabled: true
+  platform: github
+  git_platform: github
+  host: github.com
+  project: achappell/hermes-relay-home
+  worktree_base: .worktrees
+  branch_patterns:
+    prd: "feat/{prd_key}/prd"
+    story: "feat/{prd_key}/{story_key}"

@@ -1,0 +1,346 @@
+# common/post-dev-complete.yaml
+#
+# Purpose: Unified post-completion workflow handling the full issue tracking lifecycle
+#          for a story: push code, wait CI, update issue status, post comments, create MR.
+# Dispatched by phase:
+#   - "create-story": spec just created, no code yet — create issue + commit + push + create MR draft
+#   - "dev-finish":    dev session done — push + wait CI + write ci-status.json + update issue + post dev comment
+#   - "review-finish": review session done — push + wait CI + post review findings + update issue final + optional merge
+# Input variables:
+#   - phase: "create-story" | "dev-finish" | "review-finish" (set by dispatcher or caller)
+#   - ci_status: set by common/wait-for-green-ci (dev-finish, review-finish) — maps to ci-status.json
+#   - pipeline_id: set by common/wait-for-green-ci on failure — carried into ci-status.json diagnostic
+#   - jobs: set by common/get-failed-jobs (via wait-for-green-ci) on failure — carried into ci-status.json diagnostic
+# Output variables:
+#   - issue_id: the issue IID (GitLab) or number (GitHub)
+# Side effects: pushes branch, writes {worktree}/ci-status.json (dev-finish), creates/updates issues on tracker, creates/merges MR
+
+- INCLUDE: common/check-config
+- INCLUDE: common/find-prd-key
+# Capture worktree root (ci-status.json is written here for bmad-loop's verify command)
+- RUN: pwd
+  STORE: worktree
+# Derive issue metadata from current branch and spec
+- READ: {planning_artifacts}/prd.md
+  EXTRACT:
+    prd_key: frontmatter.prd_key
+- RUN: git branch --show-current
+  STORE: current_branch
+- RUN: uv run --no-project python -c "
+import sys
+branch = sys.argv[1]
+parts = branch.rstrip().split('/')
+if len(parts) >= 3:
+    print(parts[-1])
+else:
+    print(branch)
+" {current_branch}
+  STORE: story_key
+- CHECK: empty story_key
+  TRUE:
+    - OUTPUT:
+        message: "Could not determine story_key from branch '{current_branch}'."
+        stop: true
+- RUN: uv run --no-project python -c "
+import sys
+parts = sys.argv[1].split('-')
+print(parts[0])
+" {story_key}
+  STORE: epic_num
+- RUN: uv run --no-project python -c "
+import sys
+parts = sys.argv[1].split('-')
+print(parts[1])
+" {story_key}
+  STORE: story_num
+- READ: _bmad/custom/issue-tracking.yaml
+  EXTRACT:
+    prd_pattern: issue_tracking.branch_patterns.prd
+    story_pattern: issue_tracking.branch_patterns.story
+- RUN: uv run --no-project python -c "
+import sys
+print(sys.argv[1].replace('{prd_key}', sys.argv[2]))
+" {prd_pattern} {prd_key}
+  STORE: prd_branch
+- RUN: uv run --no-project python -c "
+import sys
+pattern = sys.argv[1]
+key = sys.argv[2]
+pk = sys.argv[3]
+print(pattern.replace('{prd_key}', pk).replace('{story_key}', key))
+" {story_pattern} {story_key} {prd_key}
+  STORE: story_branch
+# =============================================================================
+# PHASE 1: create-story — spec just created, no code yet
+# =============================================================================
+- CHECK: phase eq "create-story"
+  TRUE:
+    # Ensure issue exists (find or create) with the story spec body
+    - INCLUDE: common/ensure-issue
+    # Commit and push
+
+    - RUN: git commit --allow-empty -m "create story {story_key}" 2>/dev/null || true
+    - RUN: git push -u origin {story_branch}
+    # Translate caller scope into the new INPUT contract (the atomic no longer reads
+    # story_key / story_title / story_num / epic_num / issue_id — caller must supply).
+    - SET: { variable: source_branch, value: "{story_branch}" }
+    - SET: { variable: target_branch, value: "{prd_branch}" }
+    - SET: { variable: mr_repo, value: "{host}/{project}" }
+    - SET: { variable: mr_title, value: "Story {epic_num}.{story_num}: {story_key}" }
+    - WRITE:
+        file: /tmp/ensure-mr-desc.md
+        content: "Sprint key: {story_key}\n\nRelated to #{issue_id}"
+        mode: overwrite
+    - SET: { variable: mr_description_file, value: "/tmp/ensure-mr-desc.md" }
+    - SET: { variable: mr_draft, value: "false" }
+    # Ensure trace MR exists (create if missing, with issue reference)
+    - INCLUDE: common/ensure-mr
+    - RUN: rm -f /tmp/ensure-mr-desc.md
+    - OUTPUT:
+        message: "Story {story_key} issue created and MR ready."
+# =============================================================================
+# PHASE 2: dev-finish — dev session done, code pushed, CI run
+# =============================================================================
+- CHECK: phase eq "dev-finish"
+  TRUE:
+    # Read sprint-status to determine the target status for this story
+    - READ: {implementation_artifacts}/sprint-status.yaml
+      EXTRACT:
+        entries: development_status
+    - FILTER:
+        source: entries
+        select: value
+        where: key eq "{story_key}"
+        store: story_status
+    # Push any remaining local commits
+
+    - RUN: git commit --allow-empty -m "dev {story_key}" 2>/dev/null || true
+    - RUN: git push
+    # Wait CI + write ci-status.json (contract for ci-status.sh)
+    - INCLUDE: common/wait-for-green-ci
+    - INCLUDE: common/write-ci-status
+    # Ensure issue exists (find or create)
+    - INCLUDE: common/ensure-issue
+    # Translate caller scope into the new INPUT contract (the atomic no longer reads
+    # story_key / story_title / story_num / epic_num / issue_id — caller must supply).
+    - SET: { variable: source_branch, value: "{story_branch}" }
+    - SET: { variable: target_branch, value: "{prd_branch}" }
+    - SET: { variable: mr_repo, value: "{host}/{project}" }
+    - SET: { variable: mr_title, value: "Story {epic_num}.{story_num}: {story_key}" }
+    - WRITE:
+        file: /tmp/ensure-mr-desc.md
+        content: "Sprint key: {story_key}\n\nRelated to #{issue_id}"
+        mode: overwrite
+    - SET: { variable: mr_description_file, value: "/tmp/ensure-mr-desc.md" }
+    - SET: { variable: mr_draft, value: "false" }
+    # Ensure trace MR exists (create if missing)
+    - INCLUDE: common/ensure-mr
+    - RUN: rm -f /tmp/ensure-mr-desc.md
+    # Update issue status based on sprint-status
+    - CHECK: story_status eq "review"
+      TRUE:
+        - SET: { variable: new_status, value: "review" }
+        - SET: { variable: close, value: "false" }
+        - INCLUDE: common/update-issue-status
+        - OUTPUT:
+            message: "Provide a brief implementation summary for the review comment (what was implemented, key changes, notes for the reviewer). Write the full comment body to /tmp/dev-story-comment.md using markdown format."
+        - RUN: test -f /tmp/dev-story-comment.md && echo "yes" || echo "no"
+          STORE: comment_file_exists
+          EXPECT_EXIT: any
+        - CHECK: comment_file_exists eq "yes"
+          TRUE:
+            - CHECK: empty issue_id
+              FALSE:
+                - SET: { variable: comment_file, value: "/tmp/dev-story-comment.md" }
+                - INCLUDE: common/post-issue-comment
+            - RUN: rm -f /tmp/dev-story-comment.md
+    - CHECK: story_status eq "done"
+      TRUE:
+        - SET: { variable: new_status, value: "done" }
+        - SET: { variable: close, value: "true" }
+        - INCLUDE: common/update-issue-status
+    - CHECK: story_status ne "review"
+      TRUE:
+        - CHECK: story_status ne "done"
+          TRUE:
+            - SET: { variable: new_status, value: "in-progress" }
+            - SET: { variable: close, value: "false" }
+            - INCLUDE: common/update-issue-status
+    - OUTPUT:
+        message: "Story {story_key} dev-finish complete."
+# =============================================================================
+# PHASE 3: review-finish — review session done, post findings + update final
+# =============================================================================
+- CHECK: phase eq "review-finish"
+  TRUE:
+    # Read sprint-status to determine the review verdict
+    - READ: {implementation_artifacts}/sprint-status.yaml
+      EXTRACT:
+        review_status: development_status.{story_key}
+    # Commit and push any review modifications
+
+    - RUN: git commit --allow-empty -m "code review {story_key}" 2>/dev/null || true
+    - RUN: git push
+    # Find issue
+    - SET: { variable: search_text, value: "{story_key}" }
+    - INCLUDE: common/find-issue
+    # Update issue status based on review verdict
+    - CHECK: review_status eq "done"
+      TRUE:
+        - SET: { variable: new_status, value: "done" }
+        - SET: { variable: close, value: "true" }
+        - INCLUDE: common/update-issue-status
+      FALSE:
+        - SET: { variable: new_status, value: "in-progress" }
+        - SET: { variable: close, value: "false" }
+        - INCLUDE: common/update-issue-status
+    # Post review findings as comment on issue.
+    #
+    # The spec is read from {spec_file} — the path the runtime already resolved, in
+    # whichever mode applies (sprint: spec-<storyId>-<slug>.md; stories:
+    # stories/<id>-<slug>.md). Do NOT re-derive it from {story_key}: the slug comes
+    # from the story TITLE, so {implementation_artifacts}/{story_key}.md never exists
+    # in sprint mode. That invented path raised FileNotFoundError here and killed the
+    # phase (story 2-1, 2026-09-13) — taking the CI gate and the merge with it.
+    # The legacy exact-key path is still tried second so existing consumers do not
+    # regress.
+    #
+    # Two producers write two different sections into the same file:
+    #   bmad-build-auto  -> '## Review Triage Log' with '### <date> — Review pass' rows
+    #   bmad-code-review -> '### Review Findings'
+    # Both are accepted; the triage log wins when both are present, because this
+    # workflow's caller is bmad-build-auto.
+    #
+    # A MISSING file still halts — that is unambiguous, and it is what killed story
+    # 2-1 (the file was read from an invented path). A missing or empty SECTION only
+    # warns: bmad-code-review's clean-review shortcut writes no section at all on zero
+    # findings (steps/step-04-present.md §1), and because both spec templates carry
+    # '## Tasks & Acceptance' and '## Review Triage Log', nothing in the file
+    # distinguishes "clean review" from "review never ran" — so halting would block
+    # clean stories from merging. The original defect was the SILENCE, not the absence
+    # of a halt; a visible warning fixes that without the blocking.
+    - CHECK: empty issue_id
+      FALSE:
+        - RUN: uv run --no-project python -c "
+import sys, re, pathlib
+candidates = [c for c in sys.argv[1:] if c]
+path = next((pathlib.Path(c) for c in candidates if pathlib.Path(c).is_file()), None)
+if path is None:
+    print('SPEC_NOT_FOUND')
+    sys.exit(0)
+content = path.read_text()
+match = re.search(r'(^## Review Triage Log\s*$.*?)(?=\n## |\Z)', content, re.DOTALL | re.MULTILINE)
+if not match:
+    match = re.search(r'(^### Review Findings.*?)(?=\n## |\Z)', content, re.DOTALL | re.MULTILINE)
+if not match:
+    print('SPEC_NO_REVIEW_SECTION')
+    sys.exit(0)
+body = re.sub(r'<!--[\s\S]{0,2000}?-->', '', match.group(1)).strip()
+# Strip HTML comments FIRST: the template ships an explanatory one under the heading,
+# so leaving it in would make an unrun review look non-empty AND would post the
+# template's own text as the issue comment. What remains must have real rows.
+if not re.sub(r'^#+ .*$', '', body, flags=re.MULTILINE).strip():
+    print('SPEC_EMPTY_REVIEW_SECTION')
+    sys.exit(0)
+print(body)
+" "{spec_file}" "{implementation_artifacts}/{story_key}.md"
+          STORE: review_section
+        - CHECK: review_section eq "SPEC_NOT_FOUND"
+          TRUE:
+            - OUTPUT:
+                message: "No spec file found — tried '{spec_file}' then '{implementation_artifacts}/{story_key}.md'. {spec_file} is the path the runtime resolved, so its absence means no spec was produced for this story. Nothing was posted and the merge must not proceed. Check what bmad-build-auto actually wrote on disk (sprint mode names it spec-<storyId>-<slug>.md)."
+                stop: true
+        # Halt on an unrun review ONLY in the unattended flow. The two real producers
+        # differ, and allow_merge separates them exactly:
+        #   bmad-build-auto (allow_merge unset) appends a '### <date> - Review pass'
+        #     entry on EVERY review pass (step-04-review.md step 4, unconditional), so an
+        #     absent or empty section means the review never ran - worth stopping for.
+        #   bmad-build (allow_merge="true", set by post-build-dispatch-interactive.yaml)
+        #     writes one row PER FINDING (step-04-review.md:42), so a clean review writes
+        #     nothing at all and the template heading stays empty - halting there would
+        #     block a story that is fine.
+        # bmad-code-review never reaches this file (its workflow has no post-build
+        # dispatcher), so its clean-review shortcut is not a factor here.
+        # Halt ONLY when the producer is known to always write a section. That is
+        # bmad-build-auto alone: its step-04 appends a review-log entry on EVERY pass.
+        # The other two producers that reach this file write nothing on a clean review
+        # (bmad-build: one row per finding; bmad-code-review via its on_complete hook),
+        # so for them a missing section is legitimate and only warns.
+        # review_producer is set by common/post-build-dispatch-auto.yaml — a workflow
+        # step, not hook prose — and is absent on every other path. allow_merge cannot
+        # be used for this: it marks the interactive merge prompt and is unset on BOTH
+        # the unattended and the bmad-code-review paths.
+        #
+        # The warn branch must clear review_section: the block below posts whatever the
+        # variable holds, so leaving the sentinel there would post the literal string
+        # SPEC_NO_REVIEW_SECTION as the issue comment.
+        - CHECK: review_section eq "SPEC_NO_REVIEW_SECTION"
+          TRUE:
+            - CHECK: review_producer eq "bmad-build-auto"
+              TRUE:
+                - OUTPUT:
+                    message: "No review section in the spec. The unattended review appends a '### <date> — Review pass' entry on every pass, so its absence means the review step never ran. Refusing to merge an unreviewed story. Looked for '## Review Triage Log' and '### Review Findings'."
+                    stop: true
+              FALSE:
+                - OUTPUT:
+                    message: "WARNING: no review section in the spec — looked for '## Review Triage Log' and '### Review Findings'. No comment posted. Not treated as an error on this flow, whose review legitimately writes nothing when it finds nothing."
+                - SET: { variable: review_section, value: "" }
+        - CHECK: review_section eq "SPEC_EMPTY_REVIEW_SECTION"
+          TRUE:
+            - CHECK: review_producer eq "bmad-build-auto"
+              TRUE:
+                - OUTPUT:
+                    message: "The review section exists but has no rows — the unattended review always appends one, so this review never ran. Refusing to merge an unreviewed story."
+                    stop: true
+              FALSE:
+                - OUTPUT:
+                    message: "WARNING: the review section has no rows — no comment posted. Not treated as an error on this flow, for the same reason."
+                - SET: { variable: review_section, value: "" }
+
+        - CHECK: empty review_section
+          FALSE:
+            - WRITE:
+                file: /tmp/review-findings.md
+                content: "{review_section}"
+            - SET: { variable: comment_file, value: "/tmp/review-findings.md" }
+            - INCLUDE: common/post-issue-comment
+            - RUN: rm -f /tmp/review-findings.md
+    # CI gate before merge + write ci-status.json (contract for ci-status.sh)
+    - CHECK: review_status eq "done"
+      TRUE:
+        - INCLUDE: common/wait-for-green-ci
+        - INCLUDE: common/write-ci-status
+    # Optional merge — only in interactive flows (bmad-build manual), never in unattended (bmad-build-auto)
+    - CHECK: allow_merge eq "true"
+      TRUE:
+        - OUTPUT:
+            message: "Merge the story MR now? (yes/no)"
+            store: do_merge
+        - CHECK: do_merge eq "yes"
+          TRUE:
+            # Resolve mr_iid via the existing source_branch (atomic sets mr_iid in scope).
+            # mr_repo + source_branch are set by common/check-mr-ci inside wait-for-green-ci
+            # (called above when review_status eq "done").
+            - INCLUDE: common/find-mr
+            # Seed cross-platform vars (atomic references {git_host}/{git_project}/{git_owner}/{git_repo};
+            # check-config doesn't produce them — mirror existing post-dev-complete.yaml L212-217, L235-250).
+            - READ: _bmad/custom/issue-tracking.yaml
+              EXTRACT:
+                git_host: issue_tracking.git_host
+                git_project: issue_tracking.git_project
+            - RUN: uv run --no-project python -c "
+import sys
+parts = sys.argv[1].split('/')
+print(parts[0])
+" {git_project}
+              STORE: git_owner
+            - RUN: uv run --no-project python -c "
+import sys
+parts = sys.argv[1].split('/')
+print(parts[1])
+" {git_project}
+              STORE: git_repo
+            - INCLUDE: common/merge-mr
+            - RUN: git worktree remove .
+    - OUTPUT:
+        message: "Story {story_key} review-finish complete."

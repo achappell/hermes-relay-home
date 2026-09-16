@@ -1,0 +1,29 @@
+# issue-sync/prepare.yaml
+#
+# Purpose: Prepares the issue tracker for a sync — detects platform, ensures labels
+#           and board exist, and creates the PRD issue if missing.
+# Input variables: (none)
+# Output variables: none
+# Side effects: creates labels, board, and PRD issue on the issue tracker
+
+# Step 1: Detect platform and project
+- INCLUDE: common/check-config
+- INCLUDE: common/find-prd-key
+# Step 2: Ensure all labels exist
+- INCLUDE: common/ensure-labels
+- INCLUDE: common/ensure-dynamic-labels
+- INCLUDE: common/ensure-board
+# Step 3: Create PRD issue if not exists
+- SET: { variable: search_text, value: "PRD: {prd_key}" }
+- INCLUDE: common/find-issue
+- CHECK: empty issue_id
+  TRUE:
+    - WRITE:
+        file: /tmp/issue-desc-prd.md
+        content: "**PRD:** {prd_key}"
+        mode: overwrite
+    - SET: { variable: title, value: "PRD: {prd_key}" }
+    - SET: { variable: labels, value: "type{sep}prd\nprd{sep}{prd_key}" }
+    - SET: { variable: description_file, value: "/tmp/issue-desc-prd.md" }
+    - INCLUDE: common/create-issue
+    - RUN: rm -f /tmp/issue-desc-prd.md

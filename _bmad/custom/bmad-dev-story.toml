@@ -1,0 +1,15 @@
+# Issue Tracking override for bmad-dev-story (legacy shim, deprecated upstream).
+# Delegates to common/post-dev-complete-dev-finish.yaml.
+# Superseded by bmad-build + bmad-build-auto overrides — kept for retrocompat.
+
+[workflow]
+
+# Array (append): runs after greet but before the workflow begins.
+activation_steps_append = [
+  "Read `_bmad/_config/custom/bmad-workflow-lang.md` for the workflow language specification, then execute `_bmad/_config/custom/workflows/dev-story/activation.yaml`.",
+]
+
+# Scalar: runs after the dev-story workflow completes.
+on_complete = """
+Read `_bmad/_config/custom/bmad-workflow-lang.md` for the workflow language specification, then execute `_bmad/_config/custom/workflows/common/post-dev-complete-dev-finish.yaml`.
+"""

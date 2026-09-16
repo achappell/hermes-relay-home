@@ -1,0 +1,55 @@
+# common/check-mr-ci.yaml
+#
+# Purpose: Checks the CI pipeline status for the current branch's MR/PR.
+# Input variables:
+#   - current_branch: the source branch to check
+#   - git_platform: "gitlab" or "github" (from check-config)
+#   - platform: issue tracker platform (from check-config)
+#   - host: issue tracker host (from check-config)
+#   - project: issue tracker project (from check-config)
+# Output variables:
+#   - ci_status: "passed", "failed", "running", "no_ci", "no_mr"
+# Side effects: none
+
+# Resolve MR/PR repo (handles cross-platform: git remote may differ from issue tracker)
+- CHECK: git_platform eq platform
+  TRUE:
+    - SET: { variable: mr_repo, value: "{host}/{project}" }
+  FALSE:
+    - READ: _bmad/custom/issue-tracking.yaml
+      EXTRACT:
+        git_host: issue_tracking.git_host
+        git_project: issue_tracking.git_project
+    - SET: { variable: mr_repo, value: "{git_host}/{git_project}" }
+# Find the MR + fetch its latest pipeline. Atomics self-route via PLATFORM.
+# Note: get-mr-pipeline's GitHub side uses `gh run list` (workflow-run-level) rather
+# than the previous `gh pr checks` (per-check aggregation) — a known semantic shift
+# acknowledged in the plan's out-of-scope section ("both coexist" as concepts).
+- SET: { variable: source_branch, value: "{current_branch}" }
+- INCLUDE: common/find-mr
+- INCLUDE: common/get-mr-pipeline
+# Map atomic outputs to the unified ci_status enum (preserves original behavior):
+# empty mr_iid -> no_mr; empty pipeline_id -> no_ci; raw pipeline_status -> enum.
+- CHECK: empty mr_iid
+  TRUE:
+    - SET: { variable: ci_status, value: "no_mr" }
+  FALSE:
+    - CHECK: empty pipeline_id
+      TRUE:
+        - SET: { variable: ci_status, value: "no_ci" }
+      FALSE:
+        - RUN: uv run --no-project python -c "
+import sys
+ps = sys.argv[1].strip() if len(sys.argv) > 1 else ''
+# GitLab pipeline.status: success/failed/running/pending/canceled/skipped/created/manual
+# GitHub conclusion/status: success/failure/cancelled/skipped/timed_out/queued/in_progress/...
+if ps == 'success':
+    print('passed')
+elif ps in ('failed', 'failure'):
+    print('failed')
+elif ps in ('running', 'pending', 'queued', 'in_progress'):
+    print('running')
+else:
+    print('no_ci')
+" {pipeline_status}
+          STORE: ci_status

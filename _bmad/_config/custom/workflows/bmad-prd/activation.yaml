@@ -1,0 +1,85 @@
+# bmad-prd/activation.yaml
+#
+# Purpose: Detects intent (create vs update) and sets up the PRD worktree.
+#          - Create: no prd_key in frontmatter → ask for key, create worktree
+#          - Update: prd_key exists → find existing worktree, switch to it
+#          - Validate: same as update (prd_key exists, just critiquing)
+# Input variables: (none)
+# Output variables:
+#   - prd_key: the initiative key (asked or re-derived)
+# Side effects: creates/switches to PRD worktree; may update PRD frontmatter
+
+- INCLUDE: common/check-config
+# Detect intent: check if prd_key already exists in PRD frontmatter
+- RUN: uv run --no-project python -c "
+import sys, os
+path = sys.argv[1]
+if os.path.exists(path):
+    with open(path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+    in_frontmatter = False
+    for line in lines:
+        if line.strip() == '---':
+            in_frontmatter = not in_frontmatter
+            continue
+        if in_frontmatter and line.startswith('prd_key:'):
+            print(line.split(':', 1)[1].strip())
+            sys.exit(0)
+print('')
+" {planning_artifacts}/prd.md
+  STORE: prd_key
+- CHECK: empty prd_key
+  TRUE:
+    # --- CREATE MODE ---
+    - OUTPUT:
+        message: "What is the initiative key for this project? (e.g. auth-refactor, mobile-oidc, api-gateway)"
+        store: prd_key
+    - RUN: uv run --no-project python -c "
+import sys, os
+path, key = sys.argv[1], sys.argv[2]
+if not os.path.exists(path):
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(f'---\nprd_key: {key}\n---\n')
+else:
+    with open(path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+    for i in range(1, len(lines)):
+        if lines[i].strip() == '---':
+            lines.insert(i, f'prd_key: {key}\n')
+            break
+    with open(path, 'w', encoding='utf-8') as f:
+        f.writelines(lines)
+" {planning_artifacts}/prd.md {prd_key}
+      EXPECT_EXIT: 0
+    - READ: _bmad/custom/issue-tracking.yaml
+      EXTRACT:
+        prd_pattern: issue_tracking.branch_patterns.prd
+    - RUN: uv run --no-project python -c "
+import sys
+print(sys.argv[1].replace('{prd_key}', sys.argv[2]))
+" {prd_pattern} {prd_key}
+      STORE: prd_branch
+    - RUN: git branch --list '{prd_branch}'
+      STORE: prd_branches
+    - CHECK: empty prd_branches
+      TRUE:
+        - RUN: git worktree add {worktree_base}/prd -b {prd_branch} HEAD
+      FALSE:
+        - OUTPUT:
+            message: "PRD worktree already exists."
+    - RUN: git worktree list
+      STORE: worktrees
+    - FILTER:
+        source: worktrees
+        select: path
+        where: branch matches "{prd_branch}"
+        store: prd_worktree_path
+    - CD: {prd_worktree_path}
+    - OUTPUT:
+        message: "Switched to PRD worktree ({prd_branch})."
+  FALSE:
+    # --- UPDATE / VALIDATE MODE ---
+    - INCLUDE: common/find-prd
+    - CD: {prd_worktree_path}
+    - OUTPUT:
+        message: "Switched to PRD worktree for PRD editing."
