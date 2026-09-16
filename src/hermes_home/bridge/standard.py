@@ -1696,6 +1696,17 @@ class HomeBridge:
                         correlation_id = raw.get("correlation_id")
                         if not isinstance(correlation_id, str) or not correlation_id:
                             correlation_id = _correlation_id(event_payload)
+                        # Standard emits activity and errors for the running turn
+                        # without turn identity; endpoints discard turnless events
+                        # mid-turn, so bind them to the active turn.
+                        if (
+                            session_bound
+                            and event_type in _TURN_ACTIVITY_EVENT_TYPES
+                            and active is not None
+                            and active.event_started
+                            and not active.terminal
+                        ):
+                            turn_id = active.turn_id
                     conversation_handle = self._require_handle()
                     event = BridgeEvent(
                         conversation_handle=conversation_handle,
@@ -2521,6 +2532,17 @@ def _event_turn_id(payload: Mapping[str, object]) -> str | None:
     return values[0] if values else None
 
 
+_TURN_ACTIVITY_EVENT_TYPES = frozenset(
+    {
+        "thinking.delta",
+        "reasoning.delta",
+        "reasoning.available",
+        "status.update",
+        "error",
+    }
+)
+
+
 def _is_session_bound_event(event_type: str) -> bool:
     return event_type.startswith(
         (
@@ -2556,8 +2578,9 @@ def _validate_structured_event_payload(
             prompt = question.get("question")
             if not isinstance(prompt, str):
                 raise BridgeProtocolError("batch clarify question is not text")
+            # Standard sends `choices: null` for a free-text question.
             choices = question.get("choices")
-            if not isinstance(choices, list):
+            if choices is not None and not isinstance(choices, list):
                 raise BridgeProtocolError("batch clarify choices are not a list")
             multi_select = question.get("multi_select")
             if type(multi_select) is not bool:
@@ -2612,6 +2635,9 @@ def _validate_structured_response(
         ):
             raise BridgeProtocolError("clarify response answer has an invalid type")
         normalized = {primary_key: value}
+        if _is_batch_clarify_event(event) and "question_id" not in response:
+            # Standard records a batch answer without a qid as an empty response.
+            raise BridgeProtocolError("batch clarify response requires question_id")
         if "question_id" in response:
             if not _is_batch_clarify_event(event):
                 raise BridgeProtocolError(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import threading
 from collections import deque
@@ -25,6 +26,8 @@ from hermes_home.bridge.standard import (
     GatewayRPCError,
 )
 from hermes_home.observability.diagnostics import DiagnosticEvent, DiagnosticsRecorder
+
+LOGGER = logging.getLogger(__name__)
 
 BRIDGE_WS_PATH = HOME_BRIDGE_PATH
 HOME_BRIDGE_SCHEMA = 1
@@ -96,6 +99,7 @@ _ENDPOINT_EVENT_TYPES = frozenset(
         "text_final",
         "thinking",
         "thinking.delta",
+        "reasoning.available",
         "reasoning",
         "reasoning.delta",
         "status",
@@ -259,6 +263,7 @@ class BridgeEndpoint:
         self._active_turn_id: str | None = None
         self._known_turn_ids: set[str] = set()
         self._terminal_turn_ids: set[str] = set()
+        self._interrupted_turn_ids: set[str] = set()
         self._retired_turn_ids: set[str] = set()
         self._retired_turn_order: deque[str] = deque()
         self._pending_prompts: dict[tuple[str, str, str, str], BridgeEvent] = {}
@@ -603,6 +608,8 @@ class BridgeEndpoint:
             raise _RequestError("protocol_error", delivery="uncertain")
         if not accepted:
             raise _RequestError("request_rejected")
+        with self._state_lock:
+            self._interrupted_turn_ids.add(turn_id)
         return {
             "schema": HOME_BRIDGE_SCHEMA,
             "conversation_handle": handle,
@@ -790,7 +797,11 @@ class BridgeEndpoint:
                 continue
             try:
                 event = bridge.next_event()
-            except BridgeProtocolError:
+            except BridgeProtocolError as error:
+                # Messages are fixed, content-free validation text.
+                LOGGER.warning(
+                    "closing Home bridge connection: Standard event rejected: %s", error
+                )
                 self._mark_unavailable("protocol_error")
                 self.close()
                 return
@@ -806,7 +817,11 @@ class BridgeEndpoint:
             except RuntimeError:
                 self._mark_unavailable("hermes_unavailable")
                 continue
-            except Exception:  # noqa: BLE001 - fail closed on bridge defects
+            except Exception as error:  # noqa: BLE001 - fail closed on bridge defects
+                LOGGER.warning(
+                    "closing Home bridge connection: bridge event failed: %s",
+                    type(error).__name__,
+                )
                 self._mark_unavailable("protocol_error")
                 self.close()
                 return
@@ -824,11 +839,20 @@ class BridgeEndpoint:
                         "params": params,
                     }
                 )
-            except _RequestError:
+            except _RequestError as error:
+                LOGGER.warning(
+                    "closing Home bridge connection: %s event not forwardable: %s",
+                    event.type if isinstance(event, BridgeEvent) else "unknown",
+                    error.code,
+                )
                 self._mark_unavailable("protocol_error")
                 self.close()
                 return
-            except Exception:  # noqa: BLE001 - transport send is best effort
+            except Exception as error:  # noqa: BLE001 - transport send is best effort
+                LOGGER.warning(
+                    "closing Home bridge connection: event send failed: %s",
+                    type(error).__name__,
+                )
                 self._mark_unavailable("transport_unavailable")
                 self.close()
                 return
@@ -940,7 +964,9 @@ class BridgeEndpoint:
                         outcome="unavailable",
                         failure_code="transport_timeout",
                     )
-                    self._send_audio_unavailable(turn_id, "transport_timeout")
+                    self._audio_stream_failed(
+                        turn_id, "transport_timeout", started=started
+                    )
                     break
                 except TimeoutError:
                     self._record_audio_diagnostic(
@@ -948,7 +974,9 @@ class BridgeEndpoint:
                         outcome="unavailable",
                         failure_code="transport_timeout",
                     )
-                    self._send_audio_unavailable(turn_id, "transport_timeout")
+                    self._audio_stream_failed(
+                        turn_id, "transport_timeout", started=started
+                    )
                     break
                 except BridgeTransportError, ConnectionError, EOFError, OSError:
                     self._record_audio_diagnostic(
@@ -956,7 +984,9 @@ class BridgeEndpoint:
                         outcome="unavailable",
                         failure_code="transport_unavailable",
                     )
-                    self._send_audio_unavailable(turn_id, "transport_unavailable")
+                    self._audio_stream_failed(
+                        turn_id, "transport_unavailable", started=started
+                    )
                     break
                 except Exception:  # noqa: BLE001 - audio sidecar failure is typed
                     self._record_audio_diagnostic(
@@ -964,7 +994,9 @@ class BridgeEndpoint:
                         outcome="unavailable",
                         failure_code="protocol_error",
                     )
-                    self._send_audio_unavailable(turn_id, "protocol_error")
+                    self._audio_stream_failed(
+                        turn_id, "protocol_error", started=started
+                    )
                     break
                 try:
                     kind, outgoing = self._audio_payload(
@@ -979,7 +1011,9 @@ class BridgeEndpoint:
                         outcome="unavailable",
                         failure_code=error.code,
                     )
-                    self._send_audio_unavailable(turn_id, "protocol_error")
+                    self._audio_stream_failed(
+                        turn_id, "protocol_error", started=started
+                    )
                     break
                 try:
                     if kind == "start":
@@ -1124,6 +1158,26 @@ class BridgeEndpoint:
                 "frame": frame,
             },
         }
+
+    def _audio_stream_failed(self, turn_id: str, reason: str, *, started: bool) -> None:
+        """End a turn's audio after its sidecar stops.
+
+        Interrupting a turn deliberately cuts its audio. That is not a
+        failure: end a started stream normally (the interrupted terminal
+        event stops playback) and send nothing if audio never started.
+        """
+        with self._state_lock:
+            interrupted = turn_id in self._interrupted_turn_ids
+        if not interrupted:
+            self._send_audio_unavailable(turn_id, reason)
+            return
+        if not started:
+            return
+        try:
+            self._send_json(self._audio_notification(turn_id, {"kind": "end"}))
+        except Exception:  # noqa: BLE001 - client may close at any time
+            self._mark_unavailable("transport_unavailable")
+            self.close()
 
     def _send_audio_unavailable(self, turn_id: str, reason: str) -> None:
         try:

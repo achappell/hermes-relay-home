@@ -3657,3 +3657,84 @@ def test_bridge_preserves_pin_shaped_prompt_identity_until_terminal_completion()
     assert bridge.next_event().type == "message.complete"
     assert bridge.active_turn_id is None
     assert bridge.state == "ready"
+
+
+def _live_turn_socket(*events: dict[str, object]) -> FakeJsonSocket:
+    return FakeJsonSocket(
+        [
+            _event("gateway.ready", {"capabilities": {}}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {"session_id": "runtime-hermes-1"},
+            },
+            {"jsonrpc": "2.0", "id": "home-2", "result": {"status": "streaming"}},
+            *[
+                {
+                    "jsonrpc": "2.0",
+                    "method": "event",
+                    "params": {"session_id": "runtime-hermes-1", **event},
+                }
+                for event in events
+            ],
+        ]
+    )
+
+
+def test_bridge_binds_standard_activity_and_errors_to_the_running_turn():
+    gateway_socket = _live_turn_socket(
+        {"type": "message.start"},
+        {"type": "reasoning.delta", "payload": {"text": "Considering"}},
+        {"type": "status.update", "payload": {"kind": "process", "text": "Working"}},
+        {"type": "error", "payload": {"message": "provider failed"}},
+    )
+    bridge = _make_bridge(FakeSocketFactory(gateway_socket))
+    bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle="opaque-conversation-1",
+    )
+    turn = bridge.submit_prompt("hello")
+
+    events = [bridge.next_event() for _ in range(4)]
+
+    assert [event.type for event in events] == [
+        "message.start",
+        "reasoning.delta",
+        "status.update",
+        "error",
+    ]
+    assert {event.turn_id for event in events} == {turn.turn_id}
+
+
+def test_bridge_accepts_standard_free_text_batch_clarify():
+    gateway_socket = _live_turn_socket(
+        {"type": "message.start"},
+        {
+            "type": "clarify.request",
+            "payload": {
+                "questions": [
+                    {
+                        "qid": "q0",
+                        "question": "What name?",
+                        "choices": None,
+                        "multi_select": False,
+                    }
+                ],
+                "request_id": "f968a59f",
+            },
+        },
+    )
+    bridge = _make_bridge(FakeSocketFactory(gateway_socket))
+    bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle="opaque-conversation-1",
+    )
+    bridge.submit_prompt("ask me")
+    bridge.next_event()
+
+    prompt = bridge.next_event()
+
+    assert prompt.type == "clarify.request"
+    assert prompt.correlation_id == "f968a59f"
+    with pytest.raises(BridgeProtocolError, match="question_id"):
+        bridge.respond_prompt(prompt, {"answer": "probe-file"})
