@@ -11,7 +11,7 @@ development_status:
   home-nw-01-standard-compatibility-boundary: done
   home-nw-02-pairing-limited-credentials: review
   home-nw-03-approved-local-bridge-route: done
-  home-nw-04-route-roaming-identity-proof: backlog
+  home-nw-04-route-roaming-identity-proof: review
   home-nw-05-profile-mappings-conversation-claims: backlog
   home-nw-06-diagnostics-incident-review: done
   home-nw-07-typed-choice-authority: backlog

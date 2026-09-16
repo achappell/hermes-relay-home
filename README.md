@@ -40,9 +40,12 @@ credential-bound contract translation, a loopback-by-default threaded HTTP
 server, an executable Python 3.14 runtime, and admin-authenticated Prometheus
 metrics with provisionable Grafana dashboards. The framework-independent
 Standard Hermes bridge seam is now covered by deterministic JSON/PCM fixtures,
-and HOME-NW-03 serves its safe endpoint envelope on one configured local route;
-route discovery, identity proof, browser bootstrap, and roaming remain
-intentionally open as specified in the route-roaming BMAD companion
+and HOME-NW-03 serves its safe endpoint envelope on one configured local route.
+HOME-NW-04 now provides a deterministic approved-route selector that compares
+injected Household Identity proof over an immutable route snapshot; production
+route discovery, cryptographic proof, browser bootstrap, endpoint reconnect,
+and public roaming deployment remain intentionally deferred as specified in the
+route-roaming BMAD companion
 [`bridge-contract.md`](_bmad-output/specs/spec-home-bridge-route-roaming/bridge-contract.md).
 Endpoint pairing now supports five-minute approval codes, scoped durable
 credentials, renewal, rotation, and revocation. Configure paired mode with

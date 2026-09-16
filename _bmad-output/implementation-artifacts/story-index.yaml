@@ -32,6 +32,7 @@ stories:
     title: Add approved-route roaming and same-household identity proof
     kind: next-wave
     spec: _bmad-output/specs/spec-home-bridge-route-roaming/SPEC.md
+    validation: _bmad-output/implementation-artifacts/validation-home-nw-04.md
     github_issue: https://github.com/achappell/hermes-relay-home/issues/14
     horizon: next
   - id: HOME-NW-05

@@ -58,10 +58,10 @@ def test_bridge_contract_separates_the_live_seam_from_route_roaming_work():
     assert "> Status: the local endpoint-adapter slice is live in HOME-NW-03." in (
         bridge_contract
     )
-    assert (
-        "discovery, identity proof, browser bootstrap, and roaming remain future work."
-        in bridge_contract
-    )
+    assert "HOME-NW-04" in bridge_contract
+    assert "approved-route selector" in bridge_contract
+    assert "production route discovery, cryptographic" in bridge_contract
+    assert "claim that production route roaming is deployed." in bridge_contract
     assert "Vanilla Hermes Agent `0.21.1`" in bridge_contract
     assert "not vanilla Hermes methods or fields" in bridge_contract
     assert "conversation.reconnect" in bridge_contract
