@@ -746,6 +746,10 @@ class HomeBridge:
         self._device_id: str | None = None
         self._runtime_session_id: str | None = None
         self._resume_session_id: str | None = None
+        # A new Session's durable ID is written to the grant only after Standard
+        # accepts a prompt: Hermes does not store an empty Session, and resuming
+        # a reaped, never-stored ID would reject every later open.
+        self._unpersisted_session_id: str | None = None
         self._advertised_commands: frozenset[str] = frozenset()
         self._active_turn: _ActiveTurn | None = None
         self._unresolved_turn: BridgeTurn | None = None
@@ -880,7 +884,10 @@ class HomeBridge:
         if grant.session_id and durable_session_id not in (None, grant.session_id):
             gateway.close()
             return self._open_failure(conversation_handle, "conversation_mismatch")
-        if durable_session_id is not None:
+        unpersisted_session_id = None
+        if durable_session_id is not None and not grant.session_id:
+            unpersisted_session_id = durable_session_id
+        elif durable_session_id is not None:
             try:
                 if self._session_persistor is not None:
                     self._session_persistor(grant, durable_session_id)
@@ -917,6 +924,7 @@ class HomeBridge:
             self._device_id = device_id
             self._runtime_session_id = runtime_session_id
             self._resume_session_id = durable_session_id or grant.session_id
+            self._unpersisted_session_id = unpersisted_session_id
             self._advertised_commands = frozenset(advertised_commands)
             self._audio_socket = None
             self._audio_owner = None
@@ -1048,7 +1056,7 @@ class HomeBridge:
         if durable_session_id not in (None, resume_session_id):
             gateway.close()
             return self._reconnect_failure(handle, "conversation_mismatch")
-        if durable_session_id is not None:
+        if durable_session_id is not None and refreshed.session_id:
             try:
                 if self._session_persistor is not None:
                     self._session_persistor(refreshed, durable_session_id)
@@ -1066,6 +1074,10 @@ class HomeBridge:
             self._resume_session_id = (
                 str(durable_session_id) if durable_session_id else resume_session_id
             )
+            if refreshed.session_id:
+                self._unpersisted_session_id = None
+            elif self._unpersisted_session_id is None:
+                self._unpersisted_session_id = self._resume_session_id
             self._advertised_commands = frozenset(advertised_commands)
             self._state = "ready"
             unresolved_turn = self._unresolved_turn
@@ -1196,6 +1208,7 @@ class HomeBridge:
             self._gateway = None
             self._runtime_session_id = None
             self._resume_session_id = None
+            self._unpersisted_session_id = None
             self._advertised_commands = frozenset()
             self._grant = None
             self._device_id = None
@@ -1456,10 +1469,31 @@ class HomeBridge:
             active=active,
         ):
             raise BridgeTransportError("bridge changed during prompt delivery")
+        self._persist_session_after_accepted_turn()
         # Response audio is optional. Its setup happens only after Standard has
         # accepted the text, so a wedged sidecar cannot prevent the text turn.
         self._open_audio(owner=active)
         return BridgeTurn(turn_id=turn_id, conversation_handle=handle)
+
+    def _persist_session_after_accepted_turn(self) -> None:
+        """Bind a new Session to the grant once Hermes has a message to store."""
+
+        with self._state_lock:
+            session_id = self._unpersisted_session_id
+            grant = self._grant
+        if session_id is None or grant is None:
+            return
+        try:
+            if self._session_persistor is not None:
+                self._session_persistor(grant, session_id)
+        except OSError, RuntimeError, TypeError, ValueError:
+            # The accepted turn stands. Keep the ID pending so the next accepted
+            # turn retries; until then a reopen starts a fresh Session.
+            return
+        with self._state_lock:
+            if self._unpersisted_session_id == session_id and self._grant is not None:
+                self._grant = replace(self._grant, session_id=session_id)
+                self._unpersisted_session_id = None
 
     def next_event(self) -> BridgeEvent:
         with self._event_processing_lock:
@@ -2129,6 +2163,7 @@ class HomeBridge:
                 self._device_id = None
                 self._runtime_session_id = None
                 self._resume_session_id = None
+                self._unpersisted_session_id = None
                 self._advertised_commands = frozenset()
                 self._active_turn = None
                 self._unresolved_turn = None

@@ -332,7 +332,34 @@ def test_bridge_ready_keeps_hermes_credential_and_session_identity_server_side()
     ]
 
 
-def test_bridge_persists_the_durable_session_binding_after_open() -> None:
+def _persisting_bridge(
+    gateway_socket: FakeJsonSocket,
+    grant: ConversationGrant,
+    persisted: list[tuple[ConversationGrant, str]],
+    *,
+    fail_persist: bool = False,
+) -> HomeBridge:
+    def persist(current: ConversationGrant, session_id: str) -> None:
+        if fail_persist:
+            raise OSError("grant store unavailable")
+        persisted.append((current, session_id))
+
+    return HomeBridge(
+        gateway_url="wss://hermes.example/api/ws",
+        hermes_token="server-hermes-secret",
+        device_authenticator=StaticCredentialAuthenticator(
+            admin_token="admin-secret",
+            device_credentials={"device-secret": "puck-kitchen"},
+        ),
+        conversation_resolver=lambda handle, device_id: grant,
+        gateway_socket_factory=FakeSocketFactory(gateway_socket),
+        session_persistor=persist,
+    )
+
+
+def test_bridge_does_not_bind_a_new_session_to_the_grant_on_open() -> None:
+    # Hermes stores no empty Session; an open that ends before any turn must not
+    # leave a never-stored, soon-reaped ID on the grant for later resumes.
     gateway_socket = FakeJsonSocket(
         [
             _event("gateway.ready", {"heartbeat": True}),
@@ -352,19 +379,105 @@ def test_bridge_persists_the_durable_session_binding_after_open() -> None:
         profile_id="amanda",
     )
     persisted: list[tuple[ConversationGrant, str]] = []
-    bridge = HomeBridge(
-        gateway_url="wss://hermes.example/api/ws",
-        hermes_token="server-hermes-secret",
-        device_authenticator=StaticCredentialAuthenticator(
-            admin_token="admin-secret",
-            device_credentials={"device-secret": "puck-kitchen"},
-        ),
-        conversation_resolver=lambda handle, device_id: grant,
-        gateway_socket_factory=FakeSocketFactory(gateway_socket),
-        session_persistor=lambda current, session_id: persisted.append(
-            (current, session_id)
-        ),
+    bridge = _persisting_bridge(gateway_socket, grant, persisted)
+
+    result = bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle=grant.handle,
     )
+    bridge.close()
+
+    assert result.status == "ready"
+    assert persisted == []
+
+
+def test_bridge_binds_the_new_session_after_the_first_accepted_prompt() -> None:
+    gateway_socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {"heartbeat": True}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {
+                    "session_id": "runtime-hermes-1",
+                    "stored_session_id": "durable-hermes-1",
+                },
+            },
+            {"jsonrpc": "2.0", "id": "home-2", "result": {"status": "accepted"}},
+        ]
+    )
+    grant = ConversationGrant(
+        handle="opaque-conversation-1",
+        device_id="puck-kitchen",
+        profile_id="amanda",
+    )
+    persisted: list[tuple[ConversationGrant, str]] = []
+    bridge = _persisting_bridge(gateway_socket, grant, persisted)
+    bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle=grant.handle,
+    )
+
+    bridge.submit_prompt("First turn")
+
+    assert persisted == [(grant, "durable-hermes-1")]
+
+
+def test_bridge_keeps_an_accepted_turn_when_session_binding_cannot_be_saved() -> None:
+    gateway_socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {"heartbeat": True}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {
+                    "session_id": "runtime-hermes-1",
+                    "stored_session_id": "durable-hermes-1",
+                },
+            },
+            {"jsonrpc": "2.0", "id": "home-2", "result": {"status": "accepted"}},
+        ]
+    )
+    grant = ConversationGrant(
+        handle="opaque-conversation-1",
+        device_id="puck-kitchen",
+        profile_id="amanda",
+    )
+    bridge = _persisting_bridge(gateway_socket, grant, [], fail_persist=True)
+    bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle=grant.handle,
+    )
+
+    turn = bridge.submit_prompt("First turn")
+
+    assert turn.turn_id == "home-turn-1"
+    assert bridge.active_turn_id == "home-turn-1"
+    assert bridge.state == "ready"
+
+
+def test_bridge_still_refreshes_an_already_bound_session_on_resume() -> None:
+    gateway_socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {"heartbeat": True}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {
+                    "session_id": "runtime-hermes-2",
+                    "stored_session_id": "durable-hermes-1",
+                },
+            },
+        ]
+    )
+    grant = ConversationGrant(
+        handle="opaque-conversation-1",
+        device_id="puck-kitchen",
+        profile_id="amanda",
+        session_id="durable-hermes-1",
+    )
+    persisted: list[tuple[ConversationGrant, str]] = []
+    bridge = _persisting_bridge(gateway_socket, grant, persisted)
 
     result = bridge.open(
         headers={"Authorization": "Device device-secret"},
@@ -372,6 +485,7 @@ def test_bridge_persists_the_durable_session_binding_after_open() -> None:
     )
 
     assert result.status == "ready"
+    assert gateway_socket.sent[-1]["method"] == "session.resume"
     assert persisted == [(grant, "durable-hermes-1")]
 
 

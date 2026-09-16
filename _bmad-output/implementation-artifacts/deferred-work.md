@@ -41,3 +41,6 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-home-nw-06-diagnostics-incident-review.md`
   summary: Add a second durable upload receipt/transaction protocol spanning the remote bundle store and local SQLite.
   evidence: D9 selects stable idempotency keys and acknowledgements until the final backend contract exists.
+- source_spec: `_bmad-output/implementation-artifacts/spec-pilot-session-persist-and-runner-log.md`
+  summary: Distinguish a Standard `session.resume` "not found" rejection for a never-stored Session from other rejections, so a stale grant session ID can heal instead of requiring manual cleanup.
+  evidence: Maybe-false until Standard exposes a distinguishing error code; today a reaped empty Session and a genuine rejection both surface as GatewayRPCError -> request_rejected.
