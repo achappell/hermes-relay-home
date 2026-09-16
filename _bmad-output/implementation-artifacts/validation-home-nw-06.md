@@ -79,9 +79,22 @@ rendered metrics checks.
 | Ruff format | `uv run --no-cache --no-project --python 3.14 --with ruff -- ruff format --check src tests` | `46 files already formatted` |
 | Whitespace/diff | `git diff --check` | Passed |
 
-The full suite was attempted but collection remains blocked by the preserved,
-pre-existing `src/hermes_home/bridge/__init__.py` edit importing
-`hermes_home.bridge.routes`, while that module is absent from this NW-06
-worktree. This is an unrelated HOME-NW-04 worktree change; no route module was
-copied into the diagnostics branch. API, bridge, and runtime tests therefore
-remain unverified in this worktree.
+## Post-rebase integration verification
+
+The post-merge review-fix commit was replayed onto current `main` at
+`eb95002`, so the Home NW-04 `bridge.routes` module is available to the
+diagnostics branch. The old worktree's export-only `bridge/__init__.py` edit
+matched current `main` exactly; it is preserved in the local stash
+`preserve NW-04 route exports while rebasing NW-06 review follow-up onto main`
+and was not reapplied. Full-suite collection then exposed a stale API-test
+helper that generated 64-character hashes instead of the required 32-hex
+opaque correlation IDs. The fixture now follows the production and other test
+helpers' format.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Focused diagnostics suite | `uv run --no-cache --no-project --python 3.14 --with pytest --with cryptography --with 'websockets>=17,<18' -- python -m pytest -q tests/test_diagnostics.py tests/test_diagnostics_store.py tests/test_diagnostics_api.py tests/test_metrics.py` | `59 passed in 0.46s` |
+| Full Home suite | `uv run --no-cache --no-project --python 3.14 --with pytest --with cryptography --with 'websockets>=17,<18' -- python -m pytest -q` | `337 passed in 3.53s` |
+| Ruff lint | `uv run --no-cache --no-project --python 3.14 --with ruff -- ruff check src tests` | `All checks passed!` |
+| Ruff format | `uv run --no-cache --no-project --python 3.14 --with ruff -- ruff format --check src tests` | `48 files already formatted` |
+| Whitespace/diff | `git diff --check` | Passed |

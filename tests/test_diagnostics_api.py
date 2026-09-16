@@ -12,7 +12,7 @@ from hermes_home.storage.sqlite import SQLiteConfigurationStore
 
 
 def _corr(label: str) -> str:
-    return "corr-" + hashlib.sha256(label.encode()).hexdigest()
+    return "corr-" + hashlib.sha256(label.encode()).hexdigest()[:32]
 
 
 def _application(tmp_path):
