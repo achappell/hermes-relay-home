@@ -1,0 +1,18 @@
+# Issue Tracking override for bmad-prd
+# Unified PRD skill (BMM 6.8.0+): handles create, update, and validate intents.
+# Detects intent from prd_key presence in frontmatter:
+#   - Create (no prd_key): asks for key, creates worktree, creates issue + draft MR
+#   - Update (prd_key exists): switches to worktree, updates issue description
+#   - Validate (prd_key exists): switches to worktree, updates description (no-op if unchanged)
+# Replaces bmad-create-prd.toml and bmad-edit-prd.toml for BMM 6.8.0+.
+# Overrides merge: scalars win, arrays append.
+
+[workflow]
+
+activation_steps_append = [
+  "Read `_bmad/_config/custom/bmad-workflow-lang.md` for the workflow language specification, then execute `_bmad/_config/custom/workflows/bmad-prd/activation.yaml`.",
+]
+
+on_complete = """
+Read `_bmad/_config/custom/bmad-workflow-lang.md` for the workflow language specification, then execute `_bmad/_config/custom/workflows/bmad-prd/complete.yaml`.
+"""

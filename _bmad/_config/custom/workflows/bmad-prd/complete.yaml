@@ -1,0 +1,157 @@
+# bmad-prd/complete.yaml
+#
+# Purpose: Handles post-PRD-workflow actions based on detected intent.
+#          - Create: no existing PRD issue → create issue + commit + push + draft MR
+#          - Update: existing PRD issue → update description only
+#          - Validate: existing PRD issue → update description (no-op if unchanged)
+# Input variables:
+#   - prd_key: from activation or re-derived from frontmatter
+# Output variables: (none)
+# Side effects: creates/updates issue on tracker, pushes branch, may create draft MR
+
+- INCLUDE: common/check-config
+# Read prd_key (should have been set during activation, re-derive if lost)
+- READ: {planning_artifacts}/prd.md
+  EXTRACT:
+    prd_key: frontmatter.prd_key
+- CHECK: empty prd_key
+  TRUE:
+    - OUTPUT:
+        message: "prd_key not found in frontmatter. Run /bmad-prd again."
+        stop: true
+# Resolve prd_branch
+- READ: _bmad/custom/issue-tracking.yaml
+  EXTRACT:
+    prd_pattern: issue_tracking.branch_patterns.prd
+- RUN: uv run --no-project python -c "
+import sys
+print(sys.argv[1].replace('{prd_key}', sys.argv[2]))
+" {prd_pattern} {prd_key}
+  STORE: prd_branch
+# Detect intent: check if PRD issue already exists
+- SET: { variable: search_text, value: "PRD: {prd_key}" }
+- INCLUDE: common/find-issue
+- CHECK: empty issue_id
+  TRUE:
+    # --- CREATE MODE: no existing issue ---
+    # Strip frontmatter for description
+    - RUN: uv run --no-project python -c "
+import sys
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
+    lines = f.readlines()
+count = 0
+start = 0
+for i, line in enumerate(lines):
+    if line.strip() == '---':
+        count += 1
+        if count == 2:
+            start = i + 1
+            break
+print(''.join(lines[start:]).strip())
+" {planning_artifacts}/prd.md
+      STORE: prd_body
+    - WRITE:
+        file: /tmp/prd-desc.md
+        content: "**PRD:** {prd_key}\n\n---\n\n{prd_body}"
+        mode: overwrite
+    # Ensure all required labels exist before creating the issue
+    - INCLUDE: common/ensure-labels
+    - INCLUDE: common/ensure-board
+    - SET: { variable: title, value: "PRD: {prd_key}" }
+    - SET: { variable: labels, value: "type{sep}prd\nprd{sep}{prd_key}" }
+    - SET: { variable: description_file, value: "/tmp/prd-desc.md" }
+    - INCLUDE: common/create-issue
+    # Commit and push
+    - RUN: git add .
+    - RUN: git commit -m "update PRD {prd_key}"
+    - RUN: git push -u origin {prd_branch}
+    # Create draft MR via atomic ensure-mr (caller-agnostic INPUT contract)
+    # Resolve default_branch (target for the PRD MR)
+    - RUN: git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || git remote show origin 2>/dev/null | grep 'HEAD branch' | awk '{print $NF}'
+      STORE: default_branch
+    # Resolve cross-platform issue_ref (same-platform uses #N; cross-platform uses full URL)
+    - CHECK: git_platform eq platform
+      TRUE:
+        - SET: { variable: issue_ref, value: "Closes #{issue_id}" }
+      FALSE:
+        - CHECK: platform eq "gitlab"
+          TRUE:
+            - SET: { variable: issue_ref, value: "Related to https://{host}/{project}/-/issues/{issue_id}" }
+          FALSE:
+            - SET: { variable: issue_ref, value: "Related to https://{host}/{project}/issues/{issue_id}" }
+    # Resolve mr_repo (gitlab: host/project; github: host/owner/repo — cross-platform uses git_host/git_project)
+    - CHECK: git_platform eq "gitlab"
+      TRUE:
+        - CHECK: git_platform eq platform
+          TRUE:
+            - SET: { variable: mr_repo, value: "{host}/{project}" }
+          FALSE:
+            - READ: _bmad/custom/issue-tracking.yaml
+              EXTRACT:
+                git_host: issue_tracking.git_host
+                git_project: issue_tracking.git_project
+            - SET: { variable: mr_repo, value: "{git_host}/{git_project}" }
+      FALSE:
+        - CHECK: git_platform eq platform
+          TRUE:
+            - SET: { variable: mr_repo, value: "{host}/{project}" }
+          FALSE:
+            - READ: _bmad/custom/issue-tracking.yaml
+              EXTRACT:
+                git_host: issue_tracking.git_host
+                git_project: issue_tracking.git_project
+            - RUN: uv run --no-project python -c "
+import sys
+parts = sys.argv[1].split('/')
+print(parts[0])
+" {git_project}
+              STORE: git_owner
+            - RUN: uv run --no-project python -c "
+import sys
+parts = sys.argv[1].split('/')
+print(parts[1])
+" {git_project}
+              STORE: git_repo
+            - SET: { variable: mr_repo, value: "{git_host}/{git_owner}/{git_repo}" }
+    # Write the cross-platform issue reference to a tmp file (the atomic reads from this path)
+    - WRITE:
+        file: /tmp/ensure-mr-prd-desc.md
+        content: "{issue_ref}"
+        mode: overwrite
+    # Translate scope into the new ensure-mr INPUT contract (PRD callers: source=prd_branch, target=default_branch, draft=true)
+    - SET: { variable: source_branch, value: "{prd_branch}" }
+    - SET: { variable: target_branch, value: "{default_branch}" }
+    - SET: { variable: mr_title, value: "PRD: {prd_key}" }
+    - SET: { variable: mr_description_file, value: "/tmp/ensure-mr-prd-desc.md" }
+    - SET: { variable: mr_draft, value: "true" }
+    - INCLUDE: common/ensure-mr
+    - RUN: rm -f /tmp/ensure-mr-prd-desc.md
+    - RUN: rm -f /tmp/prd-desc.md
+    - OUTPUT:
+        message: "PRD {prd_key} issue created and draft MR ready."
+  FALSE:
+    # --- UPDATE / VALIDATE MODE: existing issue ---
+    # Strip frontmatter and write description file
+    - RUN: uv run --no-project python -c "
+import sys
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
+    lines = f.readlines()
+count = 0
+start = 0
+for i, line in enumerate(lines):
+    if line.strip() == '---':
+        count += 1
+        if count == 2:
+            start = i + 1
+            break
+print(''.join(lines[start:]).strip())
+" {planning_artifacts}/prd.md
+      STORE: prd_body
+    - WRITE:
+        file: /tmp/prd-desc.md
+        content: "**PRD:** {prd_key}\n\n---\n\n{prd_body}"
+        mode: overwrite
+    # Update issue description via common sub-workflow
+    - SET: { variable: description_file, value: "/tmp/prd-desc.md" }
+    - INCLUDE: common/update-issue-description
+    - RUN: rm -f /tmp/prd-desc.md
