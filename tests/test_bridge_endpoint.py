@@ -279,6 +279,61 @@ def test_endpoint_dispatches_prompt_controls_and_ping_without_exposing_identity(
         endpoint.close()
 
 
+def test_endpoint_forwards_only_allowlisted_standard_events() -> None:
+    connection = FakeConnection()
+    bridge = FakeBridge()
+    bridge.events.extend(
+        [
+            BridgeEvent(
+                HANDLE,
+                "session.info",
+                {"system_prompt": "private", "tools": {"web": ["search"]}},
+            ),
+            BridgeEvent(HANDLE, "sessions.changed", {}),
+            BridgeEvent(HANDLE, "reasoning.delta", {"text": "Considering"}),
+            BridgeEvent(
+                HANDLE, "tool.start", {"name": "search"}, turn_id="home-turn-1"
+            ),
+            BridgeEvent(HANDLE, "message.delta", {"text": "OK"}, turn_id="home-turn-1"),
+            BridgeEvent(
+                HANDLE,
+                "message.complete",
+                {"text": "OK", "status": "complete"},
+                turn_id="home-turn-1",
+            ),
+        ]
+    )
+    endpoint = BridgeEndpoint(connection, bridge, headers=HEADERS, route=ROUTE)
+
+    def forwarded_types() -> list[str]:
+        return [
+            json.loads(item)["params"]["event"]["type"]
+            for item in list(connection.sent)
+            if isinstance(item, str) and json.loads(item).get("method") == "event"
+        ]
+
+    try:
+        _open(endpoint)
+        _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="prompt-1",
+            method="prompt.submit",
+            params={"conversation_handle": HANDLE, "text": "hello"},
+        )
+        bridge.event_ready.set()
+        _wait_for(lambda: "message.complete" in forwarded_types())
+        assert forwarded_types() == [
+            "reasoning.delta",
+            "message.delta",
+            "message.complete",
+        ]
+        assert "private" not in repr(connection.sent)
+    finally:
+        endpoint.close()
+
+
 def test_structured_prompt_event_is_retained_and_response_is_not_submitted_as_text() -> (
     None
 ):

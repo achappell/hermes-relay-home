@@ -82,6 +82,36 @@ _PROMPT_EXPIRY_TYPES = {
     "secret.expire": "secret.request",
     "sudo.expire": "sudo.request",
 }
+# Standard events an endpoint may receive. Everything else Standard emits
+# (session.info with the system prompt and tool inventory, sessions.changed,
+# tool.*, session.usage, ...) stays server-side.
+_ENDPOINT_EVENT_TYPES = frozenset(
+    {
+        "message.start",
+        "message.delta",
+        "message.interim",
+        "message.complete",
+        "text",
+        "text_delta",
+        "text_final",
+        "thinking",
+        "thinking.delta",
+        "reasoning",
+        "reasoning.delta",
+        "status",
+        "status.update",
+        "turn_complete",
+        "turn_interrupted",
+        "turn.interrupted",
+        "turn.cancelled",
+        "turn.error",
+        "audio_abort",
+        "error",
+        *_TERMINAL_EVENT_TYPES,
+        *_STRUCTURED_PROMPT_FIELDS,
+        *_PROMPT_EXPIRY_TYPES,
+    }
+)
 _STABLE_CODES = frozenset(
     {
         "invalid_request",
@@ -781,7 +811,11 @@ class BridgeEndpoint:
                 self.close()
                 return
             try:
+                # Turn and prompt bookkeeping runs for every event; only the
+                # allowlisted types are forwarded to the endpoint.
                 params = self._event_payload(event)
+                if event.type not in _ENDPOINT_EVENT_TYPES:
+                    continue
                 self._send_json(
                     {
                         "jsonrpc": "2.0",
