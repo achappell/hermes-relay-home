@@ -27,3 +27,17 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-home-nw-06-diagnostics-incident-review.md`
   summary: Define whether storage failures and duplicate IDs belong in `rejected_event_count` or a separate loss/availability counter.
   evidence: The current diagnostics status vocabulary does not distinguish these cases, so changing the counter without a contract would make status interpretation ambiguous.
+
+## Deferred from: code review of spec-home-nw-06-diagnostics-incident-review.md (2026-09-16)
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-home-nw-06-diagnostics-incident-review.md`
+  summary: Make the runtime own automatic capture-service wiring and reaper construction.
+  evidence: The endpoint-native evidence adapter and trusted-surface role model remain open decisions already recorded under W1.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-home-nw-06-diagnostics-incident-review.md`
+  summary: Define remote bundle lifecycle semantics when no lifecycle adapter is injected.
+  evidence: D6 deliberately leaves the final remote bundle backend injected.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-home-nw-06-diagnostics-incident-review.md`
+  summary: Add a second durable upload receipt/transaction protocol spanning the remote bundle store and local SQLite.
+  evidence: D9 selects stable idempotency keys and acknowledgements until the final backend contract exists.

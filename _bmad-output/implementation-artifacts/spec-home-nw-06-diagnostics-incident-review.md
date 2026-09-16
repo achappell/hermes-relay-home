@@ -5,7 +5,7 @@ created: '2026-09-15'
 status: 'done'
 baseline_revision: 'fd16784d264615b6df11e02fe117871cc69a2041'
 route: 'dispatch'
-review_loop_iteration: 1
+review_loop_iteration: 2
 followup_review_recommended: false
 deferred:
   - The final remote structured-log backend, encrypted bundle store, trusted-surface role model, and transport policy remain injected decisions from the canonical spec.
@@ -358,3 +358,66 @@ unowned observations.
 - **R3 — Treat an empty-queue status read as proof of stale reachability.**
   `collector_reachable` is intentionally last-known state; absence of pending
   events does not by itself invalidate that persisted value.
+
+#### Follow-up review (2026-09-16)
+
+The second review pass covered the narrowed core diagnostics/storage diff after
+the first review fixes. Prior decisions D1–D10 remain the governing choices;
+the findings below are implementation gaps against those decisions, grouped by
+shared cause and deduplicated across the four review layers.
+
+##### Patch
+
+- [x] [Review][Patch] Enforce Home-generated opaque event identities and opaque
+  capture/evidence scope values [src/hermes_home/observability/diagnostics.py]
+- [x] [Review][Patch] Make retention deadlines authoritative and purge expired
+  rows before queue bounds, reads, and status [src/hermes_home/observability/diagnostics.py; src/hermes_home/storage/diagnostics.py]
+- [x] [Review][Patch] Reject future ring evidence and validate injected clocks,
+  counts, service versions, capture states, and failure codes
+  [src/hermes_home/observability/diagnostics.py]
+- [x] [Review][Patch] Complete capture approval as an approved-to-encrypt-to-
+  upload transition with explicit non-empty selection, authorization rechecks,
+  expiry checks, and external I/O outside the capture lock; a remote preserve
+  is cleaned up if its local finalization recheck fails
+  [src/hermes_home/observability/diagnostics.py]
+- [x] [Review][Patch] Remove deleted captures from durable review state and
+  protect active captures from bounded-history eviction
+  [src/hermes_home/observability/diagnostics.py; src/hermes_home/storage/diagnostics.py]
+- [x] [Review][Patch] Commit capture state and its audit record atomically when
+  SQLite is the durable adapter [src/hermes_home/observability/diagnostics.py; src/hermes_home/storage/diagnostics.py]
+- [x] [Review][Patch] Keep local storage failures distinct from collector
+  reachability [src/hermes_home/observability/diagnostics.py]
+- [x] [Review][Patch] Keep configured event-retention status truthful and clear
+  recorder in-flight state when a post-ack clock/storage boundary fails
+  [src/hermes_home/observability/diagnostics.py; tests/test_diagnostics.py]
+- [x] [Review][Patch] Add restart, acknowledgement, scope-isolation, bounds,
+  retention-class, rendered-metrics, expiry, and remote-failure coverage
+  [tests/test_diagnostics.py; tests/test_diagnostics_store.py; tests/test_diagnostics_api.py]
+
+##### Deferred
+
+- [x] [Review][Defer] Make the runtime own automatic capture-service wiring and
+  reaper construction [src/hermes_home/runtime.py] — deferred: the endpoint
+  evidence adapter and trusted-surface role model remain open decisions already
+  recorded under W1.
+- [x] [Review][Defer] Define remote bundle lifecycle semantics when no lifecycle
+  adapter is injected [src/hermes_home/observability/diagnostics.py] — deferred:
+  D6 deliberately leaves the final remote bundle backend injected.
+- [x] [Review][Defer] Add a second durable upload receipt/transaction protocol
+  spanning the remote bundle store and local SQLite [src/hermes_home/observability/diagnostics.py] — deferred:
+  D9 selects stable idempotency keys and acknowledgements until the final
+  backend contract exists.
+
+##### Rejected
+
+- **R4 — Add authentication inside `IncidentCaptureService`.** The public Home
+  API already authenticates diagnostics reads; the core service intentionally
+  receives an injected authorizer and current-scope resolver. Duplicating HTTP
+  authentication here would not close the reported issue.
+- **R5 — Add a concrete queued-event deadline field to status.** Status already
+  exposes the authoritative retention policy, while event-level deadlines are
+  available only in the safe event envelope; the review did not establish a
+  missing acceptance requirement for another aggregate.
+- **R6 — Treat the narrowed review diff's omission of BMAD artifacts as a code
+  defect.** The reviewer was explicitly given the core implementation group;
+  the story and validation artifacts are outside that diff by design.

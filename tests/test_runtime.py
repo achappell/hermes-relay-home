@@ -523,23 +523,22 @@ def test_create_runtime_persists_the_shared_diagnostics_timeline_across_restart(
         }
     )
     runtime = create_runtime(settings)
-    runtime.diagnostics.record(
-        DiagnosticEvent.create(
-            event_id="event-runtime",
-            correlation_id="corr-runtime",
-            source="home",
-            phase="turn",
-            outcome="unavailable",
-            occurred_at=runtime.diagnostics.now(),
-            failure_code="hermes_unavailable",
-        )
+    correlation_id = runtime.diagnostics.new_correlation_id()
+    event = DiagnosticEvent.create(
+        correlation_id=correlation_id,
+        source="home",
+        phase="turn",
+        outcome="unavailable",
+        occurred_at=runtime.diagnostics.now(),
+        failure_code="hermes_unavailable",
     )
+    runtime.diagnostics.record(event)
     runtime.close()
 
     restarted = create_runtime(settings)
     try:
-        timeline = restarted.diagnostics.timeline("corr-runtime")
-        assert [event.event_id for event in timeline] == ["event-runtime"]
+        timeline = restarted.diagnostics.timeline(correlation_id)
+        assert [item.event_id for item in timeline] == [event.event_id]
         assert timeline[0].failure_code == "hermes_unavailable"
     finally:
         restarted.close()

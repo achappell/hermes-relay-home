@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from threading import RLock
 
 from hermes_home.observability.diagnostics import (
+    MAX_SAFE_COUNT,
     CaptureAuditRecord,
     CaptureRecord,
     CaptureScope,
@@ -16,18 +18,29 @@ from hermes_home.observability.diagnostics import (
     DiagnosticsStatus,
     DiagnosticStoreError,
     _event_expired,
+    _require_timestamp,
 )
+
+_ACTIVE_CAPTURE_STATES = ("armed", "previewing", "approved", "encrypting", "uploading")
 
 
 class SQLiteDiagnosticsStore:
     """Persist bounded safe events and upload metadata in the Home database."""
 
-    def __init__(self, database: str | Path) -> None:
-        database_path = Path(database)
-        database_path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(database_path, check_same_thread=False)
+    def __init__(
+        self,
+        database: str | Path,
+        *,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
         self._lock = RLock()
+        connection: sqlite3.Connection | None = None
         try:
+            database_path = Path(database)
+            database_path.parent.mkdir(parents=True, exist_ok=True)
+            connection = sqlite3.connect(database_path, check_same_thread=False)
+            self._connection = connection
+            self._clock = clock
             self._connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS diagnostic_events (
@@ -61,15 +74,27 @@ class SQLiteDiagnosticsStore:
                 "INSERT OR IGNORE INTO diagnostic_state (id) VALUES (1)"
             )
             self._connection.commit()
-        except sqlite3.Error as error:
-            self._connection.close()
+        except (OSError, sqlite3.Error) as error:
+            if connection is not None:
+                connection.close()
             raise DiagnosticStoreError(
                 "diagnostics database cannot be initialized"
             ) from error
 
-    def append(self, event: DiagnosticEvent, *, max_events: int) -> bool:
-        if type(max_events) is not int or max_events < 1:
+    def append(
+        self,
+        event: DiagnosticEvent,
+        *,
+        max_events: int,
+        before: float | None = None,
+    ) -> bool:
+        if type(max_events) is not int or not 1 <= max_events <= 2**63 - 1:
             raise ValueError("diagnostic event bound must be positive")
+        current = self._clock() if before is None else before
+        _require_timestamp(current, "diagnostic store clock")
+        self.purge_expired(before=float(current))
+        if _event_expired(event, before=float(current)):
+            return False
         serialized = json.dumps(event.to_dict(), sort_keys=True, separators=(",", ":"))
         try:
             with self._lock:
@@ -144,6 +169,7 @@ class SQLiteDiagnosticsStore:
         correlation_id: str,
         before: float,
     ) -> tuple[DiagnosticEvent, ...]:
+        _require_timestamp(before, "diagnostic events clock")
         self.purge_expired(before=before)
         try:
             with self._lock:
@@ -165,8 +191,9 @@ class SQLiteDiagnosticsStore:
         limit: int,
         before: float,
     ) -> tuple[DiagnosticEvent, ...]:
-        if type(limit) is not int or limit < 1:
+        if type(limit) is not int or not 1 <= limit <= MAX_SAFE_COUNT:
             raise ValueError("diagnostic upload limit must be positive")
+        _require_timestamp(before, "diagnostic pending clock")
         self.purge_expired(before=before)
         try:
             with self._lock:
@@ -184,16 +211,29 @@ class SQLiteDiagnosticsStore:
         return tuple(_decode_event(row[0]) for row in rows)
 
     def mark_uploaded(self, event_ids: Sequence[str], *, uploaded_at: float) -> None:
-        if not event_ids:
+        _require_timestamp(uploaded_at, "uploaded_at")
+        requested = tuple(event_ids)
+        if not requested:
             return
-        placeholders = ",".join("?" for _ in event_ids)
+        if len(set(requested)) != len(requested):
+            raise DiagnosticStoreError("duplicate diagnostic event IDs")
+        placeholders = ",".join("?" for _ in requested)
         try:
             with self._lock:
                 self._connection.execute("BEGIN IMMEDIATE")
                 try:
+                    known = {
+                        row[0]
+                        for row in self._connection.execute(
+                            f"SELECT event_id FROM diagnostic_events WHERE event_id IN ({placeholders})",
+                            requested,
+                        ).fetchall()
+                    }
+                    if known != set(requested):
+                        raise DiagnosticStoreError("diagnostic event ID is unknown")
                     self._connection.execute(
                         f"UPDATE diagnostic_events SET uploaded = 1 WHERE event_id IN ({placeholders})",
-                        tuple(event_ids),
+                        requested,
                     )
                     self._connection.execute(
                         """
@@ -207,6 +247,8 @@ class SQLiteDiagnosticsStore:
                 except BaseException:
                     self._connection.rollback()
                     raise
+        except DiagnosticStoreError:
+            raise
         except sqlite3.Error as error:
             raise DiagnosticStoreError(
                 "diagnostics upload state cannot be updated"
@@ -225,6 +267,7 @@ class SQLiteDiagnosticsStore:
             ) from error
 
     def purge_expired(self, *, before: float) -> int:
+        _require_timestamp(before, "diagnostic purge clock")
         try:
             with self._lock:
                 rows = self._connection.execute(
@@ -249,7 +292,10 @@ class SQLiteDiagnosticsStore:
                 "expired diagnostics cannot be removed"
             ) from error
 
-    def status(self) -> DiagnosticsStatus:
+    def status(self, *, before: float | None = None) -> DiagnosticsStatus:
+        current = self._clock() if before is None else before
+        _require_timestamp(current, "diagnostic status clock")
+        self.purge_expired(before=float(current))
         try:
             with self._lock:
                 queued = self._connection.execute(
@@ -308,17 +354,22 @@ class SQLiteIncidentCaptureStore:
         max_captures: int = 1024,
         max_audit_records: int = 4096,
     ) -> None:
-        if type(max_captures) is not int or max_captures < 1:
+        if type(max_captures) is not int or not 1 <= max_captures <= MAX_SAFE_COUNT:
             raise ValueError("capture record bound must be positive")
-        if type(max_audit_records) is not int or max_audit_records < 1:
+        if (
+            type(max_audit_records) is not int
+            or not 1 <= max_audit_records <= MAX_SAFE_COUNT
+        ):
             raise ValueError("capture audit bound must be positive")
-        database_path = Path(database)
-        database_path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(database_path, check_same_thread=False)
         self._lock = RLock()
         self._max_captures = max_captures
         self._max_audit_records = max_audit_records
+        connection: sqlite3.Connection | None = None
         try:
+            database_path = Path(database)
+            database_path.parent.mkdir(parents=True, exist_ok=True)
+            connection = sqlite3.connect(database_path, check_same_thread=False)
+            self._connection = connection
             self._connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS diagnostic_captures (
@@ -353,8 +404,9 @@ class SQLiteIncidentCaptureStore:
                 """
             )
             self._connection.commit()
-        except sqlite3.Error as error:
-            self._connection.close()
+        except (OSError, sqlite3.Error) as error:
+            if connection is not None:
+                connection.close()
             raise DiagnosticStoreError(
                 "incident capture database cannot be initialized"
             ) from error
@@ -396,66 +448,145 @@ class SQLiteIncidentCaptureStore:
     def save_capture(self, capture: CaptureRecord) -> None:
         try:
             with self._lock:
-                self._connection.execute(
-                    """
-                    INSERT INTO diagnostic_captures (
-                        capture_id, endpoint_fingerprint, task_fingerprint, state,
-                        created_at, expires_at, retention_deadline, failure_code,
-                        entry_count, total_bytes
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(capture_id) DO UPDATE SET
-                        endpoint_fingerprint = excluded.endpoint_fingerprint,
-                        task_fingerprint = excluded.task_fingerprint,
-                        state = excluded.state,
-                        created_at = excluded.created_at,
-                        expires_at = excluded.expires_at,
-                        retention_deadline = excluded.retention_deadline,
-                        failure_code = excluded.failure_code,
-                        entry_count = excluded.entry_count,
-                        total_bytes = excluded.total_bytes
-                    """,
-                    (
-                        capture.capture_id,
-                        capture.scope.endpoint_fingerprint,
-                        capture.scope.task_fingerprint,
-                        capture.state,
-                        capture.created_at,
-                        capture.expires_at,
-                        capture.retention_deadline,
-                        capture.failure_code,
-                        capture.entry_count,
-                        capture.total_bytes,
-                    ),
-                )
-                self._trim_captures()
-                self._connection.commit()
+                self._connection.execute("BEGIN IMMEDIATE")
+                try:
+                    self._save_capture_row(capture)
+                    self._trim_captures()
+                    self._connection.commit()
+                except BaseException:
+                    self._connection.rollback()
+                    raise
+        except DiagnosticStoreError:
+            raise
         except sqlite3.Error as error:
             raise DiagnosticStoreError(
                 "incident capture metadata cannot be saved"
             ) from error
 
-    def append_audit(self, record: CaptureAuditRecord) -> None:
+    def save_capture_and_audit(
+        self, capture: CaptureRecord, record: CaptureAuditRecord
+    ) -> None:
+        if capture.capture_id != record.capture_id:
+            raise DiagnosticStoreError("capture and audit IDs do not match")
+        try:
+            with self._lock:
+                self._connection.execute("BEGIN IMMEDIATE")
+                try:
+                    self._save_capture_row(capture)
+                    self._insert_audit_row(record)
+                    self._trim_captures()
+                    self._trim_audit()
+                    self._connection.commit()
+                except BaseException:
+                    self._connection.rollback()
+                    raise
+        except DiagnosticStoreError:
+            raise
+        except sqlite3.Error as error:
+            raise DiagnosticStoreError(
+                "incident capture transition cannot be saved"
+            ) from error
+
+    def remove_capture(self, capture_id: str) -> None:
         try:
             with self._lock:
                 self._connection.execute(
-                    """
-                    INSERT INTO diagnostic_capture_audit
-                        (capture_id, action, occurred_at, outcome)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (
-                        record.capture_id,
-                        record.action,
-                        record.occurred_at,
-                        record.outcome,
-                    ),
+                    "DELETE FROM diagnostic_captures WHERE capture_id = ?",
+                    (capture_id,),
                 )
-                self._trim_audit()
                 self._connection.commit()
+        except sqlite3.Error as error:
+            raise DiagnosticStoreError(
+                "incident capture metadata cannot be removed"
+            ) from error
+
+    def remove_capture_and_audit(
+        self, capture_id: str, record: CaptureAuditRecord
+    ) -> None:
+        if capture_id != record.capture_id:
+            raise DiagnosticStoreError("capture and audit IDs do not match")
+        try:
+            with self._lock:
+                self._connection.execute("BEGIN IMMEDIATE")
+                try:
+                    self._connection.execute(
+                        "DELETE FROM diagnostic_captures WHERE capture_id = ?",
+                        (capture_id,),
+                    )
+                    self._insert_audit_row(record)
+                    self._trim_audit()
+                    self._connection.commit()
+                except BaseException:
+                    self._connection.rollback()
+                    raise
+        except sqlite3.Error as error:
+            raise DiagnosticStoreError(
+                "incident capture deletion cannot be saved"
+            ) from error
+
+    def append_audit(self, record: CaptureAuditRecord) -> None:
+        try:
+            with self._lock:
+                self._connection.execute("BEGIN IMMEDIATE")
+                try:
+                    self._insert_audit_row(record)
+                    self._trim_audit()
+                    self._connection.commit()
+                except BaseException:
+                    self._connection.rollback()
+                    raise
         except sqlite3.Error as error:
             raise DiagnosticStoreError(
                 "incident capture audit cannot be saved"
             ) from error
+
+    def _save_capture_row(self, capture: CaptureRecord) -> None:
+        self._connection.execute(
+            """
+            INSERT INTO diagnostic_captures (
+                capture_id, endpoint_fingerprint, task_fingerprint, state,
+                created_at, expires_at, retention_deadline, failure_code,
+                entry_count, total_bytes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(capture_id) DO UPDATE SET
+                endpoint_fingerprint = excluded.endpoint_fingerprint,
+                task_fingerprint = excluded.task_fingerprint,
+                state = excluded.state,
+                created_at = excluded.created_at,
+                expires_at = excluded.expires_at,
+                retention_deadline = excluded.retention_deadline,
+                failure_code = excluded.failure_code,
+                entry_count = excluded.entry_count,
+                total_bytes = excluded.total_bytes
+            """,
+            (
+                capture.capture_id,
+                capture.scope.endpoint_fingerprint,
+                capture.scope.task_fingerprint,
+                capture.state,
+                capture.created_at,
+                capture.expires_at,
+                capture.retention_deadline,
+                capture.failure_code,
+                capture.entry_count,
+                capture.total_bytes,
+            ),
+        )
+
+    def _insert_audit_row(self, record: CaptureAuditRecord) -> None:
+        self._connection.execute(
+            """
+            INSERT INTO diagnostic_capture_audit
+                (capture_id, action, occurred_at, outcome)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                record.capture_id,
+                record.action,
+                record.occurred_at,
+                record.outcome,
+            ),
+        )
 
     def audit_log(self) -> tuple[CaptureAuditRecord, ...]:
         try:
@@ -471,7 +602,12 @@ class SQLiteIncidentCaptureStore:
             raise DiagnosticStoreError(
                 "incident capture audit cannot be read"
             ) from error
-        return tuple(CaptureAuditRecord(*row) for row in rows)
+        try:
+            return tuple(CaptureAuditRecord(*row) for row in rows)
+        except (TypeError, ValueError) as error:
+            raise DiagnosticStoreError(
+                "incident capture audit metadata is invalid"
+            ) from error
 
     def _trim_captures(self) -> None:
         count = self._connection.execute(
@@ -483,10 +619,15 @@ class SQLiteIncidentCaptureStore:
         ids = self._connection.execute(
             """
             SELECT capture_id FROM diagnostic_captures
+            WHERE state NOT IN (?, ?, ?, ?, ?)
             ORDER BY created_at, capture_id LIMIT ?
             """,
-            (excess,),
+            (*_ACTIVE_CAPTURE_STATES, excess),
         ).fetchall()
+        if len(ids) != excess:
+            raise DiagnosticStoreError(
+                "incident capture bound is full of active captures"
+            )
         self._connection.executemany(
             "DELETE FROM diagnostic_captures WHERE capture_id = ?",
             ids,

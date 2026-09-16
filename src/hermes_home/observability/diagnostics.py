@@ -23,6 +23,8 @@ EVENT_RETENTION_SECONDS = 14 * 24 * 60 * 60
 INCIDENT_RETENTION_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_MAX_EVENTS = 4096
 MAX_EVENT_ID_LENGTH = 128
+MAX_SAFE_COUNT = 2**63 - 1
+MAX_SERVICE_VERSION_LENGTH = 64
 
 _SOURCES = frozenset({"endpoint", "home", "hermes"})
 _PHASES = frozenset(
@@ -90,6 +92,60 @@ _FAILURE_CODES = frozenset(
         "upload_unavailable",
     }
 )
+_CAPTURE_STATES = frozenset(
+    {
+        "armed",
+        "previewing",
+        "approved",
+        "encrypting",
+        "uploading",
+        "uploaded",
+        "preserved",
+        "failed",
+        "cancelled",
+        "expired",
+        "deleted",
+    }
+)
+_CAPTURE_ACTIONS = frozenset(
+    {"arm", "preview", "approve", "cancel", "preserve", "delete", "expire"}
+)
+_CAPTURE_AUDIT_OUTCOMES = frozenset(
+    {
+        "accepted",
+        "approved",
+        "cancelled",
+        "deleted",
+        "encryption_failed",
+        "encryption_unavailable",
+        "expired",
+        "failed",
+        "preserved",
+        "upload_failed",
+        "upload_unavailable",
+        "uploaded",
+    }
+)
+_CAPTURE_AUDIT_ALLOWED_OUTCOMES = {
+    "arm": frozenset({"accepted"}),
+    "preview": frozenset({"accepted"}),
+    "approve": frozenset(
+        {
+            "approved",
+            "accepted",
+            "failed",
+            "encryption_failed",
+            "encryption_unavailable",
+            "upload_failed",
+            "upload_unavailable",
+            "uploaded",
+        }
+    ),
+    "cancel": frozenset({"cancelled"}),
+    "preserve": frozenset({"preserved", "failed"}),
+    "delete": frozenset({"deleted", "failed"}),
+    "expire": frozenset({"expired"}),
+}
 _SAFE_ROUTE_IDS = frozenset(
     {
         "bridge",
@@ -169,21 +225,18 @@ class DiagnosticEvent:
     def __post_init__(self) -> None:
         if type(self.schema) is not int or self.schema != DIAGNOSTICS_SCHEMA:
             raise DiagnosticValidationError("unsupported diagnostic schema")
-        _require_token(self.event_id, "event_id", max_length=MAX_EVENT_ID_LENGTH)
-        _require_token(self.correlation_id, "correlation_id")
-        if self.source not in _SOURCES:
-            raise DiagnosticValidationError("source is not safe")
-        if self.phase not in _PHASES:
-            raise DiagnosticValidationError("phase is not safe")
-        if self.outcome not in _OUTCOMES:
-            raise DiagnosticValidationError("outcome is not safe")
+        _require_opaque_id(self.event_id, "event_id", prefix="evt-")
+        _require_opaque_id(self.correlation_id, "correlation_id", prefix="corr-")
+        _require_choice(self.source, "source", _SOURCES)
+        _require_choice(self.phase, "phase", _PHASES)
+        _require_choice(self.outcome, "outcome", _OUTCOMES)
         _require_timestamp(self.occurred_at, "occurred_at")
         if self.duration_ms is not None:
             _require_count(self.duration_ms, "duration_ms")
-        if self.failure_code is not None and self.failure_code not in _FAILURE_CODES:
-            raise DiagnosticValidationError("failure code is not safe")
-        if self.route_class is not None and self.route_class not in _ROUTE_CLASSES:
-            raise DiagnosticValidationError("route class is not safe")
+        if self.failure_code is not None:
+            _require_choice(self.failure_code, "failure code", _FAILURE_CODES)
+        if self.route_class is not None:
+            _require_choice(self.route_class, "route class", _ROUTE_CLASSES)
         if self.route_id is not None:
             _require_route_id(self.route_id)
         for value, name in (
@@ -195,8 +248,8 @@ class DiagnosticEvent:
                 _require_fingerprint(value, name)
         if self.service_version is not None:
             _require_service_version(self.service_version)
-        if self.health is not None and self.health not in _HEALTH_VALUES:
-            raise DiagnosticValidationError("health value is not safe")
+        if self.health is not None:
+            _require_choice(self.health, "health value", _HEALTH_VALUES)
         for value, name in (
             (self.byte_count, "byte_count"),
             (self.segment_count, "segment_count"),
@@ -204,15 +257,23 @@ class DiagnosticEvent:
         ):
             if value is not None:
                 _require_count(value, name)
-        if (
-            self.upload_outcome is not None
-            and self.upload_outcome not in _UPLOAD_OUTCOMES
-        ):
-            raise DiagnosticValidationError("upload outcome is not safe")
-        if self.retention_class not in _RETENTION_CLASSES:
-            raise DiagnosticValidationError("retention class is not safe")
+        if self.upload_outcome is not None:
+            _require_choice(self.upload_outcome, "upload outcome", _UPLOAD_OUTCOMES)
+        _require_choice(self.retention_class, "retention class", _RETENTION_CLASSES)
         if self.retention_deadline is not None:
             _require_timestamp(self.retention_deadline, "retention_deadline")
+            try:
+                maximum_deadline = (
+                    self.occurred_at + _RETENTION_SECONDS[self.retention_class]
+                )
+            except (OverflowError, TypeError, ValueError) as error:
+                raise DiagnosticValidationError(
+                    "event retention deadline cannot be represented"
+                ) from error
+            if self.retention_deadline > maximum_deadline:
+                raise DiagnosticValidationError(
+                    "event retention deadline exceeds its retention class"
+                )
 
     @classmethod
     def create(
@@ -227,9 +288,11 @@ class DiagnosticEvent:
         **fields: object,
     ) -> DiagnosticEvent:
         """Create an event while keeping the safe field list explicit."""
+        if event_id is not None:
+            raise DiagnosticValidationError("event_id is generated by Home")
         payload: dict[str, object] = {
             "schema": DIAGNOSTICS_SCHEMA,
-            "event_id": event_id or f"evt-{uuid.uuid4().hex}",
+            "event_id": f"evt-{uuid.uuid4().hex}",
             "correlation_id": correlation_id,
             "source": source,
             "phase": phase,
@@ -310,6 +373,7 @@ class DiagnosticsStatus:
     ring_evicted_entry_count: int = 0
     ring_expired_entry_count: int = 0
     ring_out_of_order_drop_count: int = 0
+    event_retention_seconds: int = EVENT_RETENTION_SECONDS
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -325,7 +389,7 @@ class DiagnosticsStatus:
             "ring_out_of_order_drop_count": self.ring_out_of_order_drop_count,
             "retention_seconds": {
                 "metrics": METRIC_RETENTION_SECONDS,
-                "events": EVENT_RETENTION_SECONDS,
+                "events": self.event_retention_seconds,
                 "incident": INCIDENT_RETENTION_SECONDS,
             },
         }
@@ -337,6 +401,7 @@ class UploadResult:
 
     uploaded_count: int
     collector_reachable: bool
+    failure_code: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -349,7 +414,8 @@ class UploadAcknowledgement:
     def __post_init__(self) -> None:
         _require_token(self.idempotency_key, "idempotency_key")
         if not self.event_ids or any(
-            type(event_id) is not str or not event_id for event_id in self.event_ids
+            type(event_id) is not str or not re.fullmatch(r"evt-[0-9a-f]{32}", event_id)
+            for event_id in self.event_ids
         ):
             raise DiagnosticValidationError("upload acknowledgement IDs are invalid")
         if len(set(self.event_ids)) != len(self.event_ids):
@@ -370,7 +436,13 @@ class EventCollector(Protocol):
 class DiagnosticsStore(Protocol):
     """Storage port for bounded safe events and upload metadata."""
 
-    def append(self, event: DiagnosticEvent, *, max_events: int) -> bool: ...
+    def append(
+        self,
+        event: DiagnosticEvent,
+        *,
+        max_events: int,
+        before: float | None = None,
+    ) -> bool: ...
 
     def events(
         self,
@@ -389,7 +461,7 @@ class DiagnosticsStore(Protocol):
 
     def purge_expired(self, *, before: float) -> int: ...
 
-    def status(self) -> DiagnosticsStatus: ...
+    def status(self, *, before: float | None = None) -> DiagnosticsStatus: ...
 
     def record_rejection(self) -> None: ...
 
@@ -402,6 +474,16 @@ class IncidentCaptureStore(Protocol):
     def captures(self) -> tuple[CaptureRecord, ...]: ...
 
     def save_capture(self, capture: CaptureRecord) -> None: ...
+
+    def save_capture_and_audit(
+        self, capture: CaptureRecord, record: CaptureAuditRecord
+    ) -> None: ...
+
+    def remove_capture(self, capture_id: str) -> None: ...
+
+    def remove_capture_and_audit(
+        self, capture_id: str, record: CaptureAuditRecord
+    ) -> None: ...
 
     def append_audit(self, record: CaptureAuditRecord) -> None: ...
 
@@ -424,8 +506,9 @@ class CaptureExpiryScheduler(Protocol):
 class InMemoryDiagnosticsStore:
     """Bounded store used by domain tests and dependency-injected adapters."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, clock: Callable[[], float] = time.time) -> None:
         self._lock = RLock()
+        self._clock = clock
         self._events: deque[DiagnosticEvent] = deque()
         self._uploaded: set[str] = set()
         self._dropped_event_count = 0
@@ -433,10 +516,21 @@ class InMemoryDiagnosticsStore:
         self._last_successful_upload_at: float | None = None
         self._collector_reachable = False
 
-    def append(self, event: DiagnosticEvent, *, max_events: int) -> bool:
-        if type(max_events) is not int or max_events < 1:
+    def append(
+        self,
+        event: DiagnosticEvent,
+        *,
+        max_events: int,
+        before: float | None = None,
+    ) -> bool:
+        if type(max_events) is not int or not 1 <= max_events <= MAX_SAFE_COUNT:
             raise ValueError("diagnostic event bound must be positive")
+        current = self._clock() if before is None else before
+        _require_timestamp(current, "diagnostic store clock")
         with self._lock:
+            self._purge_expired(float(current))
+            if _event_expired(event, before=float(current)):
+                return False
             if any(existing.event_id == event.event_id for existing in self._events):
                 raise DiagnosticStoreError("duplicate diagnostic event ID")
             dropped = False
@@ -454,6 +548,7 @@ class InMemoryDiagnosticsStore:
         correlation_id: str,
         before: float,
     ) -> tuple[DiagnosticEvent, ...]:
+        _require_timestamp(before, "diagnostic events clock")
         with self._lock:
             self._purge_expired(before)
             return tuple(
@@ -470,6 +565,9 @@ class InMemoryDiagnosticsStore:
     def pending_events(
         self, *, limit: int, before: float
     ) -> tuple[DiagnosticEvent, ...]:
+        if type(limit) is not int or not 1 <= limit <= MAX_SAFE_COUNT:
+            raise ValueError("diagnostic upload limit must be positive")
+        _require_timestamp(before, "diagnostic pending clock")
         with self._lock:
             self._purge_expired(before)
             return tuple(
@@ -477,11 +575,15 @@ class InMemoryDiagnosticsStore:
             )[:limit]
 
     def mark_uploaded(self, event_ids: Sequence[str], *, uploaded_at: float) -> None:
+        _require_timestamp(uploaded_at, "uploaded_at")
         with self._lock:
+            requested = tuple(event_ids)
+            if len(set(requested)) != len(requested):
+                raise DiagnosticStoreError("duplicate diagnostic event IDs")
             known = {event.event_id for event in self._events}
-            self._uploaded.update(
-                event_id for event_id in event_ids if event_id in known
-            )
+            if any(event_id not in known for event_id in requested):
+                raise DiagnosticStoreError("diagnostic event ID is unknown")
+            self._uploaded.update(requested)
             self._last_successful_upload_at = uploaded_at
             self._collector_reachable = True
 
@@ -490,11 +592,15 @@ class InMemoryDiagnosticsStore:
             self._collector_reachable = False
 
     def purge_expired(self, *, before: float) -> int:
+        _require_timestamp(before, "diagnostic purge clock")
         with self._lock:
             return self._purge_expired(before)
 
-    def status(self) -> DiagnosticsStatus:
+    def status(self, *, before: float | None = None) -> DiagnosticsStatus:
         with self._lock:
+            current = self._clock() if before is None else before
+            _require_timestamp(current, "diagnostic status clock")
+            self._purge_expired(float(current))
             queued = sum(event.event_id not in self._uploaded for event in self._events)
             return DiagnosticsStatus(
                 enabled=True,
@@ -536,9 +642,12 @@ class DiagnosticsRecorder:
         event_retention_seconds: int = EVENT_RETENTION_SECONDS,
         ring_buffer: LocalRingBuffer | None = None,
     ) -> None:
-        if type(max_events) is not int or max_events < 1:
+        if type(max_events) is not int or not 1 <= max_events <= MAX_SAFE_COUNT:
             raise ValueError("diagnostic event bound must be positive")
-        if type(event_retention_seconds) is not int or event_retention_seconds < 1:
+        if (
+            type(event_retention_seconds) is not int
+            or not 1 <= event_retention_seconds <= EVENT_RETENTION_SECONDS
+        ):
             raise ValueError("diagnostic retention must be positive")
         self._store = store
         self._metrics = metrics or MetricsRegistry()
@@ -551,13 +660,14 @@ class DiagnosticsRecorder:
         self._lock = RLock()
         self._in_flight_event_ids: set[str] = set()
         self._reported_ring_counts = (0, 0, 0)
+        self._last_known_collector_reachable = False
 
     def new_correlation_id(self) -> str:
         return f"corr-{uuid.uuid4().hex}"
 
     def now(self) -> float:
         """Return the clock used for event retention and upload metadata."""
-        return self._clock()
+        return self._clock_now()
 
     def fingerprint(self, value: str) -> str:
         """Return a process-keyed opaque fingerprint, never the source value."""
@@ -600,8 +710,19 @@ class DiagnosticsRecorder:
             )
             return False
 
-        now = self._clock()
-        safe_event = self._with_retention_deadline(safe_event)
+        try:
+            now = self._clock_now()
+            safe_event = self._with_retention_deadline(safe_event)
+        except DiagnosticValidationError:
+            try:
+                self._store.record_rejection()
+            except Exception as error:  # noqa: BLE001 - diagnostics must not block live work
+                del error
+            self._metric_inc_safely(
+                "hermes_home_diagnostics_events_rejected_total",
+                labels={"reason": "retention"},
+            )
+            return False
         if _event_expired(safe_event, before=now):
             try:
                 self._store.record_rejection()
@@ -616,7 +737,11 @@ class DiagnosticsRecorder:
         with self._lock:
             try:
                 self._store.purge_expired(before=now)
-                dropped = self._store.append(safe_event, max_events=self._max_events)
+                dropped = self._store.append(
+                    safe_event,
+                    max_events=self._max_events,
+                    before=now,
+                )
             except Exception:  # noqa: BLE001 - diagnostics must not block live work
                 self._metric_inc_safely(
                     "hermes_home_diagnostics_events_rejected_total",
@@ -633,11 +758,11 @@ class DiagnosticsRecorder:
         return True
 
     def timeline(self, correlation_id: str) -> tuple[DiagnosticEvent, ...]:
-        _require_token(correlation_id, "correlation_id")
+        _require_opaque_id(correlation_id, "correlation_id", prefix="corr-")
         with self._lock:
             events = self._store.events(
                 correlation_id=correlation_id,
-                before=self._clock(),
+                before=self._clock_now(),
             )
             self._refresh_status_metrics_safely()
             return events
@@ -663,11 +788,10 @@ class DiagnosticsRecorder:
                         self._max_events,
                         effective_limit + len(self._in_flight_event_ids),
                     ),
-                    before=self._clock(),
+                    before=self._clock_now(),
                 )
             except Exception:  # noqa: BLE001 - storage outage is isolated
-                self._mark_collector_unreachable()
-                return UploadResult(0, False)
+                return self._storage_failure_result()
             pending = tuple(
                 event
                 for event in pending
@@ -675,10 +799,9 @@ class DiagnosticsRecorder:
             )[:effective_limit]
             if not pending:
                 try:
-                    status = self._store.status()
+                    status = self._store.status(before=self._clock_now())
                 except Exception:  # noqa: BLE001 - storage outage is isolated
-                    self._mark_collector_unreachable()
-                    return UploadResult(0, False)
+                    return self._storage_failure_result()
                 self._refresh_status_metrics_safely(status)
                 return UploadResult(0, status.collector_reachable)
             if self._collector is None:
@@ -705,16 +828,15 @@ class DiagnosticsRecorder:
             self._mark_collector_unreachable()
             return UploadResult(0, False)
 
-        uploaded_at = self._clock()
         try:
+            uploaded_at = self._clock_now()
             with self._lock:
                 self._store.mark_uploaded(
                     [event.event_id for event in pending],
                     uploaded_at=uploaded_at,
                 )
         except Exception:  # noqa: BLE001 - storage outage is isolated
-            self._mark_collector_unreachable()
-            return UploadResult(0, False)
+            return self._storage_failure_result()
         finally:
             with self._lock:
                 self._in_flight_event_ids.difference_update(
@@ -738,14 +860,27 @@ class DiagnosticsRecorder:
         )
         self._refresh_status_metrics_safely()
 
+    def _storage_failure_result(self) -> UploadResult:
+        """Report a local-store failure without falsifying collector health."""
+        return UploadResult(
+            0,
+            self._last_known_collector_reachable,
+            failure_code="storage_unavailable",
+        )
+
     def _purged_status(self) -> DiagnosticsStatus:
-        self._store.purge_expired(before=self._clock())
-        return self._status_with_ring(self._store.status())
+        now = self._clock_now()
+        self._store.purge_expired(before=now)
+        return self._status_with_ring(self._store.status(before=now))
 
     def _status_with_ring(self, status: DiagnosticsStatus) -> DiagnosticsStatus:
+        status = replace(
+            status,
+            event_retention_seconds=self._event_retention_seconds,
+        )
         if self._ring_buffer is None:
             return status
-        ring_status = self._ring_buffer.status()
+        ring_status = self._ring_buffer.status(now=self._clock_now())
         return replace(
             status,
             ring_evicted_entry_count=ring_status.evicted_entry_count,
@@ -754,8 +889,6 @@ class DiagnosticsRecorder:
         )
 
     def _with_retention_deadline(self, event: DiagnosticEvent) -> DiagnosticEvent:
-        if event.retention_deadline is not None:
-            return event
         seconds = (
             self._event_retention_seconds
             if event.retention_class == "events"
@@ -767,7 +900,18 @@ class DiagnosticsRecorder:
             raise DiagnosticValidationError(
                 "event retention deadline cannot be represented"
             ) from error
+        if event.retention_deadline is not None:
+            if event.retention_deadline > deadline:
+                raise DiagnosticValidationError(
+                    "event retention deadline exceeds recorder retention"
+                )
+            return event
         return replace(event, retention_deadline=deadline)
+
+    def _clock_now(self) -> float:
+        now = self._clock()
+        _require_timestamp(now, "clock")
+        return float(now)
 
     def _metric_inc_safely(
         self,
@@ -790,7 +934,10 @@ class DiagnosticsRecorder:
             del error
 
     def _refresh_status_metrics(self, status: DiagnosticsStatus | None = None) -> None:
-        current = self._status_with_ring(status or self._store.status())
+        current = self._status_with_ring(
+            status or self._store.status(before=self._clock_now())
+        )
+        self._last_known_collector_reachable = current.collector_reachable
         self._metric_set_safely(
             "hermes_home_diagnostics_queue_depth",
             current.queued_event_count,
@@ -845,8 +992,8 @@ class CaptureScope:
     task_fingerprint: str
 
     def __post_init__(self) -> None:
-        _require_token(self.endpoint_fingerprint, "endpoint_fingerprint")
-        _require_token(self.task_fingerprint, "task_fingerprint")
+        _require_fingerprint(self.endpoint_fingerprint, "endpoint_fingerprint")
+        _require_fingerprint(self.task_fingerprint, "task_fingerprint")
 
 
 @dataclass(frozen=True, slots=True)
@@ -861,7 +1008,7 @@ class RingBufferEntry:
         _require_timestamp(self.captured_at, "captured_at")
         if type(self.evidence) is not bytes:
             raise TypeError("ring-buffer evidence must be bytes")
-        _require_token(self.evidence_id, "evidence_id")
+        _require_opaque_id(self.evidence_id, "evidence_id", prefix="evidence-")
 
 
 @dataclass(frozen=True, slots=True)
@@ -882,16 +1029,18 @@ class LocalRingBuffer:
         max_age_seconds: float = 60.0,
         max_entries: int = 256,
         max_bytes: int = 1_048_576,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         if not _positive_number(max_age_seconds):
             raise ValueError("ring-buffer age must be positive")
-        if type(max_entries) is not int or max_entries < 1:
+        if type(max_entries) is not int or not 1 <= max_entries <= MAX_SAFE_COUNT:
             raise ValueError("ring-buffer entry bound must be positive")
-        if type(max_bytes) is not int or max_bytes < 1:
+        if type(max_bytes) is not int or not 1 <= max_bytes <= MAX_SAFE_COUNT:
             raise ValueError("ring-buffer byte bound must be positive")
         self._max_age_seconds = float(max_age_seconds)
         self._max_entries = max_entries
         self._max_bytes = max_bytes
+        self._clock = clock
         self._entries: deque[tuple[CaptureScope, RingBufferEntry]] = deque()
         self._total_bytes = 0
         self._evicted_entry_count = 0
@@ -912,11 +1061,11 @@ class LocalRingBuffer:
         if len(entry.evidence) > self._max_bytes:
             raise ValueError("ring-buffer evidence exceeds byte bound")
         with self._lock:
-            latest_captured_at = max(
-                (existing.captured_at for _, existing in self._entries),
-                default=entry.captured_at,
-            )
-            before = latest_captured_at - self._max_age_seconds
+            now = self._clock()
+            _require_timestamp(now, "ring-buffer clock")
+            if entry.captured_at > now:
+                raise ValueError("ring-buffer evidence cannot be from the future")
+            before = now - self._max_age_seconds
             self._purge(before)
             if entry.captured_at < before:
                 self._out_of_order_drop_count += 1
@@ -953,8 +1102,11 @@ class LocalRingBuffer:
                 )
             )
 
-    def status(self) -> RingBufferStats:
+    def status(self, *, now: float | None = None) -> RingBufferStats:
         with self._lock:
+            current = self._clock() if now is None else now
+            _require_timestamp(current, "now")
+            self._purge(float(current) - self._max_age_seconds)
             return RingBufferStats(
                 evicted_entry_count=self._evicted_entry_count,
                 expired_entry_count=self._expired_entry_count,
@@ -981,7 +1133,7 @@ class CaptureEvidenceDescriptor:
     byte_count: int
 
     def __post_init__(self) -> None:
-        _require_token(self.evidence_id, "evidence_id")
+        _require_opaque_id(self.evidence_id, "evidence_id", prefix="evidence-")
         _require_timestamp(self.captured_at, "captured_at")
         _require_count(self.byte_count, "byte_count")
 
@@ -1038,6 +1190,64 @@ class CaptureRecord:
     total_bytes: int = 0
     encrypted_payload: bytes | None = field(default=None, repr=False)
 
+    def __post_init__(self) -> None:
+        _require_opaque_id(self.capture_id, "capture_id", prefix="capture-")
+        if not isinstance(self.scope, CaptureScope):
+            raise DiagnosticValidationError("capture scope is invalid")
+        _require_choice(self.state, "capture state", _CAPTURE_STATES)
+        _require_timestamp(self.created_at, "created_at")
+        _require_timestamp(self.expires_at, "expires_at")
+        if self.expires_at < self.created_at:
+            raise DiagnosticValidationError("capture expiry precedes creation")
+        if self.retention_deadline is not None:
+            _require_timestamp(self.retention_deadline, "retention_deadline")
+            if self.retention_deadline < self.created_at:
+                raise DiagnosticValidationError(
+                    "capture retention deadline precedes creation"
+                )
+        if self.state == "uploaded" and self.retention_deadline is None:
+            raise DiagnosticValidationError(
+                "uploaded capture must have a retention deadline"
+            )
+        if self.state == "preserved" and self.retention_deadline is not None:
+            raise DiagnosticValidationError(
+                "preserved capture cannot have a retention deadline"
+            )
+        if self.failure_code is not None:
+            _require_choice(self.failure_code, "failure code", _FAILURE_CODES)
+        if self.state == "failed" and self.failure_code is None:
+            raise DiagnosticValidationError("failed capture must have a failure code")
+        if self.state != "failed" and self.failure_code is not None:
+            raise DiagnosticValidationError(
+                "only failed captures may have a failure code"
+            )
+        _require_count(self.entry_count, "entry_count")
+        _require_count(self.total_bytes, "total_bytes")
+        if (
+            self.encrypted_payload is not None
+            and type(self.encrypted_payload) is not bytes
+        ):
+            raise TypeError("encrypted capture payload must be bytes")
+        if (
+            self.state
+            in {
+                "uploaded",
+                "preserved",
+                "failed",
+                "cancelled",
+                "expired",
+                "deleted",
+            }
+            and self.encrypted_payload is not None
+        ):
+            raise DiagnosticValidationError(
+                "terminal capture cannot retain encrypted payload"
+            )
+        if self.entry_count == 0 and self.total_bytes != 0:
+            raise DiagnosticValidationError(
+                "capture byte count cannot exist without entries"
+            )
+
     def to_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
             "schema": DIAGNOSTICS_SCHEMA,
@@ -1067,6 +1277,20 @@ class CaptureAuditRecord:
     occurred_at: float
     outcome: str
 
+    def __post_init__(self) -> None:
+        _require_opaque_id(self.capture_id, "capture_id", prefix="capture-")
+        _require_choice(self.action, "capture audit action", _CAPTURE_ACTIONS)
+        _require_timestamp(self.occurred_at, "audit occurred_at")
+        _require_choice(
+            self.outcome,
+            "capture audit outcome",
+            _CAPTURE_AUDIT_OUTCOMES,
+        )
+        if self.outcome not in _CAPTURE_AUDIT_ALLOWED_OUTCOMES[self.action]:
+            raise DiagnosticValidationError(
+                "capture audit outcome is invalid for its action"
+            )
+
 
 @dataclass(frozen=True, slots=True)
 class IncidentBundle:
@@ -1076,6 +1300,14 @@ class IncidentBundle:
     scope: CaptureScope
     encrypted_payload: bytes = field(repr=False)
     retention_deadline: float
+
+    def __post_init__(self) -> None:
+        _require_opaque_id(self.capture_id, "capture_id", prefix="capture-")
+        if not isinstance(self.scope, CaptureScope):
+            raise DiagnosticValidationError("capture scope is invalid")
+        if type(self.encrypted_payload) is not bytes or not self.encrypted_payload:
+            raise DiagnosticValidationError("encrypted bundle payload is invalid")
+        _require_timestamp(self.retention_deadline, "retention_deadline")
 
 
 class IncidentSealer(Protocol):
@@ -1135,11 +1367,20 @@ class IncidentCaptureService:
         max_capture_records: int = 1024,
         max_audit_records: int = 4096,
     ) -> None:
-        if type(capture_ttl_seconds) is not int or capture_ttl_seconds < 1:
+        if (
+            type(capture_ttl_seconds) is not int
+            or not 1 <= capture_ttl_seconds <= MAX_SAFE_COUNT
+        ):
             raise ValueError("capture TTL must be positive")
-        if type(max_capture_records) is not int or max_capture_records < 1:
+        if (
+            type(max_capture_records) is not int
+            or not 1 <= max_capture_records <= MAX_SAFE_COUNT
+        ):
             raise ValueError("capture record bound must be positive")
-        if type(max_audit_records) is not int or max_audit_records < 1:
+        if (
+            type(max_audit_records) is not int
+            or not 1 <= max_audit_records <= MAX_SAFE_COUNT
+        ):
             raise ValueError("capture audit bound must be positive")
         self._ring_buffer = ring_buffer
         self._sealer = sealer
@@ -1174,7 +1415,7 @@ class IncidentCaptureService:
         if not isinstance(scope, CaptureScope):
             raise TypeError("capture scope must be a CaptureScope")
         self._authorize_scope(scope)
-        now = self._clock()
+        now = self._clock_now()
         capture = CaptureRecord(
             capture_id=f"capture-{uuid.uuid4().hex}",
             scope=scope,
@@ -1183,10 +1424,8 @@ class IncidentCaptureService:
             expires_at=now + self._capture_ttl_seconds,
         )
         with self._lock:
-            self._captures[capture.capture_id] = capture
-            self._persist_capture(capture)
-            self._audit_event(capture, "arm", "accepted", now=now)
-            self._trim_memory()
+            self._make_room_for_capture()
+            self._commit_transition(capture, "arm", "accepted", now=now)
         return capture
 
     def preview(
@@ -1203,7 +1442,7 @@ class IncidentCaptureService:
                 raise CaptureStateError(
                     f"capture cannot be previewed from {capture.state}"
                 )
-            entries = self._ring_buffer.entries(capture.scope, now=self._clock())
+            entries = self._ring_buffer.entries(capture.scope, now=self._clock_now())
             self._evidence[capture.capture_id] = entries
             descriptors = tuple(
                 CaptureEvidenceDescriptor(
@@ -1220,9 +1459,7 @@ class IncidentCaptureService:
                 entry_count=len(entries),
                 total_bytes=sum(len(entry.evidence) for entry in entries),
             )
-            self._captures[capture.capture_id] = capture
-            self._persist_capture(capture)
-            self._audit_event(capture, "preview", "accepted")
+            self._commit_transition(capture, "preview", "accepted")
             return CapturePreview(
                 capture_id=capture.capture_id,
                 scope=capture.scope,
@@ -1250,59 +1487,128 @@ class IncidentCaptureService:
             if evidence_ids is None:
                 raise CaptureStateError("explicit evidence selection is required")
             entries = self._select_evidence(capture.capture_id, evidence_ids)
-            capture = replace(
+            approved = replace(
                 capture,
-                state="encrypting",
+                state="approved",
                 entry_count=len(entries),
                 total_bytes=sum(len(entry.evidence) for entry in entries),
             )
-            self._captures[capture.capture_id] = capture
-            self._persist_capture(capture)
+            self._evidence[capture.capture_id] = entries
+            self._commit_transition(approved, "approve", "approved")
             if self._sealer is None:
-                return self._fail(capture, "encryption_unavailable")
+                return self._fail(approved, "encryption_unavailable")
+            encrypting = replace(approved, state="encrypting")
+            self._commit_transition(encrypting, "approve", "accepted")
+
+        try:
+            encrypted = self._sealer.seal(
+                tuple(entry.evidence for entry in entries),
+                capture_id=capture_id,
+                scope=approved.scope,
+            )
+            if type(encrypted) is not bytes or not encrypted:
+                raise ValueError("sealer returned no encrypted payload")
+        except Exception:  # noqa: BLE001 - sealing failure is typed
+            with self._lock:
+                try:
+                    current = self._capture_for_external(capture_id, "encrypting")
+                except CaptureStateError:
+                    current = self._captures.get(capture_id)
+                    if current is not None and current.state == "encrypting":
+                        self._fail(current, "forbidden")
+                    raise
+                return self._fail(current, "encryption_failed")
+
+        with self._lock:
             try:
-                encrypted = self._sealer.seal(
-                    tuple(entry.evidence for entry in entries),
-                    capture_id=capture.capture_id,
-                    scope=capture.scope,
-                )
-                if type(encrypted) is not bytes or not encrypted:
-                    raise ValueError("sealer returned no encrypted payload")
-            except Exception:  # noqa: BLE001 - sealing failure is typed
-                return self._fail(capture, "encryption_failed")
-            capture = self._active_capture(capture.capture_id)
-            capture = replace(
-                capture,
+                current = self._capture_for_external(capture_id, "encrypting")
+            except CaptureStateError:
+                current = self._captures.get(capture_id)
+                if current is not None and current.state == "encrypting":
+                    self._fail(current, "forbidden")
+                raise
+            now = self._clock_now()
+            try:
+                deadline = now + INCIDENT_RETENTION_SECONDS
+                _require_timestamp(deadline, "incident retention deadline")
+            except DiagnosticValidationError:
+                return self._fail(current, "encryption_failed")
+            uploading = replace(
+                current,
                 state="uploading",
                 encrypted_payload=encrypted,
             )
-            self._captures[capture.capture_id] = capture
-            self._persist_capture(capture)
-            if self._uploader is None:
-                return self._fail(capture, "upload_unavailable")
-            capture = self._active_capture(capture.capture_id)
-            deadline = self._clock() + INCIDENT_RETENTION_SECONDS
-            bundle = IncidentBundle(
-                capture_id=capture.capture_id,
-                scope=capture.scope,
-                encrypted_payload=encrypted,
-                retention_deadline=deadline,
-            )
+            self._commit_transition(uploading, "approve", "accepted", now=now)
             try:
-                self._uploader.upload(bundle)
-            except Exception:  # noqa: BLE001 - upload failure is typed
-                return self._fail(capture, "upload_failed")
-            capture = replace(
-                capture,
-                state="uploaded",
-                retention_deadline=deadline,
-                encrypted_payload=None,
-            )
-            self._captures[capture.capture_id] = capture
-            self._evidence.pop(capture.capture_id, None)
-            self._persist_capture(capture)
-            self._audit_event(capture, "approve", "uploaded")
-            return capture
+                if self._uploader is None:
+                    return self._fail(uploading, "upload_unavailable")
+                bundle = IncidentBundle(
+                    capture_id=uploading.capture_id,
+                    scope=uploading.scope,
+                    encrypted_payload=encrypted,
+                    retention_deadline=deadline,
+                )
+            except DiagnosticValidationError:
+                return self._fail(uploading, "upload_failed")
+
+        try:
+            self._uploader.upload(bundle)
+        except Exception:  # noqa: BLE001 - upload failure is typed
+            with self._lock:
+                try:
+                    current = self._capture_for_external(capture_id, "uploading")
+                except CaptureStateError:
+                    current = self._captures.get(capture_id)
+                    if current is not None and current.state == "uploading":
+                        self._fail(current, "forbidden")
+                    raise
+                return self._fail(current, "upload_failed")
+
+        cleanup_remote = False
+        post_upload_error: CaptureStateError | None = None
+        with self._lock:
+            current = self._captures.get(capture_id)
+            if current is None:
+                post_upload_error = CaptureStateError("capture not found")
+            else:
+                try:
+                    self._authorize_scope(current.scope)
+                except CaptureStateError as error:
+                    self._fail(current, "forbidden")
+                    cleanup_remote = True
+                    post_upload_error = error
+                else:
+                    now = self._clock_now()
+                    if current.state != "uploading":
+                        post_upload_error = CaptureStateError(
+                            f"capture cannot be finalized from {current.state}"
+                        )
+                        cleanup_remote = True
+                    elif self._capture_is_expired(current, now=now):
+                        self._expire_capture(current, now=now)
+                        cleanup_remote = True
+                        post_upload_error = CaptureStateError("capture expired")
+                    else:
+                        uploaded = replace(
+                            current,
+                            state="uploaded",
+                            retention_deadline=deadline,
+                            encrypted_payload=None,
+                        )
+                        self._commit_transition(
+                            uploaded, "approve", "uploaded", now=now
+                        )
+                        self._evidence.pop(capture_id, None)
+                        return uploaded
+
+        if cleanup_remote and self._bundle_lifecycle is not None:
+            try:
+                self._bundle_lifecycle.delete(capture_id)
+            except Exception as error:  # noqa: BLE001 - cleanup is best effort
+                del error
+        if post_upload_error is not None:
+            raise post_upload_error
+        raise CaptureStateError("capture upload could not be finalized")
 
     def cancel(self, capture_id: str) -> CaptureRecord:
         with self._lock:
@@ -1312,11 +1618,9 @@ class IncidentCaptureService:
                 raise CaptureStateError(
                     f"capture cannot be cancelled from {capture.state}"
                 )
-            capture = replace(capture, state="cancelled")
-            self._captures[capture.capture_id] = capture
+            capture = replace(capture, state="cancelled", failure_code=None)
             self._evidence.pop(capture.capture_id, None)
-            self._persist_capture(capture)
-            self._audit_event(capture, "cancel", "cancelled")
+            self._commit_transition(capture, "cancel", "cancelled")
             return capture
 
     def preserve(self, capture_id: str) -> CaptureRecord:
@@ -1327,17 +1631,34 @@ class IncidentCaptureService:
                 raise CaptureStateError(
                     f"capture cannot be preserved from {capture.state}"
                 )
-            if self._bundle_lifecycle is not None:
-                try:
-                    self._bundle_lifecycle.preserve(capture.capture_id)
-                except Exception as error:
+        remote_preserved = False
+        if self._bundle_lifecycle is not None:
+            try:
+                self._bundle_lifecycle.preserve(capture.capture_id)
+            except Exception as error:
+                with self._lock:
                     self._audit_event(capture, "preserve", "failed")
-                    raise CaptureStateError("remote preserve failed") from error
-            capture = replace(capture, state="preserved", retention_deadline=None)
-            self._captures[capture.capture_id] = capture
-            self._persist_capture(capture)
-            self._audit_event(capture, "preserve", "preserved")
-            return capture
+                raise CaptureStateError("remote preserve failed") from error
+            remote_preserved = True
+        try:
+            with self._lock:
+                current = self._capture_for_external(capture_id, "uploaded")
+                preserved = replace(current, state="preserved", retention_deadline=None)
+                return self._commit_transition(preserved, "preserve", "preserved")
+        except Exception:
+            if remote_preserved and self._bundle_lifecycle is not None:
+                try:
+                    self._bundle_lifecycle.delete(capture_id)
+                except Exception as error:  # noqa: BLE001 - cleanup is best effort
+                    with self._lock:
+                        current = self._captures.get(capture_id)
+                        if current is not None:
+                            try:
+                                self._audit_event(current, "delete", "failed")
+                            except Exception as audit_error:  # noqa: BLE001
+                                del audit_error
+                    del error
+            raise
 
     def delete(self, capture_id: str) -> CaptureRecord:
         with self._lock:
@@ -1351,22 +1672,32 @@ class IncidentCaptureService:
                 "uploaded",
                 "preserved",
             }:
-                try:
-                    self._bundle_lifecycle.delete(capture.capture_id)
-                except Exception as error:
+                remote_delete = True
+            else:
+                remote_delete = False
+        if remote_delete and self._bundle_lifecycle is not None:
+            try:
+                self._bundle_lifecycle.delete(capture.capture_id)
+            except Exception as error:
+                with self._lock:
                     self._audit_event(capture, "delete", "failed")
-                    raise CaptureStateError("remote delete failed") from error
-            capture = replace(
-                capture,
+                raise CaptureStateError("remote delete failed") from error
+        with self._lock:
+            current = self._capture_for_external(capture_id, capture.state)
+            deleted = replace(
+                current,
                 state="deleted",
                 retention_deadline=None,
+                failure_code=None,
                 encrypted_payload=None,
             )
-            self._captures[capture.capture_id] = capture
-            self._evidence.pop(capture.capture_id, None)
-            self._persist_capture(capture)
-            self._audit_event(capture, "delete", "deleted")
-            return capture
+            record = self._new_audit_record(deleted, "delete", "deleted")
+            self._remove_capture_and_audit(capture_id, record)
+            self._captures.pop(capture_id, None)
+            self._evidence.pop(capture_id, None)
+            self._audit.append(record)
+            self._trim_memory()
+            return deleted
 
     def get(self, capture_id: str) -> CaptureRecord:
         with self._lock:
@@ -1380,14 +1711,28 @@ class IncidentCaptureService:
 
     def purge_expired(self) -> int:
         """Expire all due captures; intended to be called by the runtime reaper."""
+        remote_cleanup: list[str] = []
         with self._lock:
-            now = self._clock()
+            now = self._clock_now()
             expired = 0
             for capture in tuple(self._captures.values()):
                 if self._capture_is_expired(capture, now=now):
+                    if capture.state in {"uploaded", "preserved"}:
+                        remote_cleanup.append(capture.capture_id)
                     self._expire_capture(capture, now=now)
                     expired += 1
-            return expired
+        for capture_id in remote_cleanup:
+            if self._bundle_lifecycle is None:
+                continue
+            try:
+                self._bundle_lifecycle.delete(capture_id)
+            except Exception as error:  # noqa: BLE001 - expiry remains local
+                with self._lock:
+                    capture = self._captures.get(capture_id)
+                    if capture is not None:
+                        self._audit_event(capture, "delete", "failed")
+                del error
+        return expired
 
     def close(self) -> None:
         """Detach the runtime-owned expiry callback, if one was registered."""
@@ -1398,14 +1743,19 @@ class IncidentCaptureService:
             self._expiry_scheduler.unregister(self._expiry_scheduler_handle)
             self._expiry_scheduler_handle = None
 
+    def _clock_now(self) -> float:
+        now = self._clock()
+        _require_timestamp(now, "capture clock")
+        return float(now)
+
     def _active_capture(self, capture_id: str, *, expire: bool = True) -> CaptureRecord:
-        _require_token(capture_id, "capture_id")
+        _require_opaque_id(capture_id, "capture_id", prefix="capture-")
         capture = self._captures.get(capture_id)
         if capture is None:
             raise CaptureStateError("capture not found")
         if not expire:
             return capture
-        now = self._clock()
+        now = self._clock_now()
         if self._capture_is_expired(capture, now=now):
             self._expire_capture(capture, now=now)
             raise CaptureStateError("capture expired")
@@ -1415,7 +1765,14 @@ class IncidentCaptureService:
     def _capture_is_expired(capture: CaptureRecord, *, now: float) -> bool:
         capture_expired = (
             capture.state
-            in {"armed", "previewing", "failed", "encrypting", "uploading"}
+            in {
+                "armed",
+                "previewing",
+                "approved",
+                "encrypting",
+                "uploading",
+                "failed",
+            }
             and now >= capture.expires_at
         )
         retention_expired = (
@@ -1430,13 +1787,11 @@ class IncidentCaptureService:
             capture,
             state="expired",
             retention_deadline=None,
+            failure_code=None,
             encrypted_payload=None,
         )
-        self._captures[capture.capture_id] = expired
         self._evidence.pop(capture.capture_id, None)
-        self._persist_capture(expired)
-        self._audit_event(expired, "expire", "expired", now=now)
-        return expired
+        return self._commit_transition(expired, "expire", "expired", now=now)
 
     @staticmethod
     def _require_scope(
@@ -1459,16 +1814,36 @@ class IncidentCaptureService:
         if current_scope != scope:
             raise CaptureStateError("capture scope is not current")
 
+    def _capture_for_external(
+        self, capture_id: str, expected_state: str
+    ) -> CaptureRecord:
+        capture = self._active_capture(capture_id)
+        self._authorize_scope(capture.scope)
+        if capture.state != expected_state:
+            raise CaptureStateError(f"capture cannot continue from {capture.state}")
+        return capture
+
     def _select_evidence(
         self,
         capture_id: str,
         evidence_ids: Sequence[str],
     ) -> tuple[RingBufferEntry, ...]:
-        if isinstance(evidence_ids, (str, bytes)):
+        if not isinstance(evidence_ids, Sequence) or isinstance(
+            evidence_ids, (str, bytes)
+        ):
             raise CaptureStateError("evidence selection must be a sequence of IDs")
         selected_ids = tuple(evidence_ids)
+        if not selected_ids:
+            raise CaptureStateError("at least one evidence ID must be selected")
         if any(type(evidence_id) is not str for evidence_id in selected_ids):
             raise CaptureStateError("evidence selection contains an invalid ID")
+        for evidence_id in selected_ids:
+            try:
+                _require_opaque_id(evidence_id, "evidence_id", prefix="evidence-")
+            except DiagnosticValidationError as error:
+                raise CaptureStateError(
+                    "evidence selection contains an invalid ID"
+                ) from error
         if len(set(selected_ids)) != len(selected_ids):
             raise CaptureStateError("evidence selection contains duplicate IDs")
         entries = self._evidence.get(capture_id)
@@ -1486,31 +1861,79 @@ class IncidentCaptureService:
             failure_code=code,
             encrypted_payload=None,
         )
-        self._captures[capture.capture_id] = capture
         self._evidence.pop(capture.capture_id, None)
-        self._persist_capture(capture)
-        self._audit_event(capture, "approve", code)
-        return capture
+        outcome = code if code in _CAPTURE_AUDIT_OUTCOMES else "failed"
+        return self._commit_transition(capture, "approve", outcome)
 
-    def _persist_capture(self, capture: CaptureRecord) -> None:
+    def _new_audit_record(
+        self,
+        capture: CaptureRecord,
+        action: str,
+        outcome: str,
+        *,
+        now: float | None = None,
+    ) -> CaptureAuditRecord:
+        return CaptureAuditRecord(
+            capture_id=capture.capture_id,
+            action=action,
+            occurred_at=self._clock_now() if now is None else now,
+            outcome=outcome,
+        )
+
+    def _commit_transition(
+        self,
+        capture: CaptureRecord,
+        action: str,
+        outcome: str,
+        *,
+        now: float | None = None,
+    ) -> CaptureRecord:
+        record = self._new_audit_record(capture, action, outcome, now=now)
         if self._capture_store is not None:
-            self._capture_store.save_capture(capture)
+            atomic_commit = getattr(self._capture_store, "save_capture_and_audit", None)
+            if callable(atomic_commit):
+                atomic_commit(capture, record)
+            else:
+                self._capture_store.save_capture(capture)
+                self._capture_store.append_audit(record)
+        self._captures[capture.capture_id] = capture
+        self._audit.append(record)
+        self._trim_memory()
+        return capture
 
     def _trim_memory(self) -> None:
         while len(self._captures) > self._max_capture_records:
-            terminal = [
-                capture
-                for capture in self._captures.values()
-                if capture.state
-                not in {"armed", "previewing", "encrypting", "uploading"}
-            ]
-            candidates = terminal or list(self._captures.values())
-            oldest = min(candidates, key=lambda capture: capture.created_at)
-            self._captures.pop(oldest.capture_id, None)
-            self._evidence.pop(oldest.capture_id, None)
+            if not self._evict_oldest_terminal():
+                raise CaptureStateError("capture record bound is full")
 
         if len(self._audit) > self._max_audit_records:
             del self._audit[: -self._max_audit_records]
+
+    def _make_room_for_capture(self) -> None:
+        while len(self._captures) >= self._max_capture_records:
+            if not self._evict_oldest_terminal():
+                raise CaptureStateError("capture record bound is full")
+
+    def _evict_oldest_terminal(self) -> bool:
+        terminal = [
+            capture
+            for capture in self._captures.values()
+            if capture.state
+            not in {"armed", "previewing", "approved", "encrypting", "uploading"}
+        ]
+        if not terminal:
+            return False
+        oldest = min(
+            terminal, key=lambda capture: (capture.created_at, capture.capture_id)
+        )
+        if self._capture_store is not None:
+            remove = getattr(self._capture_store, "remove_capture", None)
+            if not callable(remove):
+                raise DiagnosticStoreError("capture eviction is unavailable")
+            remove(oldest.capture_id)
+        self._captures.pop(oldest.capture_id, None)
+        self._evidence.pop(oldest.capture_id, None)
+        return True
 
     def _audit_event(
         self,
@@ -1520,16 +1943,26 @@ class IncidentCaptureService:
         *,
         now: float | None = None,
     ) -> None:
-        record = CaptureAuditRecord(
-            capture_id=capture.capture_id,
-            action=action,
-            occurred_at=self._clock() if now is None else now,
-            outcome=outcome,
-        )
-        self._audit.append(record)
+        record = self._new_audit_record(capture, action, outcome, now=now)
         if self._capture_store is not None:
             self._capture_store.append_audit(record)
+        self._audit.append(record)
         self._trim_memory()
+
+    def _remove_capture_and_audit(
+        self, capture_id: str, record: CaptureAuditRecord
+    ) -> None:
+        if self._capture_store is None:
+            return
+        atomic_remove = getattr(self._capture_store, "remove_capture_and_audit", None)
+        if callable(atomic_remove):
+            atomic_remove(capture_id, record)
+            return
+        remove = getattr(self._capture_store, "remove_capture", None)
+        if not callable(remove):
+            raise DiagnosticStoreError("capture deletion is unavailable")
+        remove(capture_id)
+        self._capture_store.append_audit(record)
 
 
 def _require_token(value: object, name: str, *, max_length: int = 128) -> None:
@@ -1539,6 +1972,18 @@ def _require_token(value: object, name: str, *, max_length: int = 128) -> None:
         raise DiagnosticValidationError(f"{name} must not contain line breaks")
     if any(not (character.isalnum() or character in "._:-+") for character in value):
         raise DiagnosticValidationError(f"{name} contains unsafe characters")
+
+
+def _require_opaque_id(value: object, name: str, *, prefix: str) -> None:
+    if type(value) is not str or not re.fullmatch(
+        re.escape(prefix) + r"[0-9a-f]{32}", value
+    ):
+        raise DiagnosticValidationError(f"{name} must be an opaque identifier")
+
+
+def _require_choice(value: object, name: str, allowed: frozenset[str]) -> None:
+    if type(value) is not str or value not in allowed:
+        raise DiagnosticValidationError(f"{name} is not safe")
 
 
 def _require_fingerprint(value: object, name: str) -> None:
@@ -1556,8 +2001,10 @@ def _require_route_id(value: object) -> None:
 
 
 def _require_service_version(value: object) -> None:
-    if type(value) is not str or not re.fullmatch(
-        r"v?\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?", value
+    if (
+        type(value) is not str
+        or len(value) > MAX_SERVICE_VERSION_LENGTH
+        or not re.fullmatch(r"v?\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?", value)
     ):
         raise DiagnosticValidationError("service version is not safe")
 
@@ -1565,7 +2012,12 @@ def _require_service_version(value: object) -> None:
 def _event_expired(event: DiagnosticEvent, *, before: float) -> bool:
     deadline = event.retention_deadline
     if deadline is None:
-        deadline = event.occurred_at + _RETENTION_SECONDS[event.retention_class]
+        try:
+            deadline = event.occurred_at + _RETENTION_SECONDS[event.retention_class]
+        except (OverflowError, TypeError, ValueError) as error:
+            raise DiagnosticValidationError(
+                "event retention deadline cannot be represented"
+            ) from error
     return deadline <= before
 
 
@@ -1590,12 +2042,13 @@ def _require_upload_acknowledgement(
 
 
 def _positive_number(value: object) -> bool:
-    return (
-        type(value) in (int, float)
-        and not isinstance(value, bool)
-        and isfinite(float(value))
-        and float(value) > 0
-    )
+    if type(value) not in (int, float) or isinstance(value, bool):
+        return False
+    try:
+        numeric_value = float(value)
+    except OverflowError, TypeError, ValueError:
+        return False
+    return isfinite(numeric_value) and numeric_value > 0
 
 
 def _require_timestamp(value: object, name: str) -> None:
@@ -1612,5 +2065,5 @@ def _require_timestamp(value: object, name: str) -> None:
 
 
 def _require_count(value: object, name: str) -> None:
-    if type(value) is not int or value < 0:
+    if type(value) is not int or not 0 <= value <= MAX_SAFE_COUNT:
         raise DiagnosticValidationError(f"{name} must be a non-negative integer")

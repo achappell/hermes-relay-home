@@ -1,7 +1,7 @@
 ---
 story: HOME-NW-06
 status: passed
-validated: 2026-09-15
+validated: 2026-09-16
 baseline_commit: fd16784d264615b6df11e02fe117871cc69a2041
 ---
 
@@ -64,3 +64,24 @@ retry policy remain deferred by the canonical specification. The runtime
 therefore owns a durable local queue and an injected collector boundary; it does
 not claim a live remote collector, live capture deployment, or live
 Hermes/physical-endpoint validation.
+
+## Follow-up review validation
+
+The follow-up BMAD review was run on 2026-09-16 against the narrowed core
+diagnostics/storage implementation group. The focused core suite was rerun
+after the fixes and the new negative, restart, bounds, lifecycle, clock, and
+rendered metrics checks.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Focused core suite | `uv run --no-cache --no-project --python 3.14 --with pytest --with cryptography --with 'websockets>=17,<18' -- python -m pytest -q tests/test_diagnostics.py tests/test_diagnostics_store.py tests/test_metrics.py` | `55 passed in 0.16s` |
+| Ruff lint | `uv run --no-cache --no-project --python 3.14 --with ruff -- ruff check src tests` | `All checks passed!` |
+| Ruff format | `uv run --no-cache --no-project --python 3.14 --with ruff -- ruff format --check src tests` | `46 files already formatted` |
+| Whitespace/diff | `git diff --check` | Passed |
+
+The full suite was attempted but collection remains blocked by the preserved,
+pre-existing `src/hermes_home/bridge/__init__.py` edit importing
+`hermes_home.bridge.routes`, while that module is absent from this NW-06
+worktree. This is an unrelated HOME-NW-04 worktree change; no route module was
+copied into the diagnostics branch. API, bridge, and runtime tests therefore
+remain unverified in this worktree.
