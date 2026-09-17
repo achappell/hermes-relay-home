@@ -1,6 +1,6 @@
 ---
 id: SPEC-hermes-home-next-wave-planned
-updated: 2026-09-14
+updated: 2026-09-17
 kind: next-wave
 canonical_sources:
   - ../specs/spec-home-service-foundation/SPEC.md
@@ -232,3 +232,40 @@ attachments instead of smuggling files through the ordinary Hermes channel.
 - HOME-NW-06 diagnostics/retention policy.
 - A separately reviewed attachment contract; this story does not invent a
   general file-sharing channel.
+
+## HOME-NW-15 — Safe Linux and macOS deployment for other homes
+
+### Outcome
+
+An operator can run Hermes Home in another household on Linux or macOS and
+follow a household-neutral guide without relying on Amanda's hosts, paths,
+network, or credentials.
+
+### Acceptance criteria
+
+- Supported Linux and macOS versions and the required Python runtime are named;
+  Linux uses a systemd service and macOS uses a launchd job with documented
+  service-user behavior.
+- Home runs with least privilege. Private data and operator-supplied secrets
+  have restrictive ownership and permissions; secrets never appear in command
+  arguments, service definitions, checked-in configuration, or logs.
+- The listener stays loopback-bound by default. Installation does not open
+  firewall ports or publish a public route. Any private-LAN exposure is a
+  deliberate operator choice with authentication and network controls
+  explained.
+- Repeated install and upgrade preserve the SQLite database, configuration,
+  and credentials, and provide a recoverable path for service/config rollback.
+  Uninstall preserves operator data unless removal is explicitly requested.
+- Household-neutral setup and deployment instructions cover prerequisites,
+  installation, initial configuration and pairing, service control, health
+  verification, backup and restore, upgrade and rollback, troubleshooting, and
+  uninstall.
+- Examples contain no personal hostnames, usernames, home paths, IP addresses,
+  tokens, or tailnet-specific assumptions. Each supported install path is
+  exercised from a clean Linux or macOS setup.
+
+### Dependencies
+
+- HOME-NW-02 credential lifecycle and HOME-NW-03 Home runtime.
+- Existing Windows deployment is a reference, not a requirement to change
+  that installer.
