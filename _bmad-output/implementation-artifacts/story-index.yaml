@@ -99,3 +99,9 @@ stories:
     spec: _bmad-output/implementation-artifacts/spec-next-wave-planned.md
     github_issue: https://github.com/achappell/hermes-relay-home/issues/24
     horizon: later
+  - id: HOME-NW-15
+    title: Add safe Linux and macOS deployment for other homes
+    kind: next-wave
+    spec: _bmad-output/implementation-artifacts/spec-next-wave-planned.md
+    github_issue: https://github.com/achappell/hermes-relay-home/issues/40
+    horizon: later
