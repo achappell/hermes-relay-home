@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import threading
+import uuid
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -34,6 +35,7 @@ HOME_BRIDGE_SCHEMA = 1
 MAX_BRIDGE_MESSAGE_BYTES = 1_048_576
 MAX_MESSAGE_SIZE = MAX_BRIDGE_MESSAGE_BYTES
 MAX_RETIRED_TURN_IDS = 1024
+MAX_PARKED_EVENT_BYTES = 8 * 1_048_576
 
 _METHODS = frozenset(
     {
@@ -70,6 +72,7 @@ _TERMINAL_STATUSES = frozenset(
 )
 _TERMINAL_EVENT_TYPES = frozenset(
     {
+        "turn_complete",
         "turn.complete",
         "turn.completed",
         "turn.end",
@@ -79,6 +82,10 @@ _TERMINAL_EVENT_TYPES = frozenset(
         "response.completed",
     }
 )
+_INTERRUPTED_EVENT_TYPES = frozenset(
+    {"turn_interrupted", "turn.interrupted", "turn.cancelled"}
+)
+_FAILED_EVENT_TYPES = frozenset({"error", "turn.error"})
 _PROMPT_EXPIRY_TYPES = {
     "approval.expire": "approval.request",
     "clarify.expire": "clarify.request",
@@ -243,7 +250,7 @@ class BridgeEndpoint:
     ) -> None:
         if type(max_message_size) is not int or max_message_size <= 0:
             raise ValueError("Home bridge message size must be positive")
-        self._connection = connection
+        self._connection: WebSocketConnection | None = connection
         self._bridge = bridge
         self._headers = dict(headers or {})
         self._route = _safe_route(route)
@@ -254,6 +261,13 @@ class BridgeEndpoint:
         self._stop = threading.Event()
         self._readiness_changed = threading.Event()
         self._closed = False
+        self._adopted_transport = False
+        self._adoption_ack_pending = False
+        self._adoption_acknowledged = False
+        self._flush_after_response = False
+        self._disconnect_after_response = False
+        self._parked_events: deque[str] = deque()
+        self._parked_event_bytes = 0
         self._bound_handle: str | None = None
         self._ready = False
         self._submitting_turn = False
@@ -282,11 +296,41 @@ class BridgeEndpoint:
         with self._state_lock:
             return self._ready
 
-    def run(self) -> None:
+    @property
+    def has_active_turn(self) -> bool:
+        with self._state_lock:
+            return self._active_turn_id is not None or self._submitting_turn
+
+    @property
+    def has_recoverable_state(self) -> bool:
+        with self._state_lock:
+            return (
+                self._active_turn_id is not None
+                or self._submitting_turn
+                or bool(self._parked_events)
+            )
+
+    @property
+    def adoption_acknowledged(self) -> bool:
+        with self._state_lock:
+            return self._adoption_acknowledged
+
+    def run(
+        self,
+        *,
+        first_message: object | None = None,
+        park_on_disconnect: bool = False,
+    ) -> None:
         """Serve requests until the peer closes the WebSocket."""
         try:
+            if first_message is not None:
+                self.handle_message(first_message)
             while not self._stop.is_set():
-                message = self._connection.recv()
+                with self._state_lock:
+                    connection = self._connection
+                if connection is None:
+                    break
+                message = connection.recv()
                 if message is None:
                     break
                 self.handle_message(message)
@@ -296,9 +340,36 @@ class BridgeEndpoint:
             # Python exception or its message to the endpoint.
             return
         finally:
-            self.close()
+            if park_on_disconnect and self.has_recoverable_state:
+                self.detach()
+            else:
+                self.close()
 
     serve = run
+
+    def detach(self) -> None:
+        """Detach a failed endpoint transport while the Hermes turn continues."""
+
+        with self._send_lock:
+            self._connection = None
+
+    def adopt(
+        self,
+        connection: WebSocketConnection,
+        *,
+        headers: Mapping[str, str],
+    ) -> None:
+        """Attach a candidate reconnect; buffered events wait for reauthorization."""
+
+        with self._send_lock:
+            if self._closed or self._connection is not None:
+                raise RuntimeError("Home bridge endpoint is not parked")
+            self._connection = connection
+            self._headers = dict(headers)
+            self._adopted_transport = True
+        with self._state_lock:
+            self._adoption_ack_pending = True
+            self._adoption_acknowledged = False
 
     def handle_message(self, message: object) -> dict[str, object] | None:
         """Validate and handle one inbound JSON-RPC message."""
@@ -340,7 +411,25 @@ class BridgeEndpoint:
                 "protocol_error",
                 delivery="uncertain",
             )
-        self._send_json(response)
+        response_sent = self._send_json(response)
+        with self._state_lock:
+            if self._adoption_ack_pending:
+                result = response.get("result")
+                self._adoption_acknowledged = (
+                    response_sent
+                    and isinstance(result, Mapping)
+                    and result.get("status") == "ready"
+                )
+                self._adoption_ack_pending = False
+            flush_after_response = self._flush_after_response
+            self._flush_after_response = False
+        if flush_after_response:
+            self._flush_parked_events()
+        with self._state_lock:
+            disconnect_after_response = self._disconnect_after_response
+            self._disconnect_after_response = False
+        if disconnect_after_response:
+            self._close_connection()
         return response
 
     handle = handle_message
@@ -359,6 +448,8 @@ class BridgeEndpoint:
             event_thread = self._event_thread
             audio_thread = self._audio_thread
             self._turn_correlations.clear()
+            self._parked_events.clear()
+            self._parked_event_bytes = 0
         if bridge is not None:
             try:
                 bridge.close()
@@ -430,6 +521,7 @@ class BridgeEndpoint:
             if self._bound_handle is None:
                 self._bound_handle = handle
             bridge = self._bridge
+            adopted_transport = self._adopted_transport
         if bridge is None:
             return self._apply_readiness(
                 BridgeStatus("unavailable", handle, "hermes_unavailable"),
@@ -437,10 +529,18 @@ class BridgeEndpoint:
                 reconnect=True,
             )
         try:
+            if adopted_transport:
+                reauthorize = getattr(bridge, "reauthorize", None)
+                if not callable(reauthorize):
+                    status = BridgeStatus(
+                        "unavailable", handle, "capability_unavailable"
+                    )
+                else:
+                    status = reauthorize(headers=self._headers)
             # A newly created per-connection HomeBridge has no binding for
             # reconnect() to resume yet.  Its open() path resolves the same
             # opaque grant and uses the grant's durable Session when present.
-            if existing_handle is None:
+            elif existing_handle is None:
                 status = bridge.open(
                     headers=self._headers,
                     conversation_handle=handle,
@@ -449,7 +549,29 @@ class BridgeEndpoint:
                 status = bridge.reconnect(headers=self._headers)
         except Exception as error:  # noqa: BLE001 - injected bridge is untrusted
             status = _status_from_exception(handle, error)
-        return self._apply_readiness(status, handle=handle, reconnect=True)
+        result = self._apply_readiness(
+            status,
+            handle=handle,
+            reconnect=not adopted_transport,
+        )
+        if adopted_transport:
+            with self._state_lock:
+                self._adopted_transport = False
+                self._flush_after_response = result.get("status") == "ready"
+                self._disconnect_after_response = result.get("status") != "ready"
+        reconnect_result = {
+            "schema": HOME_BRIDGE_SCHEMA,
+            "status": result["status"],
+            "conversation_handle": handle,
+        }
+        # Keep the ready shape identical to conversation.open so clients can
+        # revalidate the approved route and retain its capabilities when a
+        # parked bridge is adopted. Reconnect adds the unresolved turn state;
+        # it does not silently change the handshake contract.
+        for key in ("reason", "route", "capabilities", "unresolved_turn"):
+            if key in result:
+                reconnect_result[key] = result[key]
+        return reconnect_result
 
     def _prompt_submit(self, params: dict[str, object]) -> dict[str, object]:
         _require_param_shape(params, required={"conversation_handle", "text"})
@@ -458,9 +580,9 @@ class BridgeEndpoint:
         if type(text) is not str or not text.strip():
             raise _RequestError("invalid_request", rpc_code=-32602)
         correlation_id = (
-            None
-            if self._diagnostics is None
-            else self._diagnostics.new_correlation_id()
+            self._diagnostics.new_correlation_id()
+            if self._diagnostics is not None
+            else f"corr-{uuid.uuid4().hex}"
         )
         try:
             self._require_ready()
@@ -511,6 +633,7 @@ class BridgeEndpoint:
         except _RequestError as error:
             self._mark_unavailable(error.code)
             raise
+        payload["correlation_id"] = correlation_id
         turn_id = payload["turn_id"]
         assert isinstance(turn_id, str)
         with self._state_lock:
@@ -916,7 +1039,7 @@ class BridgeEndpoint:
                     correlation_id,
                     source="hermes",
                     phase="turn",
-                    outcome=_terminal_diagnostic_outcome(safe_payload),
+                    outcome=_terminal_diagnostic_outcome(event.type, safe_payload),
                     turn_id=event.turn_id,
                 )
             self._maybe_release_turn(event.turn_id)
@@ -1276,7 +1399,7 @@ class BridgeEndpoint:
         except Exception as error:  # noqa: BLE001 - telemetry cannot block bridge work
             del error
 
-    def _send_json(self, payload: dict[str, object]) -> None:
+    def _send_json(self, payload: dict[str, object]) -> bool:
         message = json.dumps(
             payload,
             ensure_ascii=False,
@@ -1288,31 +1411,113 @@ class BridgeEndpoint:
             self._stop.set()
             self._close_connection(code=1009, reason="message too large")
             raise _RequestError("protocol_error", delivery="uncertain")
+        overflow = False
+        failed_connection: WebSocketConnection | None = None
+        sent_or_queued = False
         with self._send_lock:
             if self._closed:
-                return
-            self._connection.send(message)
+                return False
+            connection = self._connection
+            if connection is None:
+                if payload.get("method") == "event":
+                    message_bytes = len(message.encode("utf-8"))
+                    if (
+                        self._parked_event_bytes + message_bytes
+                        > MAX_PARKED_EVENT_BYTES
+                    ):
+                        overflow = True
+                    else:
+                        self._parked_events.append(message)
+                        self._parked_event_bytes += message_bytes
+                        sent_or_queued = True
+            else:
+                try:
+                    connection.send(message)
+                    sent_or_queued = True
+                except Exception:  # noqa: BLE001 - detach a failed endpoint socket
+                    self._connection = None
+                    failed_connection = connection
+                    if payload.get("method") == "event":
+                        message_bytes = len(message.encode("utf-8"))
+                        if (
+                            self._parked_event_bytes + message_bytes
+                            > MAX_PARKED_EVENT_BYTES
+                        ):
+                            overflow = True
+                        else:
+                            self._parked_events.append(message)
+                            self._parked_event_bytes += message_bytes
+                            sent_or_queued = True
+        if failed_connection is not None:
+            _close_connection_quietly(failed_connection)
+        if overflow:
+            self._mark_unavailable("transport_unavailable")
+            self.close()
+            return False
+        return sent_or_queued
 
     def _send_binary(self, data: bytes) -> None:
         chunk_size = self._max_message_size - self._max_message_size % 2
         if chunk_size < 2 and data:
             raise _RequestError("protocol_error", delivery="uncertain")
+        failed_connection: WebSocketConnection | None = None
         with self._send_lock:
             if self._closed:
                 return
-            for offset in range(0, len(data), chunk_size):
-                self._connection.send(data[offset : offset + chunk_size])
+            connection = self._connection
+            if connection is None:
+                return
+            try:
+                for offset in range(0, len(data), chunk_size):
+                    connection.send(data[offset : offset + chunk_size])
+            except Exception:  # noqa: BLE001 - audio is not replayed after a drop
+                self._connection = None
+                failed_connection = connection
+        if failed_connection is not None:
+            _close_connection_quietly(failed_connection)
+
+    def _flush_parked_events(self) -> None:
+        failed_connection: WebSocketConnection | None = None
+        with self._send_lock:
+            connection = self._connection
+            if connection is None or self._closed:
+                return
+            while self._parked_events:
+                try:
+                    connection.send(self._parked_events[0])
+                except Exception:  # noqa: BLE001 - retain the unsent event
+                    self._connection = None
+                    failed_connection = connection
+                    break
+                self._parked_events.popleft()
+            self._parked_event_bytes = sum(
+                len(message.encode("utf-8")) for message in self._parked_events
+            )
+        if failed_connection is not None:
+            _close_connection_quietly(failed_connection)
 
     def _close_connection(self, *, code: int = 1000, reason: str = "") -> None:
+        with self._send_lock:
+            connection = self._connection
+            self._connection = None
+        if connection is None:
+            return
         try:
-            self._connection.close(code=code, reason=reason)
+            connection.close(code=code, reason=reason)
         except TypeError:
             try:
-                self._connection.close()
+                connection.close()
             except Exception as error:  # noqa: BLE001 - close is best effort
                 del error
         except Exception as error:  # noqa: BLE001 - close is best effort
             del error
+
+
+def _close_connection_quietly(connection: WebSocketConnection) -> None:
+    try:
+        connection.close()
+    except Exception as error:  # noqa: BLE001 - failed transport is already detached
+        del error
 
 
 HomeBridgeEndpoint = BridgeEndpoint
@@ -1675,6 +1880,8 @@ def _has_remaining_questions(result: Mapping[str, object]) -> bool:
 
 
 def _is_terminal_event(event_type: str, payload: Mapping[str, object]) -> bool:
+    if event_type in _INTERRUPTED_EVENT_TYPES or event_type in _FAILED_EVENT_TYPES:
+        return True
     if event_type in _TERMINAL_EVENT_TYPES:
         return True
     if event_type != "message.complete":
@@ -1685,7 +1892,14 @@ def _is_terminal_event(event_type: str, payload: Mapping[str, object]) -> bool:
     )
 
 
-def _terminal_diagnostic_outcome(payload: Mapping[str, object]) -> str:
+def _terminal_diagnostic_outcome(
+    event_type: str,
+    payload: Mapping[str, object],
+) -> str:
+    if event_type in _INTERRUPTED_EVENT_TYPES:
+        return "interrupted"
+    if event_type in _FAILED_EVENT_TYPES:
+        return "failed"
     status = payload.get("status")
     if isinstance(status, str):
         normalized = status.casefold()

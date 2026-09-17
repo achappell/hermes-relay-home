@@ -15,6 +15,7 @@ from hermes_home.bridge import (
     BridgeRequestRejected,
     BridgeTimeoutError,
     BridgeTransportError,
+    BridgeTurn,
     ConversationGrant,
     HomeBridge,
     StandardGatewayClient,
@@ -1099,6 +1100,60 @@ def test_bridge_reconnects_by_resuming_without_replaying_uncertain_prompt():
     assert resumed_socket.sent[-1]["params"]["text"] == "Fresh action"
 
 
+def test_bridge_reauthorizes_a_replacement_endpoint_without_touching_live_turn():
+    gateway_socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {"capabilities": {}}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {
+                    "session_id": "runtime-hermes-1",
+                    "stored_session_id": "stored-hermes-1",
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "home-2",
+                "result": {"accepted": True},
+            },
+        ]
+    )
+    grant = ConversationGrant(
+        handle="opaque-conversation-1",
+        device_id="puck-kitchen",
+        profile_id="family",
+        session_id="stored-hermes-1",
+    )
+    bridge = HomeBridge(
+        gateway_url="wss://hermes.example/api/ws",
+        hermes_token="server-hermes-secret",
+        device_authenticator=StaticCredentialAuthenticator(
+            admin_token="admin-secret",
+            device_credentials={"device-secret": "puck-kitchen"},
+        ),
+        conversation_resolver=lambda handle, device_id: grant,
+        gateway_socket_factory=FakeSocketFactory(gateway_socket),
+        turn_id_factory=lambda index: f"home-turn-{index}",
+    )
+
+    bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle="opaque-conversation-1",
+    )
+    bridge.submit_prompt("Keep streaming")
+    sent_before = list(gateway_socket.sent)
+
+    result = bridge.reauthorize(headers={"Authorization": "Device device-secret"})
+
+    assert result.status == "ready"
+    assert result.unresolved_turn == BridgeTurn(
+        "home-turn-1", "opaque-conversation-1", "streaming"
+    )
+    assert bridge.active_turn_id == "home-turn-1"
+    assert gateway_socket.sent == sent_before
+
+
 def test_bridge_filters_events_for_other_sessions_even_when_identity_is_in_payload():
     gateway_socket = FakeJsonSocket(
         [
@@ -1580,6 +1635,49 @@ def test_standard_gateway_bounds_event_wait():
     with pytest.raises(BridgeTimeoutError, match="gateway event"):
         client.next_event()
     client.close()
+
+
+def test_bridge_keeps_a_live_session_when_an_event_poll_times_out() -> None:
+    class IdleThenEventGateway:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.closed = False
+
+        @property
+        def is_open(self) -> bool:
+            return not self.closed
+
+        def next_event(self) -> dict[str, object]:
+            self.calls += 1
+            if self.calls == 1:
+                raise BridgeTimeoutError("idle event poll")
+            return {
+                "type": "status.update",
+                "session_id": "runtime-hermes-1",
+                "payload": {},
+            }
+
+        def close(self) -> None:
+            self.closed = True
+
+    bridge = _make_bridge(FakeSocketFactory(FakeJsonSocket([])))
+    gateway = IdleThenEventGateway()
+    with bridge._state_lock:
+        bridge._state = "ready"
+        bridge._gateway = gateway
+        bridge._conversation_handle = "opaque-conversation-1"
+        bridge._runtime_session_id = "runtime-hermes-1"
+
+    try:
+        event = bridge.next_event()
+
+        assert event.type == "status.update"
+        assert event.conversation_handle == "opaque-conversation-1"
+        assert gateway.calls == 2
+        assert gateway.is_open
+        assert bridge.state == "ready"
+    finally:
+        bridge.close()
 
 
 def test_bridge_bounds_response_audio_wait():

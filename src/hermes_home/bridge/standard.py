@@ -751,6 +751,7 @@ class HomeBridge:
         # a reaped, never-stored ID would reject every later open.
         self._unpersisted_session_id: str | None = None
         self._advertised_commands: frozenset[str] = frozenset()
+        self._endpoint_capabilities: dict[str, object] = {}
         self._active_turn: _ActiveTurn | None = None
         self._unresolved_turn: BridgeTurn | None = None
         self._last_terminal_event_seq: int | None = None
@@ -898,6 +899,11 @@ class HomeBridge:
                     conversation_handle, "authorization_unavailable"
                 )
 
+        endpoint_capabilities = _capabilities(
+            ready_payload,
+            commands=advertised_commands,
+            audio=self._audio_socket_factory is not None,
+        )
         with self._state_lock:
             if self._active_turn is not None:
                 gateway.close()
@@ -926,6 +932,7 @@ class HomeBridge:
             self._resume_session_id = durable_session_id or grant.session_id
             self._unpersisted_session_id = unpersisted_session_id
             self._advertised_commands = frozenset(advertised_commands)
+            self._endpoint_capabilities = dict(endpoint_capabilities)
             self._audio_socket = None
             self._audio_owner = None
             self._audio_started = False
@@ -940,11 +947,7 @@ class HomeBridge:
         return BridgeStatus(
             "ready",
             conversation_handle,
-            capabilities=_capabilities(
-                ready_payload,
-                commands=advertised_commands,
-                audio=self._audio_socket_factory is not None,
-            ),
+            capabilities=endpoint_capabilities,
         )
 
     def _open_failure(self, conversation_handle: str, reason: str) -> BridgeStatus:
@@ -969,6 +972,67 @@ class HomeBridge:
     def reconnect(self, *, headers: Mapping[str, str]) -> BridgeStatus:
         with self._lifecycle_lock:
             return self._reconnect(headers=headers)
+
+    def reauthorize(self, *, headers: Mapping[str, str]) -> BridgeStatus:
+        """Reauthorize a replacement endpoint without touching the live Hermes turn."""
+
+        with self._lifecycle_lock:
+            with self._state_lock:
+                handle = self._conversation_handle
+                grant = self._grant
+                active = self._active_turn
+                ready = (
+                    self._state == "ready"
+                    and self._gateway is not None
+                    and self._runtime_session_id is not None
+                )
+            if handle is None or grant is None or not ready:
+                return BridgeStatus(
+                    "unavailable",
+                    handle or "",
+                    "stale_conversation",
+                    unresolved_turn=self._unresolved_turn,
+                )
+            try:
+                device_id = self._device_authenticator.authenticate_device(headers)
+                refreshed = (
+                    None
+                    if device_id is None
+                    else self._conversation_resolver(handle, device_id)
+                )
+            except OSError, RuntimeError, TypeError, ValueError:
+                return BridgeStatus("unavailable", handle, "authorization_unavailable")
+            if device_id is None:
+                return BridgeStatus("unavailable", handle, "unauthorized")
+            if refreshed is None or not isinstance(refreshed, ConversationGrant):
+                return BridgeStatus("unavailable", handle, "stale_conversation")
+            if refreshed.status != "active":
+                return BridgeStatus("unavailable", handle, "stale_conversation")
+            if (
+                refreshed.device_id != device_id
+                or refreshed.handle != handle
+                or refreshed.profile_id != grant.profile_id
+                or refreshed.session_id not in (None, "", self._resume_session_id)
+            ):
+                return BridgeStatus("unavailable", handle, "conversation_mismatch")
+            with self._state_lock:
+                if self._active_turn is not active or self._state != "ready":
+                    return BridgeStatus("unavailable", handle, "stale_conversation")
+                self._grant = refreshed
+                self._endpoint_headers = dict(headers)
+                self._device_id = device_id
+                unresolved = (
+                    BridgeTurn(active.turn_id, handle, "streaming")
+                    if active is not None and not active.terminal
+                    else self._unresolved_turn
+                )
+                capabilities = dict(self._endpoint_capabilities)
+            return BridgeStatus(
+                "ready",
+                handle,
+                capabilities=capabilities,
+                unresolved_turn=unresolved,
+            )
 
     def _reconnect(self, *, headers: Mapping[str, str]) -> BridgeStatus:
         """Resume the bound Standard Session without resubmitting any turn."""
@@ -1065,6 +1129,11 @@ class HomeBridge:
                 gateway.close()
                 return self._reconnect_failure(handle, "authorization_unavailable")
 
+        endpoint_capabilities = _capabilities(
+            ready_payload,
+            commands=advertised_commands,
+            audio=self._audio_socket_factory is not None,
+        )
         with self._state_lock:
             self._gateway = gateway
             self._grant = refreshed
@@ -1079,16 +1148,13 @@ class HomeBridge:
             elif self._unpersisted_session_id is None:
                 self._unpersisted_session_id = self._resume_session_id
             self._advertised_commands = frozenset(advertised_commands)
+            self._endpoint_capabilities = dict(endpoint_capabilities)
             self._state = "ready"
             unresolved_turn = self._unresolved_turn
         return BridgeStatus(
             "ready",
             handle,
-            capabilities=_capabilities(
-                ready_payload,
-                commands=advertised_commands,
-                audio=self._audio_socket_factory is not None,
-            ),
+            capabilities=endpoint_capabilities,
             unresolved_turn=unresolved_turn,
         )
 
@@ -1520,6 +1586,10 @@ class HomeBridge:
                     f"home bridge received an invalid event: {error}"
                 ) from error
             except BridgeTimeoutError:
+                # next_event() has a bounded queue wait. A quiet but still-open
+                # websocket is an idle poll, not evidence that the transport died.
+                if gateway.is_open:
+                    continue
                 self._mark_transport_loss(gateway=gateway)
                 raise
             except (
@@ -2176,6 +2246,7 @@ class HomeBridge:
                 self._resume_session_id = None
                 self._unpersisted_session_id = None
                 self._advertised_commands = frozenset()
+                self._endpoint_capabilities = {}
                 self._active_turn = None
                 self._unresolved_turn = None
                 self._last_terminal_event_seq = None
