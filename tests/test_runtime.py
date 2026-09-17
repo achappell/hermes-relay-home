@@ -66,6 +66,19 @@ def test_load_settings_rejects_invalid_runtime_values(tmp_path) -> None:
         )
 
 
+def test_load_settings_rejects_idle_timeout_above_installer_limit(tmp_path) -> None:
+    token_file = tmp_path / "admin-token"
+    token_file.write_text("admin-secret", encoding="utf-8")
+
+    with pytest.raises(RuntimeConfigurationError, match="600"):
+        load_settings(
+            {
+                "HERMES_HOME_ADMIN_TOKEN_FILE": str(token_file),
+                "HERMES_HOME_CONVERSATION_IDLE_TIMEOUT_SECONDS": "600.1",
+            }
+        )
+
+
 def test_load_settings_reads_a_32_byte_credential_root_in_paired_mode(tmp_path) -> None:
     token_file = tmp_path / "admin-token"
     root_file = tmp_path / "credential-root"
@@ -159,24 +172,25 @@ def test_load_settings_reads_the_sibling_bridge_listener_settings(tmp_path) -> N
 def test_load_settings_reads_the_standard_backed_pilot_settings(tmp_path) -> None:
     token_file = tmp_path / "admin-token"
     standard_token_file = tmp_path / "standard-token"
-    grants_file = tmp_path / "conversation-grants.json"
+    device_credentials_file = tmp_path / "device-credentials.json"
     token_file.write_text("admin-secret", encoding="utf-8")
     standard_token_file.write_text("standard-secret\n", encoding="utf-8")
-    grants_file.write_text('{"schema":1,"grants":[]}', encoding="utf-8")
+    device_credentials_file.write_text('{"device-secret":"pixel-6a"}', encoding="utf-8")
 
     settings = load_settings(
         {
             "HERMES_HOME_ADMIN_TOKEN_FILE": str(token_file),
             "HERMES_HOME_STANDARD_GATEWAY_URL": ("wss://media-server.example/api/ws"),
             "HERMES_HOME_STANDARD_TOKEN_FILE": str(standard_token_file),
-            "HERMES_HOME_CONVERSATION_GRANTS_FILE": str(grants_file),
+            "HERMES_HOME_DEVICE_CREDENTIALS_FILE": str(device_credentials_file),
+            "HERMES_HOME_CONVERSATION_IDLE_TIMEOUT_SECONDS": "12.5",
         }
     )
 
     assert settings.standard_gateway_url == "wss://media-server.example/api/ws"
     assert settings.standard_token_file == standard_token_file
     assert settings.standard_token == "standard-secret"
-    assert settings.conversation_grants_file == grants_file
+    assert settings.conversation_idle_timeout_seconds == 12.5
     assert "standard-secret" not in repr(settings)
 
 
@@ -195,15 +209,33 @@ def test_load_settings_rejects_partial_standard_backed_pilot_settings(tmp_path) 
         )
 
 
+def test_load_settings_rejects_standard_bridge_without_device_auth(tmp_path) -> None:
+    admin_file = tmp_path / "admin-token"
+    standard_file = tmp_path / "standard-token"
+    admin_file.write_text("admin-secret", encoding="utf-8")
+    standard_file.write_text("standard-secret", encoding="utf-8")
+
+    with pytest.raises(RuntimeConfigurationError, match="device credentials"):
+        load_settings(
+            {
+                "HERMES_HOME_ADMIN_TOKEN_FILE": str(admin_file),
+                "HERMES_HOME_STANDARD_GATEWAY_URL": (
+                    "wss://media-server.example/api/ws"
+                ),
+                "HERMES_HOME_STANDARD_TOKEN_FILE": str(standard_file),
+            }
+        )
+
+
 def test_create_runtime_auto_wires_the_standard_backed_pilot_factory(
     tmp_path, monkeypatch
 ) -> None:
     token_file = tmp_path / "admin-token"
     standard_token_file = tmp_path / "standard-token"
-    grants_file = tmp_path / "conversation-grants.json"
+    credential_root_file = tmp_path / "credential-root"
     token_file.write_text("admin-secret", encoding="utf-8")
     standard_token_file.write_text("standard-secret", encoding="utf-8")
-    grants_file.write_text('{"schema":1,"grants":[]}', encoding="utf-8")
+    credential_root_file.write_text("ab" * 32, encoding="utf-8")
     settings = load_settings(
         {
             "HERMES_HOME_DATA_DIR": str(tmp_path / "data"),
@@ -212,7 +244,7 @@ def test_create_runtime_auto_wires_the_standard_backed_pilot_factory(
             "HERMES_HOME_BRIDGE_PORT": "0",
             "HERMES_HOME_STANDARD_GATEWAY_URL": ("wss://media-server.example/api/ws"),
             "HERMES_HOME_STANDARD_TOKEN_FILE": str(standard_token_file),
-            "HERMES_HOME_CONVERSATION_GRANTS_FILE": str(grants_file),
+            "HERMES_HOME_CREDENTIAL_ROOT_SECRET_FILE": str(credential_root_file),
         }
     )
     captured = {}
@@ -239,8 +271,12 @@ def test_create_runtime_auto_wires_the_standard_backed_pilot_factory(
     try:
         assert captured["gateway_url"] == "wss://media-server.example/api/ws"
         assert captured["hermes_token"] == "standard-secret"
-        assert captured["grants_file"] == grants_file
+        assert captured["conversation_store"] is runtime.conversation_store
         assert captured["device_authenticator"] is not None
+        application = runtime.server.RequestHandlerClass.application
+        assert application._credential_service._revocation_observer is (
+            runtime.conversation_store
+        )
     finally:
         runtime.close()
 
@@ -389,7 +425,15 @@ def test_create_runtime_recovers_paired_credentials_after_restart(tmp_path) -> N
     application = runtime.server.RequestHandlerClass.application
     configuration = {
         "rooms": [{"id": "kitchen", "name": "Kitchen"}],
-        "wake_mappings": [{"id": "hey-hermes", "name": "Hey Hermes"}],
+        "profiles": [{"id": "family", "name": "Family", "available": True}],
+        "wake_mappings": [
+            {
+                "id": "hey-hermes",
+                "phrase": "Hey Hermes",
+                "profile_id": "family",
+                "active": True,
+            }
+        ],
         "devices": [],
     }
 
@@ -439,7 +483,7 @@ def test_create_runtime_recovers_paired_credentials_after_restart(tmp_path) -> N
                 "Authorization": "Bearer admin-secret",
                 "Content-Type": "application/json",
             },
-            b'{"schema": 1, "scope": {"rooms": ["kitchen"], "capabilities": ["wake_claim"]}}',
+            b'{"schema": 1, "scope": {"rooms": ["kitchen"], "capabilities": ["wake_claim"], "wake_mapping_grant": {"mode": "selected", "ids": ["hey-hermes"]}}}',
         )
         consumed = application.handle(
             "POST",

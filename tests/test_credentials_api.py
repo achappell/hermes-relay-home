@@ -1,5 +1,6 @@
 import json
 import time
+from copy import deepcopy
 
 import pytest
 
@@ -8,19 +9,27 @@ from hermes_home.api.application import (
     HomeApplication,
 )
 from hermes_home.domain.arbitration import ArbitrationEngine
+from hermes_home.domain.conversations import InMemoryConversationClaimStore
 from hermes_home.domain.credentials import CredentialService
 from hermes_home.storage.credentials import SQLiteCredentialStore
 from hermes_home.storage.sqlite import SQLiteConfigurationStore
 
 CONFIGURATION = {
     "rooms": [{"id": "kitchen", "name": "Kitchen"}],
-    "wake_mappings": [{"id": "hey-hermes", "name": "Hey Hermes"}],
+    "profiles": [{"id": "family", "name": "Family", "available": True}],
+    "wake_mappings": [
+        {
+            "id": "hey-hermes",
+            "phrase": "Hey Hermes",
+            "profile_id": "family",
+            "active": True,
+        }
+    ],
     "devices": [
         {
             "id": "device-1",
             "name": "Kitchen Puck",
             "room_id": "kitchen",
-            "profile_id": "family",
             "priority": 1,
             "capabilities": {"wake_claim": True},
         }
@@ -48,6 +57,11 @@ def _paired_application(tmp_path, *, device_credentials=None):
         admin_token="admin-secret",
         device_credentials=device_credentials or {},
         credential_service=service,
+        conversation_claim_store=InMemoryConversationClaimStore(
+            handle_factory=iter(
+                ["opaque-conversation-1", "opaque-conversation-2"]
+            ).__next__
+        ),
     )
     return application, configuration_store, credential_store
 
@@ -155,7 +169,7 @@ def test_admin_offer_and_endpoint_request_are_reviewable_without_exposing_secret
             "POST",
             "/api/v1/enrollment/requests/request-1/approve",
             {"Content-Type": "application/json"},
-            b'{"schema": 1, "scope": {"rooms": [], "capabilities": []}}',
+            b'{"schema": 1, "scope": {"rooms": [], "capabilities": [], "wake_mapping_grant": {"mode": "selected", "ids": []}}}',
         ),
         (
             "POST",
@@ -322,7 +336,7 @@ def test_approval_and_consumption_issue_a_credential_with_enforced_scope(
                 "Authorization": "Bearer admin-secret",
                 "Content-Type": "application/json",
             },
-            b'{"schema": 1, "scope": {"rooms": ["kitchen"], "capabilities": ["wake_claim"]}}',
+            b'{"schema": 1, "scope": {"rooms": ["kitchen"], "capabilities": ["wake_claim"], "wake_mapping_grant": {"mode": "selected", "ids": ["hey-hermes"]}}}',
         )
         consumed = application.handle(
             "POST",
@@ -348,6 +362,7 @@ def test_approval_and_consumption_issue_a_credential_with_enforced_scope(
             "claim_id": "claim-paired-1",
             "device_id": "device-1",
             "wake_mapping_id": "hey-hermes",
+            "configuration_revision": 1,
             "observation": {"detector": "device-local"},
             "acoustic_evidence": {"kind": "opaque-v1", "value": 0.91},
             "availability": "ready",
@@ -387,6 +402,18 @@ def test_approval_and_consumption_issue_a_credential_with_enforced_scope(
         )
         assert rotated.status == 200
         assert rotated.body["credential"] == "replacement-secret"
+        assert (
+            application._conversation_claim_store._claims["opaque-conversation-1"][
+                "status"
+            ]
+            == "closed"
+        )
+        assert (
+            application._conversation_claim_store._claims["opaque-conversation-1"][
+                "close_reason"
+            ]
+            == "endpoint_revoked"
+        )
         old_credential_wake = application.handle(
             "POST",
             "/api/v1/wake-claims",
@@ -408,6 +435,16 @@ def test_approval_and_consumption_issue_a_credential_with_enforced_scope(
         )
         assert retried_rotation.status == 200
         assert retried_rotation.body["credential"] == "replacement-secret"
+        replacement_claim = application.handle(
+            "POST",
+            "/api/v1/wake-claims",
+            {
+                "Authorization": "Device replacement-secret",
+                "Content-Type": "application/json",
+            },
+            json.dumps({**claim, "claim_id": "claim-paired-rotated"}).encode(),
+        )
+        assert replacement_claim.status == 200
         null_reason = application.handle(
             "POST",
             "/api/v1/devices/device-1/revoke",
@@ -432,6 +469,18 @@ def test_approval_and_consumption_issue_a_credential_with_enforced_scope(
             b'{"schema": 1}',
         )
         assert revoked.status == 200
+        assert (
+            application._conversation_claim_store._claims["opaque-conversation-2"][
+                "status"
+            ]
+            == "closed"
+        )
+        assert (
+            application._conversation_claim_store._claims["opaque-conversation-2"][
+                "close_reason"
+            ]
+            == "endpoint_revoked"
+        )
         rejected_after_revoke = application.handle(
             "POST",
             "/api/v1/wake-claims",
@@ -459,6 +508,119 @@ def test_approval_and_consumption_issue_a_credential_with_enforced_scope(
             "schema": 1,
             "error": {"code": "expired_or_consumed"},
         }
+    finally:
+        configuration_store.close()
+        credential_store.close()
+
+
+def test_all_current_profile_mapping_approval_is_a_finite_device_snapshot(
+    tmp_path,
+) -> None:
+    application, configuration_store, credential_store = _paired_application(tmp_path)
+    candidate = deepcopy(CONFIGURATION)
+    candidate["profiles"].append(
+        {"id": "unavailable", "name": "Unavailable", "available": False}
+    )
+    candidate["wake_mappings"].extend(
+        [
+            {
+                "id": "unavailable-map",
+                "phrase": "Unavailable profile",
+                "profile_id": "unavailable",
+                "active": True,
+            },
+            {
+                "id": "inactive-map",
+                "phrase": "Inactive mapping",
+                "profile_id": "family",
+                "active": False,
+            },
+        ]
+    )
+    configuration_store.replace(expected_revision=0, candidate=candidate)
+
+    try:
+        offer = application.handle(
+            "POST",
+            "/api/v1/enrollment/offers",
+            {
+                "Authorization": "Bearer admin-secret",
+                "Content-Type": "application/json",
+            },
+            b'{"schema": 1}',
+        )
+        request = application.handle(
+            "POST",
+            "/api/v1/enrollment/requests",
+            {"Content-Type": "application/json"},
+            json.dumps(
+                {
+                    "schema": 1,
+                    "enrollment_code": offer.body["enrollment_code"],
+                    "endpoint_id": "endpoint-1",
+                    "label": "Kitchen Puck",
+                    "type": "puck",
+                    "requested_rooms": ["kitchen"],
+                    "requested_capabilities": ["wake_claim"],
+                    "secure_storage": "platform_secure_store",
+                }
+            ).encode(),
+        )
+        approved = application.handle(
+            "POST",
+            f"/api/v1/enrollment/requests/{request.body['request_id']}/approve",
+            {
+                "Authorization": "Bearer admin-secret",
+                "Content-Type": "application/json",
+            },
+            b'{"schema": 1, "scope": {"rooms": ["kitchen"], "capabilities": ["wake_claim"], "wake_mapping_grant": {"mode": "all_current_profiles"}}}',
+        )
+        consumed = application.handle(
+            "POST",
+            f"/api/v1/enrollment/requests/{request.body['request_id']}/consume",
+            {"Content-Type": "application/json"},
+            json.dumps(
+                {
+                    "schema": 1,
+                    "enrollment_code": offer.body["enrollment_code"],
+                    "secure_storage": "platform_secure_store",
+                }
+            ).encode(),
+        )
+
+        assert approved.status == 200
+        assert consumed.status == 200
+        configuration_store.replace(
+            expected_revision=1,
+            candidate={
+                **candidate,
+                "wake_mappings": [
+                    *candidate["wake_mappings"],
+                    {
+                        "id": "later-map",
+                        "phrase": "Later mapping",
+                        "profile_id": "family",
+                        "active": True,
+                    },
+                ],
+            },
+        )
+        response = application.handle(
+            "GET",
+            "/api/v1/devices/device-1/configuration",
+            {"Authorization": f"Device {consumed.body['credential']}"},
+            b"",
+        )
+
+        assert response.status == 200
+        assert response.body == {
+            "schema": 1,
+            "snapshot": {
+                "revision": 2,
+                "wake_mappings": [{"id": "hey-hermes", "phrase": "Hey Hermes"}],
+            },
+        }
+        assert "profile" not in json.dumps(response.body).casefold()
     finally:
         configuration_store.close()
         credential_store.close()
@@ -502,7 +664,7 @@ def test_paired_wake_claim_cannot_escape_the_approved_room_scope(tmp_path) -> No
                 "Authorization": "Bearer admin-secret",
                 "Content-Type": "application/json",
             },
-            b'{"schema": 1, "scope": {"rooms": [], "capabilities": ["wake_claim"]}}',
+            b'{"schema": 1, "scope": {"rooms": [], "capabilities": ["wake_claim"], "wake_mapping_grant": {"mode": "selected", "ids": []}}}',
         )
         consumed = application.handle(
             "POST",
@@ -522,6 +684,7 @@ def test_paired_wake_claim_cannot_escape_the_approved_room_scope(tmp_path) -> No
             "claim_id": "claim-out-of-scope",
             "device_id": "device-1",
             "wake_mapping_id": "hey-hermes",
+            "configuration_revision": 1,
             "observation": {"detector": "device-local"},
             "acoustic_evidence": {"kind": "opaque-v1", "value": 0.91},
             "availability": "ready",
@@ -584,7 +747,7 @@ def test_revocation_during_arbitration_cannot_complete_a_wake_claim(tmp_path) ->
                 "Authorization": "Bearer admin-secret",
                 "Content-Type": "application/json",
             },
-            b'{"schema": 1, "scope": {"rooms": ["kitchen"], "capabilities": ["wake_claim"]}}',
+            b'{"schema": 1, "scope": {"rooms": ["kitchen"], "capabilities": ["wake_claim"], "wake_mapping_grant": {"mode": "selected", "ids": ["hey-hermes"]}}}',
         )
         consumed = application.handle(
             "POST",
@@ -603,6 +766,7 @@ def test_revocation_during_arbitration_cannot_complete_a_wake_claim(tmp_path) ->
             "claim_id": "claim-revoked-during-window",
             "device_id": "device-1",
             "wake_mapping_id": "hey-hermes",
+            "configuration_revision": 1,
             "observation": {"detector": "device-local"},
             "acoustic_evidence": {"kind": "opaque-v1", "value": 0.91},
             "availability": "ready",

@@ -36,6 +36,8 @@ _METHODS = frozenset(
     {
         "conversation.open",
         "conversation.reconnect",
+        "conversation.activity",
+        "conversation.close",
         "prompt.submit",
         "prompt.respond",
         "session.interrupt",
@@ -346,6 +348,10 @@ class BridgeEndpoint:
             return self._conversation_open(params)
         if method == "conversation.reconnect":
             return self._conversation_reconnect(params)
+        if method == "conversation.activity":
+            return self._conversation_activity(params)
+        if method == "conversation.close":
+            return self._conversation_close(params)
         if method == "prompt.submit":
             return self._prompt_submit(params)
         if method == "prompt.respond":
@@ -415,6 +421,59 @@ class BridgeEndpoint:
         except Exception as error:  # noqa: BLE001 - injected bridge is untrusted
             status = _status_from_exception(handle, error)
         return self._apply_readiness(status, handle=handle, reconnect=True)
+
+    def _conversation_activity(self, params: dict[str, object]) -> dict[str, object]:
+        _require_param_shape(params, required={"conversation_handle", "state"})
+        handle = self._require_bound_handle(params["conversation_handle"])
+        state = params["state"]
+        if type(state) is not str or state not in {
+            "capture",
+            "turn",
+            "playback",
+            "playback_complete",
+        }:
+            raise _RequestError("invalid_request", rpc_code=-32602)
+        self._require_ready()
+        with self._state_lock:
+            bridge = self._bridge
+        if bridge is None:  # pragma: no cover - _require_ready proves this
+            raise _RequestError("hermes_unavailable")
+        try:
+            accepted = bridge.report_activity(state)
+        except Exception as error:  # noqa: BLE001 - injected bridge is untrusted
+            self._raise_bridge_error(error)
+        if type(accepted) is not bool or not accepted:
+            self._mark_unavailable("protocol_error")
+            raise _RequestError("protocol_error", delivery="uncertain")
+        return {
+            "schema": HOME_BRIDGE_SCHEMA,
+            "conversation_handle": handle,
+            "status": "accepted",
+        }
+
+    def _conversation_close(self, params: dict[str, object]) -> dict[str, object]:
+        _require_param_shape(params, required={"conversation_handle"})
+        handle = self._require_bound_handle(params["conversation_handle"])
+        with self._state_lock:
+            bridge = self._bridge
+        if bridge is None:  # pragma: no cover - _require_ready proves this
+            raise _RequestError("hermes_unavailable")
+        try:
+            closed = bridge.close_conversation()
+        except Exception as error:  # noqa: BLE001 - injected bridge is untrusted
+            self._raise_bridge_error(error)
+        if type(closed) is not bool or not closed:
+            self._mark_unavailable("protocol_error")
+            raise _RequestError("protocol_error", delivery="uncertain")
+        with self._state_lock:
+            self._ready = False
+            self._availability_reason = "stale_conversation"
+            self._readiness_changed.set()
+        return {
+            "schema": HOME_BRIDGE_SCHEMA,
+            "conversation_handle": handle,
+            "status": "closed",
+        }
 
     def _prompt_submit(self, params: dict[str, object]) -> dict[str, object]:
         _require_param_shape(params, required={"conversation_handle", "text"})

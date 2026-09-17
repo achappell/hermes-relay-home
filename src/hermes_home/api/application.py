@@ -6,11 +6,16 @@ import json
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from threading import RLock
 
 from hermes_home.auth.credentials import PersistentCredentialAuthenticator
 from hermes_home.auth.static import StaticCredentialAuthenticator
 from hermes_home.domain.arbitration import ArbitrationEngine, ClaimSubmission
 from hermes_home.domain.configuration import ConfigurationValidationError
+from hermes_home.domain.conversations import (
+    ConversationClaimConflict,
+    ConversationClaimStore,
+)
 from hermes_home.domain.credentials import (
     CredentialMaterial,
     CredentialScope,
@@ -27,7 +32,11 @@ from hermes_home.observability.diagnostics import (
 )
 from hermes_home.observability.metrics import MetricsRegistry
 from hermes_home.storage.credentials import CredentialStoreError
-from hermes_home.storage.sqlite import ConfigurationStoreError, RevisionConflict
+from hermes_home.storage.sqlite import (
+    ConfigurationMigrationRequired,
+    ConfigurationStoreError,
+    RevisionConflict,
+)
 
 MAX_REQUEST_BODY_BYTES = 1_048_576
 
@@ -50,6 +59,8 @@ class HomeApplication:
         admin_token: str,
         device_credentials: Mapping[str, str],
         credential_service: CredentialService | None = None,
+        conversation_claim_store: ConversationClaimStore | None = None,
+        static_device_scopes: Mapping[str, CredentialScope] | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleeper: Callable[[float], None] = time.sleep,
         metrics: MetricsRegistry | None = None,
@@ -58,6 +69,12 @@ class HomeApplication:
         self._configuration_store = configuration_store
         self._arbitration_engine = arbitration_engine
         self._credential_service = credential_service
+        self._conversation_claim_store = conversation_claim_store
+        self._configuration_publish_lock = RLock()
+        self._pending_configuration_cleanup: dict[
+            int, tuple[Mapping[str, object] | None, Mapping[str, object]]
+        ] = {}
+        self._static_device_scopes = dict(static_device_scopes or {})
         if credential_service is None:
             self._authenticator = StaticCredentialAuthenticator(
                 admin_token=admin_token,
@@ -77,6 +94,8 @@ class HomeApplication:
         )
         try:
             snapshot = self._configuration_store.read()
+        except ConfigurationMigrationRequired:
+            pass
         except OSError, RuntimeError, TypeError, ValueError:
             pass
         else:
@@ -170,6 +189,8 @@ class HomeApplication:
                 device_id = parts[4]
                 if method == "POST" and parts[5] == "revoke":
                     return self._revoke_device(headers, body, device_id)
+                if method == "GET" and parts[5] == "configuration":
+                    return self._get_device_configuration(headers, device_id)
             if (
                 len(parts) == 7
                 and parts[1:4] == ["api", "v1", "devices"]
@@ -337,23 +358,41 @@ class HomeApplication:
             if not isinstance(scope_data, Mapping) or set(scope_data) != {
                 "rooms",
                 "capabilities",
+                "wake_mapping_grant",
             }:
                 raise ValueError("invalid scope")
+            snapshot = self._configuration_store.read()
+            mapping_ids = _approved_wake_mapping_ids(
+                snapshot, scope_data["wake_mapping_grant"]
+            )
             scope = CredentialScope.from_values(
                 rooms=scope_data["rooms"],
                 capabilities=scope_data["capabilities"],
+                wake_mappings=mapping_ids,
             )
-            snapshot = self._configuration_store.read()
             configured_rooms = [room["id"] for room in snapshot["rooms"]]
+            configured_wake_mappings = _available_wake_mapping_ids(snapshot)
             enrollment = self._credential_service.approve_request(
                 request_id,
                 scope,
                 configured_rooms=configured_rooms,
+                configured_wake_mappings=configured_wake_mappings,
             )
         except CredentialStateError as error:
             return _credential_error(error)
         except CredentialStoreError:
             return _error(503, "service_unavailable")
+        except ConfigurationMigrationRequired as error:
+            return HTTPResponse(
+                409,
+                {
+                    "schema": 1,
+                    "error": {
+                        "code": "configuration_migration_required",
+                        "current_revision": error.current_revision,
+                    },
+                },
+            )
         except ConfigurationStoreError:
             return _error(503, "service_unavailable")
         except OSError, RuntimeError, KeyError:
@@ -367,6 +406,57 @@ class HomeApplication:
         ):
             return _error(400, "invalid_request")
         return HTTPResponse(200, {"schema": 1, "request": enrollment.to_public()})
+
+    def _get_device_configuration(
+        self,
+        headers: Mapping[str, str],
+        device_id: str,
+    ) -> HTTPResponse:
+        try:
+            context = self._durable_device_context(headers)
+        except OSError, RuntimeError, TypeError, ValueError:
+            return _error(503, "service_unavailable")
+        if context is None or context.device_id != device_id:
+            return _error(401, "unauthorized")
+        if "wake_claim" not in context.scope.capabilities:
+            return _error(403, "forbidden")
+        try:
+            snapshot = self._configuration_store.read()
+        except ConfigurationMigrationRequired as error:
+            return HTTPResponse(
+                409,
+                {
+                    "schema": 1,
+                    "error": {
+                        "code": "configuration_migration_required",
+                        "current_revision": error.current_revision,
+                    },
+                },
+            )
+        except OSError, RuntimeError, TypeError, ValueError:
+            return _error(503, "service_unavailable")
+
+        authorized_ids = set(context.scope.wake_mappings)
+        profile_availability = {
+            profile["id"]: profile["available"] for profile in snapshot["profiles"]
+        }
+        mappings = [
+            {"id": mapping["id"], "phrase": mapping["phrase"]}
+            for mapping in snapshot["wake_mappings"]
+            if mapping["id"] in authorized_ids
+            and mapping["active"]
+            and profile_availability.get(mapping["profile_id"], False)
+        ]
+        return HTTPResponse(
+            200,
+            {
+                "schema": 1,
+                "snapshot": {
+                    "revision": snapshot["revision"],
+                    "wake_mappings": mappings,
+                },
+            },
+        )
 
     def _reject_enrollment_request(
         self,
@@ -452,6 +542,14 @@ class HomeApplication:
             return _error(400, "invalid_request")
         except CredentialStoreError:
             return _error(503, "service_unavailable")
+        try:
+            self._close_device_claims(
+                device_id,
+                current_generation=material.generation,
+                reason="endpoint_revoked",
+            )
+        except OSError, RuntimeError:
+            return _error(503, "service_unavailable")
         return HTTPResponse(200, _material_payload(material))
 
     def _rotate_device(
@@ -478,6 +576,14 @@ class HomeApplication:
         except CredentialValidationError, TypeError, ValueError, json.JSONDecodeError:
             return _error(400, "invalid_request")
         except CredentialStoreError:
+            return _error(503, "service_unavailable")
+        try:
+            self._close_device_claims(
+                device_id,
+                current_generation=material.generation,
+                reason="endpoint_revoked",
+            )
+        except OSError, RuntimeError:
             return _error(503, "service_unavailable")
         return HTTPResponse(200, _material_payload(material))
 
@@ -507,6 +613,14 @@ class HomeApplication:
             return _error(400, "invalid_request")
         except CredentialStoreError:
             return _error(503, "service_unavailable")
+        try:
+            self._close_device_claims(
+                device_id,
+                current_generation=None,
+                reason="endpoint_revoked",
+            )
+        except OSError, RuntimeError:
+            return _error(503, "service_unavailable")
         return HTTPResponse(
             200,
             {
@@ -522,6 +636,17 @@ class HomeApplication:
             return _error(401, "unauthorized")
         try:
             snapshot = self._configuration_store.read()
+        except ConfigurationMigrationRequired as error:
+            return HTTPResponse(
+                409,
+                {
+                    "schema": 1,
+                    "error": {
+                        "code": "configuration_migration_required",
+                        "current_revision": error.current_revision,
+                    },
+                },
+            )
         except OSError, RuntimeError, TypeError, ValueError:
             return _error(503, "service_unavailable")
         return HTTPResponse(200, {"schema": 1, "snapshot": snapshot})
@@ -579,6 +704,18 @@ class HomeApplication:
     ) -> HTTPResponse:
         if not self._authenticator.authenticate_admin(headers):
             return _error(401, "unauthorized")
+        with self._configuration_publish_lock:
+            try:
+                self._retry_pending_configuration_cleanups()
+            except OSError, RuntimeError:
+                return _error(503, "service_unavailable")
+            return self._put_configuration_authenticated(headers, body)
+
+    def _put_configuration_authenticated(
+        self,
+        headers: Mapping[str, str],
+        body: bytes | str,
+    ) -> HTTPResponse:
         if not _is_json_content_type(headers):
             return _error(400, "invalid_request")
         try:
@@ -593,6 +730,17 @@ class HomeApplication:
             snapshot = request["snapshot"]
             if not isinstance(snapshot, Mapping):
                 raise TypeError("snapshot must be an object")
+            try:
+                previous = self._configuration_store.read()
+            except (
+                ConfigurationMigrationRequired,
+                ConfigurationStoreError,
+                OSError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+            ):
+                previous = None
             published = self._configuration_store.replace(
                 expected_revision=expected_revision,
                 candidate=snapshot,
@@ -617,7 +765,91 @@ class HomeApplication:
             return _error(400, "invalid_request")
         except OSError, RuntimeError:
             return _error(503, "service_unavailable")
+        self._pending_configuration_cleanup[published["revision"]] = (
+            previous,
+            published,
+        )
+        try:
+            self._retry_pending_configuration_cleanups()
+        except OSError, RuntimeError:
+            return _error(503, "service_unavailable")
         return HTTPResponse(200, {"schema": 1, "snapshot": published})
+
+    def _retry_pending_configuration_cleanups(self) -> None:
+        """Retry post-commit revocation cleanup before later publishes."""
+
+        for revision in sorted(self._pending_configuration_cleanup):
+            previous, published = self._pending_configuration_cleanup[revision]
+            self._close_revoked_configuration_claims(previous, published)
+            self._pending_configuration_cleanup.pop(revision, None)
+
+    def _close_device_claims(
+        self,
+        device_id: str,
+        *,
+        current_generation: int | None,
+        reason: str,
+    ) -> None:
+        if self._conversation_claim_store is not None:
+            self._conversation_claim_store.close_device_claims(
+                device_id,
+                current_generation=current_generation,
+                reason=reason,
+            )
+
+    def _discard_new_claim(self, handle: str, device_id: str) -> bool:
+        store = self._conversation_claim_store
+        if store is None:
+            return False
+        try:
+            return store.close_claim(
+                handle,
+                device_id,
+                reason="endpoint_revoked",
+            )
+        except OSError, RuntimeError, TypeError, ValueError:
+            return False
+
+    def _close_revoked_configuration_claims(
+        self,
+        previous: Mapping[str, object] | None,
+        published: Mapping[str, object],
+    ) -> None:
+        store = self._conversation_claim_store
+        if store is None:
+            return
+        if previous is None:
+            store.close_all_claims(reason="configuration_unverified")
+            return
+
+        current_profiles = {profile["id"]: profile for profile in published["profiles"]}
+        revoked_profiles = {
+            profile["id"]
+            for profile in previous["profiles"]
+            if profile["available"]
+            and (
+                profile["id"] not in current_profiles
+                or not current_profiles[profile["id"]]["available"]
+            )
+        }
+        current_mappings = {
+            mapping["id"]: mapping for mapping in published["wake_mappings"]
+        }
+        revoked_mappings = {
+            mapping["id"]
+            for mapping in previous["wake_mappings"]
+            if mapping["active"]
+            and mapping["id"] in current_mappings
+            and not current_mappings[mapping["id"]]["active"]
+        }
+        store.close_profile_claims(
+            revoked_profiles,
+            reason="profile_revoked",
+        )
+        store.close_mapping_claims(
+            revoked_mappings,
+            reason="mapping_revoked",
+        )
 
     def _post_wake_claim(
         self,
@@ -632,10 +864,15 @@ class HomeApplication:
             authenticated_device_id = self._authenticator.authenticate_device(headers)
             if authenticated_device_id is None:
                 return _error(401, "unauthorized")
+            scope = self._static_device_scopes.get(
+                authenticated_device_id,
+                CredentialScope.from_values(rooms=(), capabilities=()),
+            )
         else:
             if durable_context is None:
                 return _error(401, "unauthorized")
             authenticated_device_id = durable_context.device_id
+            scope = durable_context.scope
         if not _is_json_content_type(headers):
             return _error(400, "invalid_request")
         try:
@@ -646,14 +883,9 @@ class HomeApplication:
         submission = self._arbitration_engine.submit(
             claim,
             authenticated_device_id=authenticated_device_id,
-            authorized_rooms=(
-                None if durable_context is None else durable_context.scope.rooms
-            ),
-            authorized_wake_claim=(
-                None
-                if durable_context is None
-                else "wake_claim" in durable_context.scope.capabilities
-            ),
+            authorized_rooms=scope.rooms,
+            authorized_wake_claim="wake_claim" in scope.capabilities,
+            authorized_wake_mappings=scope.wake_mappings,
         )
         if not submission.accepted:
             return _claim_submission_error(submission)
@@ -690,15 +922,55 @@ class HomeApplication:
                 or refreshed.generation != durable_context.generation
             ):
                 return _error(401, "unauthorized")
+        conversation_handle = None
+        if decision.decision == "granted":
+            if self._conversation_claim_store is None:
+                return _error(503, "service_unavailable")
+            try:
+                conversation_handle = (
+                    self._conversation_claim_store.create_from_decision(
+                        decision,
+                        credential_generation=(
+                            None
+                            if durable_context is None
+                            else durable_context.generation
+                        ),
+                    )
+                )
+            except ConversationClaimConflict:
+                return _error(409, "conversation_active")
+            except OSError, RuntimeError, TypeError, ValueError:
+                return _error(503, "service_unavailable")
+            if durable_context is not None:
+                try:
+                    refreshed = self._durable_device_context(headers)
+                except OSError, RuntimeError, TypeError, ValueError:
+                    self._discard_new_claim(
+                        conversation_handle, durable_context.device_id
+                    )
+                    return _error(503, "service_unavailable")
+                if (
+                    refreshed is None
+                    or refreshed.device_id != durable_context.device_id
+                    or refreshed.generation != durable_context.generation
+                ):
+                    if not self._discard_new_claim(
+                        conversation_handle, durable_context.device_id
+                    ):
+                        return _error(503, "service_unavailable")
+                    return _error(401, "unauthorized")
+        payload: dict[str, object] = {
+            "schema": 1,
+            "claim_id": decision.claim_id,
+            "decision": decision.decision,
+            "arbitration_id": decision.arbitration_id,
+            "configuration_revision": decision.configuration_revision,
+        }
+        if conversation_handle is not None:
+            payload["conversation_handle"] = conversation_handle
         return HTTPResponse(
             200,
-            {
-                "schema": 1,
-                "claim_id": decision.claim_id,
-                "decision": decision.decision,
-                "arbitration_id": decision.arbitration_id,
-                "configuration_revision": decision.configuration_revision,
-            },
+            payload,
         )
 
     def _record_http(
@@ -852,8 +1124,42 @@ def _material_payload(material: CredentialMaterial) -> dict[str, object]:
         "scope": {
             "rooms": list(material.scope.rooms),
             "capabilities": list(material.scope.capabilities),
+            "wake_mappings": list(material.scope.wake_mappings),
         },
     }
+
+
+def _available_wake_mapping_ids(snapshot: Mapping[str, object]) -> tuple[str, ...]:
+    profile_availability = {
+        profile["id"]: profile["available"] for profile in snapshot["profiles"]
+    }
+    return tuple(
+        mapping["id"]
+        for mapping in snapshot["wake_mappings"]
+        if mapping["active"] and profile_availability.get(mapping["profile_id"], False)
+    )
+
+
+def _approved_wake_mapping_ids(
+    snapshot: Mapping[str, object],
+    selection: object,
+) -> tuple[str, ...]:
+    if not isinstance(selection, Mapping) or type(selection.get("mode")) is not str:
+        raise ValueError("invalid wake mapping grant")
+    mode = selection["mode"]
+    if mode == "selected" and set(selection) == {"mode", "ids"}:
+        mapping_ids = CredentialScope.from_values(
+            rooms=(), capabilities=(), wake_mappings=selection["ids"]
+        ).wake_mappings
+    elif mode == "all_current_profiles" and set(selection) == {"mode"}:
+        mapping_ids = _available_wake_mapping_ids(snapshot)
+    else:
+        raise ValueError("invalid wake mapping grant")
+    if not set(mapping_ids).issubset(_available_wake_mapping_ids(snapshot)):
+        raise CredentialValidationError(
+            "approved scope references an unavailable wake mapping"
+        )
+    return mapping_ids
 
 
 def _device_credential(headers: Mapping[str, str]) -> str:
@@ -888,9 +1194,23 @@ def _claim_submission_error(submission: ClaimSubmission) -> HTTPResponse:
     elif reason == "not_found":
         status = 404
         code = "not_found"
+    elif reason == "configuration_migration_required":
+        return HTTPResponse(
+            409,
+            {
+                "schema": 1,
+                "error": {
+                    "code": "configuration_migration_required",
+                    "current_revision": submission.current_revision,
+                },
+            },
+        )
     elif reason == "invalid_request":
         status = 400
         code = "invalid_request"
+    elif reason in {"stale_configuration", "stale_mapping"}:
+        status = 409
+        code = reason
     elif reason == "service_unavailable":
         status = 503
         code = "service_unavailable"
@@ -907,9 +1227,12 @@ def _error(status: int, code: str) -> HTTPResponse:
 def _metric_route(path: str) -> str:
     if path.startswith("/api/v1/diagnostics/timeline/"):
         return "diagnostics_timeline"
+    if path.startswith("/api/v1/devices/"):
+        return "device_configuration"
     return {
         "/api/v1/configuration": "configuration",
         "/api/v1/wake-claims": "wake_claims",
+        "/api/v1/devices": "device_configuration",
         "/metrics": "metrics",
         "/api/v1/diagnostics/status": "diagnostics_status",
     }.get(path, "other")

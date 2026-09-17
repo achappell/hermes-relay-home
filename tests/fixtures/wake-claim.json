@@ -3,6 +3,7 @@
   "claim_id": "claim-example",
   "device_id": "puck-kitchen",
   "wake_mapping_id": "hey-hermes",
+  "configuration_revision": 12,
   "observation": {"detector": "device-local"},
   "acoustic_evidence": {"kind": "opaque-v1", "value": 0.91},
   "availability": "ready"

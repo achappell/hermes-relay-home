@@ -1,17 +1,25 @@
 import pytest
 
 from hermes_home.domain.arbitration import ArbitrationEngine, WakeDecision
+from hermes_home.domain.configuration import ConfigurationMigrationRequired
 
 CONFIGURATION = {
     "revision": 7,
     "rooms": [{"id": "kitchen", "name": "Kitchen"}],
-    "wake_mappings": [{"id": "hey-hermes", "name": "Hey Hermes"}],
+    "profiles": [{"id": "family", "name": "Family", "available": True}],
+    "wake_mappings": [
+        {
+            "id": "hey-hermes",
+            "phrase": "Hey Hermes",
+            "profile_id": "family",
+            "active": True,
+        }
+    ],
     "devices": [
         {
             "id": "puck-kitchen",
             "name": "Kitchen Puck",
             "room_id": "kitchen",
-            "profile_id": "family",
             "priority": 1,
             "capabilities": {"wake_claim": True},
         }
@@ -41,6 +49,7 @@ CLAIM = {
     "claim_id": "claim-1",
     "device_id": "puck-kitchen",
     "wake_mapping_id": "hey-hermes",
+    "configuration_revision": 7,
     "observation": {"detector": "device-local"},
     "acoustic_evidence": {"kind": "opaque-v1", "value": 0.91},
     "availability": "ready",
@@ -89,6 +98,10 @@ def test_single_claim_is_granted_after_the_window_closes() -> None:
             decision="granted",
             arbitration_id="arb-1",
             configuration_revision=7,
+            device_id="puck-kitchen",
+            room_id="kitchen",
+            wake_mapping_id="hey-hermes",
+            profile_id="family",
         )
     }
 
@@ -145,6 +158,54 @@ def test_equal_acoustic_proximity_uses_lower_device_priority() -> None:
 
     assert decisions["claim-priority"].decision == "granted"
     assert decisions["claim-near"].decision == "denied"
+
+
+def test_different_rooms_keep_independent_arbitration_windows() -> None:
+    clock = FakeClock()
+    configuration = {
+        **CONFIGURATION,
+        "rooms": [
+            {"id": "kitchen", "name": "Kitchen"},
+            {"id": "office", "name": "Office"},
+        ],
+        "devices": [
+            CONFIGURATION["devices"][0],
+            {
+                **CONFIGURATION["devices"][0],
+                "id": "puck-office",
+                "name": "Office Puck",
+                "room_id": "office",
+                "priority": 1,
+            },
+        ],
+    }
+    engine = ArbitrationEngine(
+        configuration=lambda: configuration,
+        clock=clock.monotonic,
+        arbitration_id_factory=iter(["arb-kitchen", "arb-office"]).__next__,
+    )
+
+    kitchen = engine.submit(CLAIM, authenticated_device_id="puck-kitchen")
+    clock.now = 0.100
+    office = engine.submit(
+        {
+            **CLAIM,
+            "claim_id": "claim-office",
+            "device_id": "puck-office",
+        },
+        authenticated_device_id="puck-office",
+    )
+    assert kitchen.deadline == pytest.approx(0.250)
+    assert office.deadline == pytest.approx(0.350)
+
+    decisions = engine.finalize(now=0.250)
+    assert decisions is not None
+    assert decisions["claim-1"].decision == "granted"
+    assert "claim-office" not in decisions
+
+    decisions = engine.finalize(now=0.350)
+    assert decisions is not None
+    assert decisions["claim-office"].decision == "granted"
 
 
 def test_claim_with_wrong_authenticated_identity_is_denied_without_opening_window() -> (
@@ -236,6 +297,56 @@ def test_claim_for_unknown_wake_mapping_is_denied() -> None:
 
     assert submission.accepted is False
     assert submission.reason == "not_found"
+
+
+def test_claim_for_inactive_wake_mapping_is_stale() -> None:
+    clock = FakeClock()
+    configuration = {
+        **CONFIGURATION,
+        "wake_mappings": [{**CONFIGURATION["wake_mappings"][0], "active": False}],
+    }
+    engine = ArbitrationEngine(
+        configuration=lambda: configuration,
+        clock=clock.monotonic,
+        arbitration_id_factory=lambda: "arb-7-inactive",
+    )
+
+    submission = engine.submit(CLAIM, authenticated_device_id="puck-kitchen")
+
+    assert submission.accepted is False
+    assert submission.reason == "stale_mapping"
+
+
+def test_claim_for_unavailable_profile_is_denied_at_arbitration() -> None:
+    clock = FakeClock()
+    configuration = {
+        **CONFIGURATION,
+        "profiles": [{**CONFIGURATION["profiles"][0], "available": False}],
+    }
+    engine = ArbitrationEngine(
+        configuration=lambda: configuration,
+        clock=clock.monotonic,
+        arbitration_id_factory=lambda: "arb-profile-unavailable",
+    )
+
+    submission = engine.submit(CLAIM, authenticated_device_id="puck-kitchen")
+
+    assert submission.accepted is False
+    assert submission.reason == "claim_denied"
+    assert engine.finalize() is None
+
+
+def test_legacy_configuration_migration_preserves_current_revision() -> None:
+    def legacy_configuration():
+        raise ConfigurationMigrationRequired(12)
+
+    engine = ArbitrationEngine(configuration=legacy_configuration)
+
+    submission = engine.submit(CLAIM, authenticated_device_id="puck-kitchen")
+
+    assert submission.accepted is False
+    assert submission.reason == "configuration_migration_required"
+    assert submission.current_revision == 12
 
 
 def test_malformed_acoustic_evidence_is_denied() -> None:

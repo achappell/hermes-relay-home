@@ -25,14 +25,14 @@ def test_windows_installer_owns_bridge_listener_settings() -> None:
     )
 
 
-def test_windows_installer_owns_standard_pilot_settings_without_embedding_secrets() -> (
+def test_windows_installer_owns_standard_bridge_settings_without_embedding_secrets() -> (
     None
 ):
     installer = INSTALLER.read_text(encoding="utf-8")
 
     assert "[string] $StandardGatewayUrl = ''" in installer
     assert "[string] $StandardTokenFile = ''" in installer
-    assert "[string] $ConversationGrantsFile = ''" in installer
+    assert "[double] $ConversationIdleTimeoutSeconds = 8" in installer
     assert (
         "SetEnvironmentVariable('HERMES_HOME_STANDARD_GATEWAY_URL', $StandardGatewayUrl.Trim(), 'Machine')"
         in installer
@@ -41,10 +41,8 @@ def test_windows_installer_owns_standard_pilot_settings_without_embedding_secret
         "SetEnvironmentVariable('HERMES_HOME_STANDARD_TOKEN_FILE', $standardTokenPath, 'Machine')"
         in installer
     )
-    assert (
-        "SetEnvironmentVariable('HERMES_HOME_CONVERSATION_GRANTS_FILE', $conversationGrantsPath, 'Machine')"
-        in installer
-    )
+    assert "HERMES_HOME_CONVERSATION_GRANTS_FILE" not in installer
+    assert "HERMES_HOME_CONVERSATION_IDLE_TIMEOUT_SECONDS" in installer
     assert "server-secret" not in installer
 
 

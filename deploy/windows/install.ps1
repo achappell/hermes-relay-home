@@ -21,7 +21,8 @@ param(
     [string] $CredentialRootSecretFile = '',
     [string] $StandardGatewayUrl = '',
     [string] $StandardTokenFile = '',
-    [string] $ConversationGrantsFile = ''
+    [ValidateRange(1, 600)]
+    [double] $ConversationIdleTimeoutSeconds = 8
 )
 
 $ErrorActionPreference = 'Stop'
@@ -242,15 +243,13 @@ if ($BridgeRouteId -match '[\r\n]') {
 }
 $standardConfigured = (
     -not [string]::IsNullOrWhiteSpace($StandardGatewayUrl) -or
-    -not [string]::IsNullOrWhiteSpace($StandardTokenFile) -or
-    -not [string]::IsNullOrWhiteSpace($ConversationGrantsFile)
+    -not [string]::IsNullOrWhiteSpace($StandardTokenFile)
 )
 if ($standardConfigured -and (
         [string]::IsNullOrWhiteSpace($StandardGatewayUrl) -or
-        [string]::IsNullOrWhiteSpace($StandardTokenFile) -or
-        [string]::IsNullOrWhiteSpace($ConversationGrantsFile)
+        [string]::IsNullOrWhiteSpace($StandardTokenFile)
     )) {
-    throw 'Standard bridge settings require StandardGatewayUrl, StandardTokenFile, and ConversationGrantsFile'
+    throw 'Standard bridge settings require StandardGatewayUrl and StandardTokenFile'
 }
 if ($standardConfigured -and -not ($DeviceCredentialsFile -or $CredentialRootSecretFile)) {
     throw 'Standard bridge settings require DeviceCredentialsFile or CredentialRootSecretFile'
@@ -346,24 +345,14 @@ try {
         }
         Set-SecretFileAcl -Path $standardTokenPath
 
-        if (-not (Test-Path -LiteralPath $ConversationGrantsFile -PathType Leaf)) {
-            $grantsParent = Split-Path -Parent $ConversationGrantsFile
-            if ($grantsParent) {
-                New-Item -ItemType Directory -Path $grantsParent -Force | Out-Null
-            }
-            $emptyGrants = '{"schema":1,"grants":[]}'
-            [System.IO.File]::WriteAllText($ConversationGrantsFile, $emptyGrants)
-        }
-        $conversationGrantsPath = (Resolve-Path -LiteralPath $ConversationGrantsFile).Path
-        Set-SecretFileAcl -Path $conversationGrantsPath
         [Environment]::SetEnvironmentVariable('HERMES_HOME_STANDARD_GATEWAY_URL', $StandardGatewayUrl.Trim(), 'Machine')
         [Environment]::SetEnvironmentVariable('HERMES_HOME_STANDARD_TOKEN_FILE', $standardTokenPath, 'Machine')
-        [Environment]::SetEnvironmentVariable('HERMES_HOME_CONVERSATION_GRANTS_FILE', $conversationGrantsPath, 'Machine')
+        [Environment]::SetEnvironmentVariable('HERMES_HOME_CONVERSATION_IDLE_TIMEOUT_SECONDS', $ConversationIdleTimeoutSeconds.ToString([System.Globalization.CultureInfo]::InvariantCulture), 'Machine')
     }
     else {
         [Environment]::SetEnvironmentVariable('HERMES_HOME_STANDARD_GATEWAY_URL', $null, 'Machine')
         [Environment]::SetEnvironmentVariable('HERMES_HOME_STANDARD_TOKEN_FILE', $null, 'Machine')
-        [Environment]::SetEnvironmentVariable('HERMES_HOME_CONVERSATION_GRANTS_FILE', $null, 'Machine')
+        [Environment]::SetEnvironmentVariable('HERMES_HOME_CONVERSATION_IDLE_TIMEOUT_SECONDS', $null, 'Machine')
     }
 
     $backup = Update-PrometheusConfig -ConfigPath $PrometheusConfigPath -PrometheusTokenPath $tokenPath -TargetHost $BindHost -TargetPort $Port
@@ -379,7 +368,7 @@ try {
     Write-Output "Bridge route ID: $($BridgeRouteId.Trim())"
     if ($standardConfigured) {
         Write-Output "Standard pilot target: $($StandardGatewayUrl.Trim())"
-        Write-Output "Conversation grants: $conversationGrantsPath"
+        Write-Output "Conversation idle timeout: $ConversationIdleTimeoutSeconds seconds"
     }
 }
 catch {

@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from collections import deque
 from threading import Event, Thread, current_thread
+from types import SimpleNamespace
 
 import pytest
 
@@ -19,6 +20,8 @@ from hermes_home.bridge import (
     HomeBridge,
     StandardGatewayClient,
 )
+from hermes_home.bridge.production import ConversationGrantStore
+from hermes_home.domain.arbitration import WakeDecision
 
 
 class FakeJsonSocket:
@@ -373,6 +376,195 @@ def test_bridge_persists_the_durable_session_binding_after_open() -> None:
 
     assert result.status == "ready"
     assert persisted == [(grant, "durable-hermes-1")]
+
+
+def test_revoked_durable_claim_interrupts_live_standard_work(tmp_path) -> None:
+    configuration = {
+        "revision": 1,
+        "rooms": [{"id": "kitchen", "name": "Kitchen"}],
+        "profiles": [{"id": "family", "name": "Family", "available": True}],
+        "wake_mappings": [
+            {
+                "id": "hey-hermes",
+                "phrase": "Hey Hermes",
+                "profile_id": "family",
+                "active": True,
+            }
+        ],
+        "devices": [],
+    }
+    store = ConversationGrantStore(
+        tmp_path / "home.sqlite3",
+        configuration=lambda: configuration,
+        handle_factory=lambda: "live-revocation-handle",
+    )
+    handle = store.create_from_decision(
+        WakeDecision(
+            claim_id="live-revocation-claim",
+            decision="granted",
+            arbitration_id="live-revocation-arbitration",
+            configuration_revision=1,
+            device_id="puck-kitchen",
+            room_id="kitchen",
+            wake_mapping_id="hey-hermes",
+            profile_id="family",
+        ),
+        credential_generation=None,
+    )
+    gateway_socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {
+                    "session_id": "runtime-hermes-1",
+                    "stored_session_id": "durable-hermes-1",
+                },
+            },
+            {"jsonrpc": "2.0", "id": "home-2", "result": {"accepted": True}},
+            {"jsonrpc": "2.0", "id": "home-3", "result": {"accepted": True}},
+        ]
+    )
+    bridge = HomeBridge(
+        gateway_url="wss://hermes.example/api/ws",
+        hermes_token="server-hermes-secret",
+        device_authenticator=StaticCredentialAuthenticator(
+            admin_token="admin-secret",
+            device_credentials={"device-secret": "puck-kitchen"},
+        ),
+        conversation_resolver=store.resolve,
+        gateway_socket_factory=FakeSocketFactory(gateway_socket),
+        session_persistor=store.persist_session,
+        conversation_closer=store.close_claim,
+        activity_recorder=store.record_activity,
+        conversation_opener=store.mark_open,
+        revocation_registrar=store.register_revocation_handler,
+        revocation_unregistrar=store.unregister_revocation_handler,
+    )
+
+    try:
+        assert (
+            bridge.open(
+                headers={"Authorization": "Device device-secret"},
+                conversation_handle=handle,
+            ).status
+            == "ready"
+        )
+        bridge.submit_prompt("continue the accepted turn")
+
+        assert store.close_profile_claims(["family"], reason="profile_revoked") == 1
+
+        assert gateway_socket.sent[-1]["method"] == "session.interrupt"
+        assert gateway_socket.sent[-1]["params"] == {"session_id": "runtime-hermes-1"}
+        assert bridge.state == "unavailable"
+        assert store.resolve(handle, "puck-kitchen") is None
+    finally:
+        bridge.close()
+        store.close()
+
+
+def test_new_standard_session_is_interrupted_when_claim_binding_persist_fails() -> None:
+    gateway_socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {
+                    "session_id": "runtime-hermes-1",
+                    "stored_session_id": "durable-hermes-1",
+                },
+            },
+            {"jsonrpc": "2.0", "id": "home-2", "result": {"accepted": True}},
+        ]
+    )
+    grant = ConversationGrant(
+        handle="opaque-conversation-1",
+        device_id="puck-kitchen",
+        profile_id="family",
+    )
+    closed: list[str] = []
+
+    def fail_persist(_grant, _session_id):
+        raise OSError("claim binding could not be persisted")
+
+    bridge = HomeBridge(
+        gateway_url="wss://hermes.example/api/ws",
+        hermes_token="server-hermes-secret",
+        device_authenticator=StaticCredentialAuthenticator(
+            admin_token="admin-secret",
+            device_credentials={"device-secret": "puck-kitchen"},
+        ),
+        conversation_resolver=lambda _handle, _device_id: grant,
+        gateway_socket_factory=FakeSocketFactory(gateway_socket),
+        session_persistor=fail_persist,
+        conversation_closer=lambda _handle, _device_id, *, reason: (
+            closed.append(reason) or True
+        ),
+    )
+
+    result = bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle=grant.handle,
+    )
+
+    assert result.status == "unavailable"
+    assert result.reason == "authorization_unavailable"
+    assert [frame["method"] for frame in gateway_socket.sent] == [
+        "commands.catalog",
+        "session.create",
+        "session.interrupt",
+    ]
+    assert gateway_socket.sent[-1]["params"] == {"session_id": "runtime-hermes-1"}
+    assert gateway_socket.closed is True
+    assert closed == ["session_startup_failed"]
+
+
+def test_explicit_close_closes_claim_locally_when_standard_is_unavailable() -> None:
+    gateway_socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {"session_id": "runtime-hermes-1"},
+            },
+            {"jsonrpc": "2.0", "id": "home-2", "result": {"accepted": True}},
+        ]
+    )
+    closed: list[str] = []
+    bridge = HomeBridge(
+        gateway_url="wss://hermes.example/api/ws",
+        hermes_token="server-hermes-secret",
+        device_authenticator=StaticCredentialAuthenticator(
+            admin_token="admin-secret",
+            device_credentials={"device-secret": "puck-kitchen"},
+        ),
+        conversation_resolver=lambda handle, device_id: ConversationGrant(
+            handle=handle,
+            device_id=device_id,
+            profile_id="family",
+        ),
+        gateway_socket_factory=FakeSocketFactory(gateway_socket),
+        conversation_closer=lambda _handle, _device_id, *, reason: (
+            closed.append(reason) or True
+        ),
+    )
+    assert (
+        bridge.open(
+            headers={"Authorization": "Device device-secret"},
+            conversation_handle="opaque-conversation-1",
+        ).status
+        == "ready"
+    )
+    bridge._invalidate_binding("authorization_unavailable")
+
+    assert bridge.state == "unavailable"
+    assert bridge.close_conversation() is True
+
+    assert closed == ["stopped"]
+    assert bridge.state == "disconnected"
 
 
 def test_standard_gateway_keeps_concurrent_rpc_and_event_reads_ordered():
@@ -2634,6 +2826,7 @@ def test_bridge_revalidates_the_home_grant_before_submitting():
     assert [frame["method"] for frame in gateway_socket.sent] == [
         "commands.catalog",
         "session.create",
+        "session.interrupt",
     ]
 
 
@@ -3543,3 +3736,190 @@ def test_bridge_preserves_pin_shaped_prompt_identity_until_terminal_completion()
     assert bridge.next_event().type == "message.complete"
     assert bridge.active_turn_id is None
     assert bridge.state == "ready"
+
+
+def test_bridge_records_content_free_activity_and_explicitly_closes_the_claim():
+    gateway_socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {"session_id": "runtime-hermes-1"},
+            },
+        ]
+    )
+    activity: list[tuple[str, str, str]] = []
+    closed: list[tuple[str, str, str]] = []
+    bridge = HomeBridge(
+        gateway_url="wss://hermes.example/api/ws",
+        hermes_token="server-hermes-secret",
+        device_authenticator=StaticCredentialAuthenticator(
+            admin_token="admin-secret",
+            device_credentials={"device-secret": "puck-kitchen"},
+        ),
+        conversation_resolver=lambda handle, device_id: ConversationGrant(
+            handle, device_id, "family"
+        ),
+        gateway_socket_factory=FakeSocketFactory(gateway_socket),
+        activity_recorder=lambda handle, device_id, state: activity.append(
+            (handle, device_id, state)
+        ),
+        conversation_closer=lambda handle, device_id, *, reason: (
+            closed.append((handle, device_id, reason)) or True
+        ),
+    )
+
+    opened = bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle="opaque-conversation-1",
+    )
+    assert opened.status == "ready"
+    assert bridge.report_activity("capture") is True
+    assert bridge.report_activity("playback") is True
+    assert bridge.report_activity("playback_complete") is True
+    assert bridge.close_conversation() is True
+
+    assert activity == [
+        ("opaque-conversation-1", "puck-kitchen", "capture"),
+        ("opaque-conversation-1", "puck-kitchen", "playback"),
+        ("opaque-conversation-1", "puck-kitchen", "playback_complete"),
+    ]
+    assert closed == [("opaque-conversation-1", "puck-kitchen", "stopped")]
+    assert bridge.state == "disconnected"
+
+
+def test_bridge_closes_claim_when_standard_session_startup_fails():
+    gateway_socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "error": {"code": "session_unavailable", "message": "offline"},
+            },
+        ]
+    )
+    closed: list[tuple[str, str, str]] = []
+    bridge = HomeBridge(
+        gateway_url="wss://hermes.example/api/ws",
+        hermes_token="server-hermes-secret",
+        device_authenticator=StaticCredentialAuthenticator(
+            admin_token="admin-secret",
+            device_credentials={"device-secret": "puck-kitchen"},
+        ),
+        conversation_resolver=lambda handle, device_id: ConversationGrant(
+            handle, device_id, "family"
+        ),
+        gateway_socket_factory=FakeSocketFactory(gateway_socket),
+        conversation_closer=lambda handle, device_id, *, reason: (
+            closed.append((handle, device_id, reason)) or True
+        ),
+    )
+
+    status = bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle="opaque-conversation-1",
+    )
+
+    assert status.status == "unavailable"
+    assert status.reason == "request_rejected"
+    assert closed == [
+        ("opaque-conversation-1", "puck-kitchen", "session_startup_failed")
+    ]
+
+
+def test_bridge_closes_claim_that_has_no_durable_session_for_reconnect():
+    gateway_socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {"session_id": "runtime-hermes-1"},
+            },
+        ]
+    )
+    closed: list[str] = []
+    bridge = HomeBridge(
+        gateway_url="wss://hermes.example/api/ws",
+        hermes_token="server-hermes-secret",
+        device_authenticator=StaticCredentialAuthenticator(
+            admin_token="admin-secret",
+            device_credentials={"device-secret": "puck-kitchen"},
+        ),
+        conversation_resolver=lambda handle, device_id: ConversationGrant(
+            handle, device_id, "family"
+        ),
+        gateway_socket_factory=FakeSocketFactory(gateway_socket),
+        conversation_closer=lambda handle, device_id, *, reason: (
+            closed.append(reason) or True
+        ),
+    )
+    assert (
+        bridge.open(
+            headers={"Authorization": "Device device-secret"},
+            conversation_handle="opaque-conversation-1",
+        ).status
+        == "ready"
+    )
+
+    bridge.close()
+
+    assert closed == ["session_unavailable"]
+
+
+def test_bridge_revokes_claim_when_the_paired_credential_generation_changes():
+    class ContextAuthenticator:
+        generation = 1
+
+        def authenticate_device_context(self, headers):
+            if headers.get("Authorization") != "Device device-secret":
+                return None
+            return SimpleNamespace(device_id="puck-kitchen", generation=self.generation)
+
+        def authenticate_device(self, headers):
+            context = self.authenticate_device_context(headers)
+            return None if context is None else context.device_id
+
+    authenticator = ContextAuthenticator()
+    gateway_socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {"session_id": "runtime-hermes-1"},
+            },
+        ]
+    )
+    closed: list[str] = []
+    bridge = HomeBridge(
+        gateway_url="wss://hermes.example/api/ws",
+        hermes_token="server-hermes-secret",
+        device_authenticator=authenticator,
+        conversation_resolver=lambda handle, device_id: ConversationGrant(
+            handle,
+            device_id,
+            "family",
+            credential_generation=1,
+        ),
+        gateway_socket_factory=FakeSocketFactory(gateway_socket),
+        conversation_closer=lambda handle, device_id, *, reason: (
+            closed.append(reason) or True
+        ),
+    )
+    assert (
+        bridge.open(
+            headers={"Authorization": "Device device-secret"},
+            conversation_handle="opaque-conversation-1",
+        ).status
+        == "ready"
+    )
+    authenticator.generation = 2
+
+    with pytest.raises(BridgeAuthorizationError, match="stale_conversation"):
+        bridge.submit_prompt("Do not send")
+
+    assert "authorization_revoked" in closed
+    assert all(frame["method"] != "prompt.submit" for frame in gateway_socket.sent)

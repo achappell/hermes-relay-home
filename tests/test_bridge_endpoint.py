@@ -51,6 +51,8 @@ class FakeBridge:
         self.interrupt_calls = 0
         self.command_calls: list[tuple[str, str | None]] = []
         self.ping_calls = 0
+        self.activity_calls: list[str] = []
+        self.close_conversation_calls = 0
         self.close_calls = 0
         self.events: deque[BridgeEvent | BaseException] = deque()
         self.audio: deque[AudioFrame | BaseException] = deque()
@@ -123,6 +125,14 @@ class FakeBridge:
     def ping(self) -> dict[str, object]:
         self.ping_calls += 1
         return {"ok": True, "session_id": "hidden"}
+
+    def report_activity(self, state: str) -> bool:
+        self.activity_calls.append(state)
+        return True
+
+    def close_conversation(self) -> bool:
+        self.close_conversation_calls += 1
+        return True
 
     def close(self) -> None:
         self.close_calls += 1
@@ -275,6 +285,84 @@ def test_endpoint_dispatches_prompt_controls_and_ping_without_exposing_identity(
         assert bridge.command_calls == [("status", "brief")]
         assert bridge.ping_calls == 1
         assert "hidden" not in json.dumps(connection.sent)
+    finally:
+        endpoint.close()
+
+
+def test_conversation_activity_and_close_are_bound_and_content_free() -> None:
+    connection = FakeConnection()
+    bridge = FakeBridge()
+    endpoint = BridgeEndpoint(connection, bridge, headers=HEADERS, route=ROUTE)
+
+    try:
+        _open(endpoint)
+        for state in ("capture", "turn", "playback", "playback_complete"):
+            result = _send(
+                endpoint,
+                jsonrpc="2.0",
+                schema=1,
+                id=f"activity-{state}",
+                method="conversation.activity",
+                params={"conversation_handle": HANDLE, "state": state},
+            )
+            assert result["result"] == {
+                "schema": 1,
+                "conversation_handle": HANDLE,
+                "status": "accepted",
+            }
+
+        closed = _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="close-1",
+            method="conversation.close",
+            params={"conversation_handle": HANDLE},
+        )
+
+        assert closed["result"] == {
+            "schema": 1,
+            "conversation_handle": HANDLE,
+            "status": "closed",
+        }
+        assert bridge.activity_calls == [
+            "capture",
+            "turn",
+            "playback",
+            "playback_complete",
+        ]
+        assert bridge.close_conversation_calls == 1
+        assert "profile" not in json.dumps(connection.sent).casefold()
+        assert "session_id" not in json.dumps(connection.sent).casefold()
+    finally:
+        endpoint.close()
+
+
+def test_conversation_close_is_allowed_when_standard_is_unavailable() -> None:
+    connection = FakeConnection()
+    bridge = FakeBridge()
+    bridge.status = BridgeStatus("unavailable", HANDLE, "hermes_unavailable")
+    endpoint = BridgeEndpoint(connection, bridge, headers=HEADERS, route=ROUTE)
+
+    try:
+        opened = _open(endpoint)
+        assert opened["result"]["status"] == "unavailable"
+
+        closed = _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="close-unavailable-1",
+            method="conversation.close",
+            params={"conversation_handle": HANDLE},
+        )
+
+        assert closed["result"] == {
+            "schema": 1,
+            "conversation_handle": HANDLE,
+            "status": "closed",
+        }
+        assert bridge.close_conversation_calls == 1
     finally:
         endpoint.close()
 

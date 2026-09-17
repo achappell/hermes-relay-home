@@ -1,20 +1,17 @@
-"""Production ports for the Home-to-Standard Hermes bridge.
-
-The normal Home service deliberately keeps Profile and conversation authority
-outside the route adapter.  This module supplies the small, operator-managed
-pilot seam needed to run the existing :class:`HomeBridge` against a deployed
-Standard gateway before HOME-NW-05 provides the durable claim API.
-"""
+"""Production ports for the Home-to-Standard Hermes bridge."""
 
 from __future__ import annotations
 
 import json
-import os
-import tempfile
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+import logging
+import secrets
+import sqlite3
+import time
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
+from math import isfinite
 from pathlib import Path
-from threading import RLock
+from threading import RLock, Timer
 from urllib.parse import urlsplit
 
 from websockets.sync.client import connect
@@ -27,131 +24,605 @@ from hermes_home.bridge.standard import (
     HomeBridge,
     JsonSocket,
 )
+from hermes_home.domain.arbitration import WakeDecision
+from hermes_home.domain.conversations import ConversationClaimConflict
+from hermes_home.domain.credentials import RevocationEvent
+from hermes_home.storage.sqlite import (
+    ConfigurationMigrationRequired,
+    ConfigurationStoreError,
+)
 
-GRANT_FILE_SCHEMA = 1
-MAX_GRANTS = 256
-MAX_IDENTIFIER_LENGTH = 256
+MAX_IDENTIFIER_LENGTH = 128
+DEFAULT_FIRST_OPEN_TIMEOUT_SECONDS = 90.0
+LOGGER = logging.getLogger(__name__)
 
 
 class ConversationGrantStore:
-    """Resolve and durably update a bounded operator-managed grant file.
+    """Persist Home-owned, claim-bound conversation authority in SQLite."""
 
-    This is a deployment bootstrap for live evidence, not the final
-    HOME-NW-05 claim authority.  The file contains only server-side binding
-    data.  Endpoint callers still provide an opaque handle and Home verifies
-    the authenticated device before returning a grant.
-    """
-
-    def __init__(self, path: Path) -> None:
-        self._path = path
+    def __init__(
+        self,
+        database: str | Path,
+        *,
+        configuration: Callable[[], Mapping[str, object]],
+        clock: Callable[[], float] = time.monotonic,
+        idle_timeout_seconds: float = 8.0,
+        first_open_timeout_seconds: float = DEFAULT_FIRST_OPEN_TIMEOUT_SECONDS,
+        handle_factory: Callable[[], str] | None = None,
+    ) -> None:
+        self._configuration = configuration
+        self._clock = clock
+        self._idle_timeout = _positive_timeout(idle_timeout_seconds)
+        self._first_open_timeout = _positive_timeout(first_open_timeout_seconds)
+        self._handle_factory = handle_factory or (lambda: secrets.token_urlsafe(32))
         self._lock = RLock()
-        self._grants = self._load()
+        self._revocation_handlers: dict[str, set[Callable[[str], None]]] = {}
+        database_path = Path(database)
+        database_path.parent.mkdir(parents=True, exist_ok=True)
+        self._connection = sqlite3.connect(database_path, check_same_thread=False)
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversation_claims (
+                handle TEXT PRIMARY KEY,
+                claim_id TEXT NOT NULL UNIQUE,
+                device_id TEXT NOT NULL,
+                room_id TEXT NOT NULL,
+                wake_mapping_id TEXT NOT NULL,
+                profile_id TEXT NOT NULL,
+                configuration_revision INTEGER NOT NULL,
+                credential_generation INTEGER,
+                session_id TEXT,
+                status TEXT NOT NULL,
+                activity TEXT NOT NULL,
+                idle_deadline REAL,
+                close_reason TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        # A Home process restart ends active conversations. Route transport
+        # reconnects within this process still resolve the same durable claim.
+        self._connection.execute(
+            "UPDATE conversation_claims SET status = 'closed', "
+            "activity = 'closed', idle_deadline = NULL, "
+            "close_reason = 'service_restart' WHERE status = 'active'"
+        )
+        self._connection.commit()
+        self._timers: dict[str, Timer] = {}
+
+    def create_from_decision(
+        self,
+        decision: WakeDecision,
+        *,
+        credential_generation: int | None,
+    ) -> str:
+        if decision.decision != "granted":
+            raise ValueError("only a granted wake can create a conversation claim")
+        if credential_generation is not None and (
+            type(credential_generation) is not int or credential_generation < 1
+        ):
+            raise ValueError("credential generation must be a positive integer")
+        handle = _identifier(self._handle_factory(), "conversation handle")
+        now = _finite_time(self._clock())
+        first_open_deadline = now + self._first_open_timeout
+        with self._lock:
+            self._expire_due_locked(now)
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                active = self._connection.execute(
+                    "SELECT 1 FROM conversation_claims "
+                    "WHERE room_id = ? AND status = 'active' LIMIT 1",
+                    (decision.room_id,),
+                ).fetchone()
+                if active is not None:
+                    self._connection.rollback()
+                    raise ConversationClaimConflict("room has an active conversation")
+                self._connection.execute(
+                    """
+                    INSERT INTO conversation_claims (
+                        handle, claim_id, device_id, room_id, wake_mapping_id,
+                        profile_id, configuration_revision, credential_generation,
+                        session_id, status, activity, idle_deadline, close_reason,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'active', 'ready', ?, NULL, ?, ?)
+                    """,
+                    (
+                        handle,
+                        decision.claim_id,
+                        decision.device_id,
+                        decision.room_id,
+                        decision.wake_mapping_id,
+                        decision.profile_id,
+                        decision.configuration_revision,
+                        credential_generation,
+                        first_open_deadline,
+                        now,
+                        now,
+                    ),
+                )
+                self._connection.commit()
+            except sqlite3.IntegrityError as error:
+                self._connection.rollback()
+                raise ConversationClaimConflict(
+                    "wake claim was already used"
+                ) from error
+            except sqlite3.Error as error:
+                self._connection.rollback()
+                raise OSError("cannot create Home conversation claim") from error
+            self._schedule_timer_locked(handle, first_open_deadline, now)
+        return handle
 
     def resolve(self, handle: str, device_id: str) -> ConversationGrant | None:
         with self._lock:
-            self._grants = self._load()
-            grant = self._grants.get(handle)
-            if grant is None or grant.device_id != device_id:
+            try:
+                row = self._connection.execute(
+                    "SELECT device_id, room_id, wake_mapping_id, profile_id, "
+                    "session_id, status, idle_deadline, credential_generation, activity "
+                    "FROM conversation_claims WHERE handle = ?",
+                    (handle,),
+                ).fetchone()
+            except sqlite3.Error as error:
+                raise OSError("cannot read Home conversation claim") from error
+            if row is None or row[0] != device_id or row[5] != "active":
                 return None
-            return grant
+            now = _finite_time(self._clock())
+            if row[6] is not None and now >= row[6]:
+                reason = "first_open_expired" if row[8] == "ready" else "idle_expired"
+                self._close_locked(handle, reason, now)
+                return None
+            try:
+                snapshot = self._configuration()
+                profiles = {profile["id"]: profile for profile in snapshot["profiles"]}
+                profile = profiles.get(row[3])
+                if profile is None or not profile["available"]:
+                    self._close_locked(handle, "profile_revoked", now)
+                    return None
+                mappings = {
+                    mapping["id"]: mapping for mapping in snapshot["wake_mappings"]
+                }
+                current_mapping = mappings.get(row[2])
+                if current_mapping is not None and not current_mapping["active"]:
+                    self._close_locked(handle, "mapping_revoked", now)
+                    return None
+            except ConfigurationMigrationRequired:
+                self._close_locked(handle, "configuration_migration", now)
+                return None
+            except ConfigurationStoreError as error:
+                raise OSError("cannot verify Home conversation authority") from error
+            except KeyError, RuntimeError, TypeError, ValueError:
+                return None
+            return ConversationGrant(
+                handle=handle,
+                device_id=device_id,
+                profile_id=row[3],
+                session_id=row[4],
+                status="active",
+                credential_generation=row[7],
+            )
 
     def persist_session(self, grant: ConversationGrant, session_id: str) -> None:
         if not isinstance(session_id, str) or not session_id.strip():
             raise ValueError("durable Standard session ID must be non-empty")
         with self._lock:
-            grants = self._load()
-            current = grants.get(grant.handle)
-            if current is None:
-                raise ValueError("conversation grant is no longer present")
-            if (
-                current.device_id != grant.device_id
-                or current.profile_id != grant.profile_id
-                or current.status != grant.status
-            ):
-                raise ValueError("conversation grant binding changed")
-            grants[grant.handle] = replace(current, session_id=session_id)
-            self._write(grants)
-            self._grants = grants
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                row = self._connection.execute(
+                    "SELECT device_id, profile_id, session_id, status, "
+                    "credential_generation "
+                    "FROM conversation_claims WHERE handle = ?",
+                    (grant.handle,),
+                ).fetchone()
+                if (
+                    row is None
+                    or row[0] != grant.device_id
+                    or row[1] != grant.profile_id
+                ):
+                    raise ValueError("conversation claim binding changed")
+                if row[4] != grant.credential_generation:
+                    raise ValueError("conversation credential generation changed")
+                if row[3] != "active":
+                    raise ValueError("conversation claim is no longer active")
+                if row[2] not in (None, session_id):
+                    raise ValueError("conversation claim Session changed")
+                other_session = self._connection.execute(
+                    "SELECT 1 FROM conversation_claims WHERE session_id = ? "
+                    "AND status = 'active' AND handle != ? LIMIT 1",
+                    (session_id, grant.handle),
+                ).fetchone()
+                if other_session is not None:
+                    raise ValueError("Standard Session is already bound to a claim")
+                self._connection.execute(
+                    "UPDATE conversation_claims SET session_id = ?, updated_at = ? "
+                    "WHERE handle = ? AND status = 'active'",
+                    (session_id, _finite_time(self._clock()), grant.handle),
+                )
+                self._connection.commit()
+            except ValueError:
+                self._connection.rollback()
+                raise
+            except sqlite3.Error as error:
+                self._connection.rollback()
+                raise OSError("cannot persist Home conversation Session") from error
 
-    def _load(self) -> dict[str, ConversationGrant]:
-        try:
-            document = json.loads(self._path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
-            raise ValueError("cannot read conversation grants file") from error
-        if not isinstance(document, Mapping) or set(document) != {"schema", "grants"}:
-            raise ValueError("conversation grants file has invalid fields")
-        if document["schema"] != GRANT_FILE_SCHEMA:
-            raise ValueError("conversation grants file has an unsupported schema")
-        raw_grants = document["grants"]
-        if not isinstance(raw_grants, list) or len(raw_grants) > MAX_GRANTS:
-            raise ValueError("conversation grants file has too many grants")
+    def mark_open(self, handle: str, device_id: str) -> None:
+        """Clear the first-open deadline after a Standard Session is ready."""
 
-        grants: dict[str, ConversationGrant] = {}
-        for raw in raw_grants:
-            if not isinstance(raw, Mapping):
-                raise TypeError("conversation grant must be an object")
-            expected = {"handle", "device_id", "profile_id", "status"}
-            optional = {"session_id"}
-            if set(raw) - expected - optional or expected - set(raw):
-                raise ValueError("conversation grant has invalid fields")
-            handle = _identifier(raw["handle"], "conversation handle")
-            device_id = _identifier(raw["device_id"], "device ID")
-            profile_id = _identifier(raw["profile_id"], "Profile ID")
-            status = raw["status"]
-            if status not in {"active", "revoked", "closed"}:
-                raise ValueError("conversation grant has an invalid status")
-            session_id = raw.get("session_id")
-            if session_id in (None, ""):
-                normalized_session_id = None
-            else:
-                normalized_session_id = _identifier(session_id, "durable session ID")
-            if handle in grants:
-                raise ValueError("conversation grants file has duplicate handles")
-            grants[handle] = ConversationGrant(
-                handle=handle,
-                device_id=device_id,
-                profile_id=profile_id,
-                session_id=normalized_session_id,
-                status=status,
-            )
-        return grants
+        now = _finite_time(self._clock())
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                row = self._connection.execute(
+                    "SELECT status, activity, idle_deadline FROM conversation_claims "
+                    "WHERE handle = ? AND device_id = ?",
+                    (handle, device_id),
+                ).fetchone()
+                if row is None or row[0] != "active":
+                    self._connection.rollback()
+                    raise ValueError("conversation claim is no longer active")
+                if row[2] is not None and now >= row[2]:
+                    reason = (
+                        "first_open_expired" if row[1] == "ready" else "idle_expired"
+                    )
+                    self._connection.execute(
+                        "UPDATE conversation_claims SET status = 'closed', "
+                        "activity = 'closed', idle_deadline = NULL, "
+                        "close_reason = ?, updated_at = ? "
+                        "WHERE handle = ? AND status = 'active'",
+                        (reason, now, handle),
+                    )
+                    self._connection.commit()
+                    self._cancel_timer_locked(handle)
+                    raise ValueError("conversation claim has expired")
+                self._connection.execute(
+                    "UPDATE conversation_claims SET activity = 'open', "
+                    "idle_deadline = NULL, updated_at = ? "
+                    "WHERE handle = ? AND status = 'active'",
+                    (now, handle),
+                )
+                self._connection.commit()
+            except ValueError:
+                if self._connection.in_transaction:
+                    self._connection.rollback()
+                raise
+            except sqlite3.Error as error:
+                self._connection.rollback()
+                raise OSError("cannot mark Home conversation open") from error
+            self._cancel_timer_locked(handle)
 
-    def _write(self, grants: Mapping[str, ConversationGrant]) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        document = {
-            "schema": GRANT_FILE_SCHEMA,
-            "grants": [
-                _grant_record(grant)
-                for grant in sorted(grants.values(), key=lambda item: item.handle)
-            ],
-        }
-        temporary_path: str | None = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=self._path.parent,
-                prefix=f".{self._path.name}.",
-                suffix=".tmp",
-                delete=False,
-            ) as stream:
-                temporary_path = stream.name
-                os.chmod(temporary_path, 0o600)
-                json.dump(document, stream, ensure_ascii=False, separators=(",", ":"))
-                stream.write("\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary_path, self._path)
-        except OSError as error:
-            raise OSError("cannot persist conversation grants file") from error
-        finally:
-            if temporary_path is not None:
+    def register_revocation_handler(
+        self,
+        handle: str,
+        handler: Callable[[str], None],
+    ) -> bool:
+        if not callable(handler):
+            raise TypeError("revocation handler must be callable")
+        now = _finite_time(self._clock())
+        with self._lock:
+            try:
+                row = self._connection.execute(
+                    "SELECT status, activity, idle_deadline FROM conversation_claims "
+                    "WHERE handle = ?",
+                    (handle,),
+                ).fetchone()
+                if row is None or row[0] != "active":
+                    return False
+                if row[2] is not None and now >= row[2]:
+                    reason = (
+                        "first_open_expired" if row[1] == "ready" else "idle_expired"
+                    )
+                    self._connection.execute(
+                        "UPDATE conversation_claims SET status = 'closed', "
+                        "activity = 'closed', idle_deadline = NULL, "
+                        "close_reason = ?, updated_at = ? "
+                        "WHERE handle = ? AND status = 'active'",
+                        (reason, now, handle),
+                    )
+                    self._connection.commit()
+                    self._cancel_timer_locked(handle)
+                    return False
+            except sqlite3.Error as error:
+                raise OSError("cannot register Home conversation revocation") from error
+            self._revocation_handlers.setdefault(handle, set()).add(handler)
+            return True
+
+    def unregister_revocation_handler(
+        self,
+        handle: str,
+        handler: Callable[[str], None],
+    ) -> None:
+        with self._lock:
+            handlers = self._revocation_handlers.get(handle)
+            if handlers is None:
+                return
+            handlers.discard(handler)
+            if not handlers:
+                self._revocation_handlers.pop(handle, None)
+
+    def on_revoked(self, event: RevocationEvent) -> None:
+        """Interrupt active work after durable credential revocation."""
+
+        self.close_device_claims(
+            event.device_id,
+            current_generation=None,
+            reason="endpoint_revoked",
+        )
+
+    def record_activity(self, handle: str, device_id: str, state: str) -> None:
+        if state not in {
+            "capture",
+            "turn",
+            "playback",
+            "response_ready",
+            "playback_complete",
+            "idle",
+        }:
+            raise ValueError("conversation activity state is invalid")
+        now = _finite_time(self._clock())
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                row = self._connection.execute(
+                    "SELECT activity, status, idle_deadline FROM conversation_claims WHERE handle = ? "
+                    "AND device_id = ?",
+                    (handle, device_id),
+                ).fetchone()
+            except sqlite3.Error as error:
+                self._connection.rollback()
+                raise OSError("cannot read Home conversation activity") from error
+            if row is None or row[1] != "active":
+                self._connection.rollback()
+                raise ValueError("conversation claim is no longer active")
+            if row[2] is not None and now >= row[2]:
+                reason = "first_open_expired" if row[0] == "ready" else "idle_expired"
                 try:
-                    os.unlink(temporary_path)
-                except FileNotFoundError:
-                    pass
-                except OSError:
-                    pass
+                    self._connection.execute(
+                        "UPDATE conversation_claims SET status = 'closed', "
+                        "activity = 'closed', idle_deadline = NULL, "
+                        "close_reason = ?, updated_at = ? "
+                        "WHERE handle = ? AND status = 'active'",
+                        (reason, now, handle),
+                    )
+                    self._connection.commit()
+                except sqlite3.Error as error:
+                    self._connection.rollback()
+                    raise OSError("cannot expire Home conversation activity") from error
+                self._cancel_timer_locked(handle)
+                raise ValueError("conversation claim has expired")
+            if state == "playback_complete" and row[0] not in {
+                "playback",
+                "response_ready",
+            }:
+                self._connection.rollback()
+                raise ValueError("playback completion was not pending")
+            if state in {"playback_complete", "idle"}:
+                idle_deadline = now + self._idle_timeout
+                activity = "idle" if state in {"playback_complete", "idle"} else state
+            else:
+                idle_deadline = None
+                activity = state
+            try:
+                cursor = self._connection.execute(
+                    "UPDATE conversation_claims SET activity = ?, idle_deadline = ?, "
+                    "updated_at = ? WHERE handle = ? AND status = 'active' "
+                    "AND (idle_deadline IS NULL OR idle_deadline > ?)",
+                    (activity, idle_deadline, now, handle, now),
+                )
+                if cursor.rowcount != 1:
+                    self._connection.rollback()
+                    raise ValueError("conversation claim has expired")
+                self._connection.commit()
+            except ValueError:
+                if self._connection.in_transaction:
+                    self._connection.rollback()
+                raise
+            except sqlite3.Error as error:
+                self._connection.rollback()
+                raise OSError("cannot update Home conversation activity") from error
+            self._cancel_timer_locked(handle)
+            if idle_deadline is not None:
+                self._schedule_timer_locked(handle, idle_deadline, now)
+
+    def close_claim(
+        self,
+        handle: str,
+        device_id: str | None = None,
+        *,
+        reason: str = "stopped",
+    ) -> bool:
+        now = _finite_time(self._clock())
+        with self._lock:
+            try:
+                if device_id is None:
+                    row = self._connection.execute(
+                        "SELECT 1 FROM conversation_claims WHERE handle = ?",
+                        (handle,),
+                    ).fetchone()
+                else:
+                    row = self._connection.execute(
+                        "SELECT 1 FROM conversation_claims WHERE handle = ? AND device_id = ?",
+                        (handle, device_id),
+                    ).fetchone()
+            except sqlite3.Error as error:
+                raise OSError("cannot read Home conversation claim") from error
+            if row is None:
+                return False
+            self._close_locked(handle, reason, now)
+            return True
+
+    def close_device_claims(
+        self,
+        device_id: str,
+        *,
+        current_generation: int | None,
+        reason: str,
+    ) -> int:
+        if current_generation is None:
+            return self._close_matching_claims(
+                "device_id = ?",
+                (device_id,),
+                reason,
+            )
+        return self._close_matching_claims(
+            "device_id = ? AND (credential_generation IS NULL "
+            "OR credential_generation != ?)",
+            (device_id, current_generation),
+            reason,
+        )
+
+    def close_profile_claims(
+        self,
+        profile_ids: Iterable[str],
+        *,
+        reason: str,
+    ) -> int:
+        identifiers = tuple(set(profile_ids))
+        if not identifiers:
+            return 0
+        placeholders = ", ".join("?" for _ in identifiers)
+        return self._close_matching_claims(
+            f"profile_id IN ({placeholders})",
+            identifiers,
+            reason,
+        )
+
+    def close_mapping_claims(
+        self,
+        mapping_ids: Iterable[str],
+        *,
+        reason: str,
+    ) -> int:
+        identifiers = tuple(set(mapping_ids))
+        if not identifiers:
+            return 0
+        placeholders = ", ".join("?" for _ in identifiers)
+        return self._close_matching_claims(
+            f"wake_mapping_id IN ({placeholders})",
+            identifiers,
+            reason,
+        )
+
+    def close_all_claims(self, *, reason: str) -> int:
+        return self._close_matching_claims("1 = 1", (), reason)
+
+    def _close_matching_claims(
+        self,
+        predicate: str,
+        values: tuple[object, ...],
+        reason: str,
+    ) -> int:
+        now = _finite_time(self._clock())
+        notifications: list[tuple[Callable[[str], None], str]] = []
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                handles = self._connection.execute(
+                    "SELECT handle FROM conversation_claims "
+                    f"WHERE status = 'active' AND ({predicate})",
+                    values,
+                ).fetchall()
+                if not handles:
+                    self._connection.commit()
+                    return 0
+                cursor = self._connection.execute(
+                    "UPDATE conversation_claims SET status = 'closed', "
+                    "activity = 'closed', idle_deadline = NULL, "
+                    "close_reason = ?, updated_at = ? "
+                    f"WHERE status = 'active' AND ({predicate})",
+                    (reason, now, *values),
+                )
+                self._connection.commit()
+            except sqlite3.Error as error:
+                self._connection.rollback()
+                raise OSError("cannot revoke Home conversation claims") from error
+            for (handle,) in handles:
+                self._cancel_timer_locked(handle)
+                for handler in self._revocation_handlers.pop(handle, set()):
+                    notifications.append((handler, reason))
+            closed_count = cursor.rowcount
+        for handler, close_reason in notifications:
+            try:
+                handler(close_reason)
+            except Exception:
+                LOGGER.exception("conversation claim revocation handler failed")
+        return closed_count
+
+    def _expire(self, handle: str, deadline: float) -> None:
+        now = _finite_time(self._clock())
+        with self._lock:
+            try:
+                self._connection.execute(
+                    "UPDATE conversation_claims SET status = 'closed', "
+                    "activity = 'closed', idle_deadline = NULL, "
+                    "close_reason = CASE WHEN activity = 'ready' "
+                    "THEN 'first_open_expired' ELSE 'idle_expired' END, updated_at = ? "
+                    "WHERE handle = ? AND status = 'active' AND idle_deadline = ? "
+                    "AND idle_deadline <= ?",
+                    (now, handle, deadline, now),
+                )
+                self._connection.commit()
+            except sqlite3.Error:
+                return
+            self._timers.pop(handle, None)
+
+    def _expire_due_locked(self, now: float) -> None:
+        try:
+            rows = self._connection.execute(
+                "SELECT handle FROM conversation_claims "
+                "WHERE status = 'active' AND idle_deadline IS NOT NULL AND idle_deadline <= ?",
+                (now,),
+            ).fetchall()
+            self._connection.execute(
+                "UPDATE conversation_claims SET status = 'closed', "
+                "activity = 'closed', idle_deadline = NULL, "
+                "close_reason = CASE WHEN activity = 'ready' "
+                "THEN 'first_open_expired' ELSE 'idle_expired' END, updated_at = ? "
+                "WHERE status = 'active' AND idle_deadline IS NOT NULL AND idle_deadline <= ?",
+                (now, now),
+            )
+            self._connection.commit()
+        except sqlite3.Error as error:
+            raise OSError("cannot expire Home conversation claims") from error
+        for (handle,) in rows:
+            self._cancel_timer_locked(handle)
+
+    def _close_locked(self, handle: str, reason: str, now: float) -> None:
+        try:
+            self._connection.execute(
+                "UPDATE conversation_claims SET status = 'closed', activity = 'closed', "
+                "close_reason = ?, idle_deadline = NULL, updated_at = ? "
+                "WHERE handle = ?",
+                (reason, now, handle),
+            )
+            self._connection.commit()
+        except sqlite3.Error as error:
+            raise OSError("cannot close Home conversation claim") from error
+        self._cancel_timer_locked(handle)
+        self._revocation_handlers.pop(handle, None)
+
+    def _cancel_timer_locked(self, handle: str) -> None:
+        timer = self._timers.pop(handle, None)
+        if timer is not None:
+            timer.cancel()
+
+    def _schedule_timer_locked(self, handle: str, deadline: float, now: float) -> None:
+        self._cancel_timer_locked(handle)
+        timer = Timer(
+            max(0.0, deadline - now),
+            self._expire,
+            args=(handle, deadline),
+        )
+        timer.daemon = True
+        self._timers[handle] = timer
+        timer.start()
+
+    def close(self) -> None:
+        with self._lock:
+            for timer in self._timers.values():
+                timer.cancel()
+            self._timers.clear()
+            self._revocation_handlers.clear()
+            self._connection.close()
 
 
 @dataclass(slots=True)
@@ -240,7 +711,7 @@ def create_standard_bridge_factory(
     *,
     gateway_url: str,
     hermes_token: str,
-    grants_file: Path,
+    conversation_store: ConversationGrantStore,
     device_authenticator,
     connect_timeout: float = 10.0,
     audio_timeout: float = 30.0,
@@ -250,7 +721,6 @@ def create_standard_bridge_factory(
     _validate_gateway_url(gateway_url)
     if not isinstance(hermes_token, str) or not hermes_token.strip():
         raise ValueError("Standard gateway token must be non-empty")
-    grant_store = ConversationGrantStore(grants_file)
     gateway_factory = WebsocketsJsonSocketFactory(open_timeout=connect_timeout)
     audio_factory = WebsocketsAudioSocketFactory(open_timeout=audio_timeout)
 
@@ -259,10 +729,15 @@ def create_standard_bridge_factory(
             gateway_url=gateway_url,
             hermes_token=hermes_token,
             device_authenticator=device_authenticator,
-            conversation_resolver=grant_store.resolve,
+            conversation_resolver=conversation_store.resolve,
             gateway_socket_factory=gateway_factory,
             audio_socket_factory=audio_factory,
-            session_persistor=grant_store.persist_session,
+            session_persistor=conversation_store.persist_session,
+            conversation_closer=conversation_store.close_claim,
+            activity_recorder=conversation_store.record_activity,
+            conversation_opener=conversation_store.mark_open,
+            revocation_registrar=conversation_store.register_revocation_handler,
+            revocation_unregistrar=conversation_store.unregister_revocation_handler,
             audio_timeout=audio_timeout,
         )
 
@@ -294,20 +769,27 @@ def _identifier(value: object, label: str) -> str:
     return normalized
 
 
-def _grant_record(grant: ConversationGrant) -> dict[str, object]:
-    record: dict[str, object] = {
-        "handle": grant.handle,
-        "device_id": grant.device_id,
-        "profile_id": grant.profile_id,
-        "status": grant.status,
-    }
-    if grant.session_id is not None:
-        record["session_id"] = grant.session_id
-    return record
+def _finite_time(value: object) -> float:
+    if type(value) not in (int, float):
+        raise ValueError("conversation clock value must be finite")
+    try:
+        normalized = float(value)
+    except (OverflowError, ValueError) as error:
+        raise ValueError("conversation clock value must be finite") from error
+    if not isfinite(normalized):
+        raise ValueError("conversation clock value must be finite")
+    return normalized
+
+
+def _positive_timeout(value: object) -> float:
+    normalized = _finite_time(value)
+    if normalized <= 0:
+        raise ValueError("conversation idle timeout must be positive")
+    return normalized
 
 
 __all__ = [
-    "GRANT_FILE_SCHEMA",
+    "ConversationClaimConflict",
     "ConversationGrantStore",
     "WebsocketsAudioSocket",
     "WebsocketsAudioSocketFactory",

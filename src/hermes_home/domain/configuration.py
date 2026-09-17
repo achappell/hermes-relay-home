@@ -3,13 +3,22 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from unicodedata import normalize
 
-CONFIGURATION_KEYS = frozenset({"rooms", "wake_mappings", "devices"})
+CONFIGURATION_KEYS = frozenset({"rooms", "profiles", "wake_mappings", "devices"})
 SNAPSHOT_KEYS = CONFIGURATION_KEYS | {"revision"}
 
 
 class ConfigurationValidationError(ValueError):
     """Raised when a configuration does not satisfy the Home contract."""
+
+
+class ConfigurationMigrationRequired(RuntimeError):
+    """Raised when stored configuration needs an explicit new-shape publish."""
+
+    def __init__(self, current_revision: int) -> None:
+        self.current_revision = current_revision
+        super().__init__("configuration requires an explicit migration publish")
 
 
 def validate_candidate(candidate: Mapping[str, object]) -> dict[str, object]:
@@ -18,13 +27,13 @@ def validate_candidate(candidate: Mapping[str, object]) -> dict[str, object]:
     _require_keys(candidate, CONFIGURATION_KEYS, "configuration")
 
     rooms = _validate_named_entities(candidate["rooms"], "rooms")
-    wake_mappings = _validate_named_entities(
-        candidate["wake_mappings"], "wake_mappings"
-    )
+    profiles = _validate_profiles(candidate["profiles"])
+    wake_mappings = _validate_wake_mappings(candidate["wake_mappings"], profiles)
     devices = _validate_devices(candidate["devices"], rooms)
 
     return {
         "rooms": rooms,
+        "profiles": profiles,
         "wake_mappings": wake_mappings,
         "devices": devices,
     }
@@ -43,6 +52,7 @@ def validate_snapshot(snapshot: Mapping[str, object]) -> dict[str, object]:
     candidate = validate_candidate(
         {
             "rooms": snapshot["rooms"],
+            "profiles": snapshot["profiles"],
             "wake_mappings": snapshot["wake_mappings"],
             "devices": snapshot["devices"],
         }
@@ -69,6 +79,88 @@ def _validate_named_entities(value: object, field: str) -> list[dict[str, str]]:
     return entities
 
 
+def _validate_profiles(value: object) -> list[dict[str, object]]:
+    if type(value) is not list:
+        raise ConfigurationValidationError("profiles must be an array")
+
+    profiles: list[dict[str, object]] = []
+    seen_ids: set[str] = set()
+    for index, profile in enumerate(value):
+        path = f"profiles[{index}]"
+        _require_mapping(profile, path)
+        _require_keys(profile, {"id", "name", "available"}, path)
+        profile_id = _require_id(profile["id"], f"{path}.id")
+        name = _require_name(profile["name"], f"{path}.name")
+        available = profile["available"]
+        if type(available) is not bool:
+            raise ConfigurationValidationError(f"{path}.available must be a boolean")
+        if profile_id in seen_ids:
+            raise ConfigurationValidationError(
+                f"duplicate id {profile_id!r} in profiles"
+            )
+        seen_ids.add(profile_id)
+        profiles.append({"id": profile_id, "name": name, "available": available})
+    return profiles
+
+
+def _validate_wake_mappings(
+    value: object,
+    profiles: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    if type(value) is not list:
+        raise ConfigurationValidationError("wake_mappings must be an array")
+
+    profile_ids = {profile["id"] for profile in profiles}
+    seen_ids: set[str] = set()
+    phrases: dict[str, str] = {}
+    mappings: list[dict[str, object]] = []
+    for index, mapping in enumerate(value):
+        path = f"wake_mappings[{index}]"
+        _require_mapping(mapping, path)
+        _require_keys(mapping, {"id", "phrase", "profile_id", "active"}, path)
+        mapping_id = _require_id(mapping["id"], f"{path}.id")
+        phrase = _require_name(mapping["phrase"], f"{path}.phrase")
+        profile_id = _require_id(mapping["profile_id"], f"{path}.profile_id")
+        active = mapping["active"]
+        if type(active) is not bool:
+            raise ConfigurationValidationError(f"{path}.active must be a boolean")
+        if mapping_id in seen_ids:
+            raise ConfigurationValidationError(
+                f"duplicate id {mapping_id!r} in wake_mappings"
+            )
+        if profile_id not in profile_ids:
+            raise ConfigurationValidationError(
+                f"{path}.profile_id references unknown profile {profile_id!r}"
+            )
+        normalized_phrase = _normalize_phrase(phrase)
+        if not normalized_phrase:
+            raise ConfigurationValidationError(
+                f"{path}.phrase must contain a non-whitespace wake phrase"
+            )
+        if active:
+            previous_profile = phrases.get(normalized_phrase)
+            if previous_profile is not None:
+                raise ConfigurationValidationError(
+                    f"{path}.phrase duplicates an active wake phrase"
+                )
+            phrases[normalized_phrase] = profile_id
+
+        seen_ids.add(mapping_id)
+        mappings.append(
+            {
+                "id": mapping_id,
+                "phrase": phrase,
+                "profile_id": profile_id,
+                "active": active,
+            }
+        )
+    return mappings
+
+
+def _normalize_phrase(value: str) -> str:
+    return " ".join(normalize("NFKC", value).split()).casefold()
+
+
 def _validate_devices(
     value: object,
     rooms: list[dict[str, str]],
@@ -81,14 +173,7 @@ def _validate_devices(
     priorities_by_room: dict[str, set[int]] = {}
     devices: list[dict[str, object]] = []
 
-    required_keys = {
-        "id",
-        "name",
-        "room_id",
-        "profile_id",
-        "priority",
-        "capabilities",
-    }
+    required_keys = {"id", "name", "room_id", "priority", "capabilities"}
     for index, device in enumerate(value):
         path = f"devices[{index}]"
         _require_mapping(device, path)
@@ -96,7 +181,6 @@ def _validate_devices(
         device_id = _require_id(device["id"], f"{path}.id")
         name = _require_name(device["name"], f"{path}.name")
         room_id = _require_id(device["room_id"], f"{path}.room_id")
-        profile_id = _require_id(device["profile_id"], f"{path}.profile_id")
         priority = device["priority"]
         if type(priority) is not int or priority < 1:
             raise ConfigurationValidationError(
@@ -129,7 +213,6 @@ def _validate_devices(
                 "id": device_id,
                 "name": name,
                 "room_id": room_id,
-                "profile_id": profile_id,
                 "priority": priority,
                 "capabilities": {"wake_claim": wake_claim},
             }
