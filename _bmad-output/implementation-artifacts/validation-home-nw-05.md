@@ -3,7 +3,7 @@ story: HOME-NW-05
 status: verified
 validated: 2026-09-16
 baseline_commit: eb950026ce591179c0d2c4c6069c01c09cfc3fee
-tested_on_main: 142317a8542c2e3263d1d173e087d069f1f0805d
+tested_on_main: f512c00132c277f78efdbb1cb9ed9040edf2055a
 ---
 
 # HOME-NW-05 validation record
@@ -42,22 +42,25 @@ endpoint audio, or deployment validation.
 ## Tested source revision
 
 The worktree began at main commit
-`eb950026ce591179c0d2c4c6069c01c09cfc3fee`. While implementation was in
-progress, main advanced with the HOME-NW-06 diagnostics follow-up. This branch
-was fast-forwarded and the HOME-NW-05 work restored on top of current main
-`142317a8542c2e3263d1d173e087d069f1f0805d`; checks below were rerun there. The
-canonical worktree was not modified.
+`eb950026ce591179c0d2c4c6069c01c09cfc3fee`. The HOME-NW-05 implementation was
+first checked on main `142317a8542c2e3263d1d173e087d069f1f0805d`. Main then
+advanced to `f512c00132c277f78efdbb1cb9ed9040edf2055a`, adding the pilot session
+recovery and Home issue-tracking work. This resolution worktree merges that
+main revision into PR head `792bd73c5eacac9f909787665123739ca9636c65`; the
+Standard bridge and test conflicts retain both the Home claim checks and
+main's deferred session binding and idle-poll recovery. Checks below were
+rerun on the merged tree. The canonical worktree was not modified.
 
 ## Observed checks
 
 | Check | Exact command | Recorded result |
 | --- | --- | --- |
-| Focused HOME-NW-05 suite | `uv run pytest -q tests/test_api_application.py tests/test_arbitration.py tests/test_bridge_endpoint.py tests/test_configuration_validation.py tests/test_credentials_api.py tests/test_http_server.py tests/test_production_bridge.py tests/test_runtime.py tests/test_sqlite_configuration_store.py tests/test_standard_bridge.py tests/test_windows_deployment.py` | `232 passed in 3.23s` |
-| Full Home test suite | `uv run pytest -q` | `381 passed in 3.98s` |
-| Python runtime | `uv run python --version` | `Python 3.14.7` |
+| Focused merged bridge and Home workflow tests | `uv run --python 3.14 --locked --extra dev pytest -q tests/test_standard_bridge.py tests/test_bridge_endpoint.py tests/test_bridge_server.py tests/test_home_issue_tracking.py tests/test_home_issue_tracking_workflows.py tests/test_observability_artifacts.py` | `179 passed in 2.98s` |
+| Full Home test suite | `uv run --python 3.14 --locked --extra dev pytest -q` | `428 passed in 6.31s` |
+| Python runtime | `uv run --python 3.14 --locked --extra dev python --version` | `Python 3.14.7` |
 | Ruff lint | `uvx ruff check src tests` | `All checks passed!` |
-| Ruff format | `uvx ruff format --check src tests` | `49 files already formatted` |
-| Lockfile check | `uv lock --check` | Passed; `uv` resolved 11 packages |
-| Diff whitespace check | `git diff --check` | Passed; no output |
+| Ruff format | `uvx ruff format --check src tests` | `51 files already formatted` |
+| Lockfile check | `uv lock --check` | Passed; `uv` resolved 11 packages in 25 ms |
+| Diff whitespace check | `git diff --cached --check` | Passed; no output |
 
 No credentials, `.env` files, or generated local state were added.

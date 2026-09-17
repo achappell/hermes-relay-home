@@ -19,8 +19,18 @@ contract. It is a BMAD delivery surface, not the product-planning authority.
   context for applicability, ownership, evidence, and dependencies; it is not
   Home's status authority.
 
-The external ticket board is paused. Until the maintainer explicitly reopens
-it, do not inspect, create, edit, move, delete, or reconcile board tickets.
+The external Hermes Home GitHub Issues board is active for Home story work.
+Use the issue URLs recorded in `story-index.yaml`; agents may inspect and update
+those Home-owned issues, including labels, comments, and status. Create an issue
+only when the local story record has no existing issue URL. Keep changes scoped
+to Hermes Home; do not reconcile tickets in other repositories. The local
+`sprint-status.yaml` remains the delivery-status authority.
+
+Home-owned BMAD workflow sources live in
+`_bmad/custom/home-issue-tracking/workflows/`. After refreshing the shared
+issue-tracking setup files, run `scripts/apply_home_issue_tracking_overrides.sh`
+to copy those sources into BMAD's generated workflow directory. Do not edit the
+shared skill for Home-specific changes.
 
 Keep changes in a clean, focused branch or worktree, preserve unrelated local
 edits, and review staged paths before committing. Never commit credentials,
