@@ -29,9 +29,20 @@ Validated 2026-09-17 in the
   `protocol_error`, then `transport_timeout`, and marked the turn unconfirmed.
   This proves server-side completion but not delivery to the app. The prompt
   was not resent.
+- After the iOS open-response decoder fix, the rebuilt signed-in Xcode app
+  reconnected and reached Home Ready. The old turn remains visibly unconfirmed.
+  A later, different composer submission was blocked by the app's recovery
+  guard before it was sent; the original prompt was not resent.
+- Inspection of the Home terminal contract found that Standard's successful
+  `message.complete` event carried the completed status and final text, while
+  the iOS normalizer did not emit `turnComplete`. The iOS follow-up maps that
+  status into a terminal event while preserving nonterminal `message.complete`
+  events for continued streaming. Its focused regression, all 431 iOS tests,
+  and the macOS build pass.
 
-The end-to-end turn is not yet validated. The Home side completed it, but the
-signed-in app did not render the response. The iOS follow-up currently covers
-the Home open response shape seen during an active turn; it must pass its
-focused and full test suites and be exercised before claiming the spinner or
-delivery issue is fixed.
+The single live turn is not end-to-end confirmed: Home recorded acceptance,
+terminal completion, and audio completion, but the app never rendered that
+reply. The updated app now reconnects cleanly, and the missing terminal mapping
+has a regression test. A fresh live turn could not be tested because the app
+keeps the earlier unconfirmed turn protected from replacement or resubmission.
+The post-response spinner behavior still needs one clean live turn to verify.
