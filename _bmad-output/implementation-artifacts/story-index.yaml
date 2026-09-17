@@ -39,6 +39,8 @@ stories:
     title: Add household Profile mappings and conversation claims
     kind: next-wave
     spec: _bmad-output/specs/spec-profile-mapping-conversation-claims/SPEC.md
+    implementation_spec: _bmad-output/implementation-artifacts/spec-home-nw-05-profile-mappings-conversation-claims.md
+    validation: _bmad-output/implementation-artifacts/validation-home-nw-05.md
     github_issue: https://github.com/achappell/hermes-relay-home/issues/15
     horizon: next
   - id: HOME-NW-06

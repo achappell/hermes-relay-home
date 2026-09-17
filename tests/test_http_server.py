@@ -37,6 +37,7 @@ def test_loopback_server_exposes_the_configuration_contract(tmp_path) -> None:
             "snapshot": {
                 "revision": 0,
                 "rooms": [],
+                "profiles": [],
                 "wake_mappings": [],
                 "devices": [],
             },

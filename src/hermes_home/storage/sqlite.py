@@ -9,6 +9,7 @@ from pathlib import Path
 from threading import RLock
 
 from hermes_home.domain.configuration import (
+    ConfigurationMigrationRequired,
     ConfigurationValidationError,
     validate_candidate,
     validate_snapshot,
@@ -17,6 +18,7 @@ from hermes_home.domain.configuration import (
 _EMPTY_CONFIGURATION = {
     "revision": 0,
     "rooms": [],
+    "profiles": [],
     "wake_mappings": [],
     "devices": [],
 }
@@ -68,6 +70,13 @@ class SQLiteConfigurationStore:
                 snapshot = json.loads(row[1])
                 if not isinstance(snapshot, dict) or snapshot.get("revision") != row[0]:
                     raise RuntimeError("configuration revision is inconsistent")
+                devices = snapshot.get("devices")
+                legacy_device_profile = isinstance(devices, list) and any(
+                    isinstance(device, Mapping) and "profile_id" in device
+                    for device in devices
+                )
+                if "profiles" not in snapshot or legacy_device_profile:
+                    raise ConfigurationMigrationRequired(row[0])
                 return validate_snapshot(snapshot)
         except sqlite3.Error as error:
             raise ConfigurationStoreError(

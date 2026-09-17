@@ -85,4 +85,3 @@ PowerShell turning stderr into a fatal error, and propagate the exit code.
   session ID still fail until cleared; Home cannot distinguish that from a
   genuinely stored Session that Standard rejects. Settled by a Standard error
   code that distinguishes "not found".
-

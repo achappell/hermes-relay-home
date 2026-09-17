@@ -68,42 +68,34 @@ The installer never creates that root secret. Without it, and without the
 legacy `-DeviceCredentialsFile` option, endpoint authentication remains
 disabled. The two credential modes cannot be supplied together.
 
-## Standard-backed pilot bridge
+## Standard-backed bridge
 
-For Sprint 1 live-gate evidence, the Home route can use one dedicated Standard
-gateway target and an operator-managed conversation-grant file. This is a
-bounded deployment seam while HOME-NW-05 builds the durable Profile and claim
-API; it is not a replacement for that story.
+The Home route uses one dedicated Standard gateway target. Home creates each
+conversation claim after a device wins arbitration and stores the claim and
+its Standard Session binding in the Home SQLite database. There is no separate
+conversation-grant file.
 
 Create the Standard server token on the Standard host, create the paired Home
-root secret on CaticornQueen, and pass the three pilot settings together:
+root secret on CaticornQueen, and pass the gateway and token settings together:
 
 ```powershell
 .\install.ps1 -WheelPath $wheel.FullName `
   -CredentialRootSecretFile C:\ProgramData\HermesHome\secrets\credential-root `
   -StandardGatewayUrl 'wss://media-server.<tailnet>/api/ws' `
-  -StandardTokenFile C:\ProgramData\HermesHome\secrets\standard-token `
-  -ConversationGrantsFile C:\ProgramData\HermesHome\secrets\conversation-grants.json
+  -StandardTokenFile C:\ProgramData\HermesHome\secrets\standard-token
 ```
 
 The Standard token file is read by the Home process and never placed in an
-endpoint response. The grants file is server-side JSON with this shape:
+endpoint response. Home checks the paired Device credential and the exact
+Wake Mapping grant, then opens an independent Standard Session for the resolved
+Profile. The default idle timeout is 8 seconds after playback completion; set
+`-ConversationIdleTimeoutSeconds` to change it.
 
-```json
-{"schema":1,"grants":[{"handle":"<opaque-handle>","device_id":"<home-device-id>","profile_id":"amanda","status":"active"}]}
-```
-
-Home verifies the paired Device credential, resolves the opaque handle, opens
-Standard with `source=home` and the selected Profile, and records the durable
-Standard session ID back into the same file. Keep the file ACL restricted to
-SYSTEM and local administrators. The installer creates an empty registry when
-the path does not exist, but it does not invent device IDs, handles, Profiles,
-or credentials.
-
-The three settings are all-or-nothing. Removing them on a later install clears
-the machine environment and returns the route to the safe unavailable bridge.
-The route remains tailnet-only; a connected physical Android device and an
-approved live Profile are still required for the final audio/reconnect proof.
+The gateway and token settings are all-or-nothing. Removing them on a later
+install clears the machine environment and returns the route to the safe
+unavailable bridge. The route remains tailnet-only; a connected physical
+Android device and an approved live Profile are still required for the final
+audio/reconnect proof.
 
 The installer is idempotent: it preserves the existing admin token, replaces only its marked
 Prometheus job, validates the candidate configuration with `promtool`, saves a

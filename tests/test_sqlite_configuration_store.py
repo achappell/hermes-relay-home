@@ -1,20 +1,32 @@
+import json
 import threading
 from copy import deepcopy
 
 import pytest
 
 from hermes_home.domain.configuration import ConfigurationValidationError
-from hermes_home.storage.sqlite import RevisionConflict, SQLiteConfigurationStore
+from hermes_home.storage.sqlite import (
+    ConfigurationMigrationRequired,
+    RevisionConflict,
+    SQLiteConfigurationStore,
+)
 
 VALID_CANDIDATE = {
     "rooms": [{"id": "kitchen", "name": "Kitchen"}],
-    "wake_mappings": [{"id": "hey-hermes", "name": "Hey Hermes"}],
+    "profiles": [{"id": "family", "name": "Family", "available": True}],
+    "wake_mappings": [
+        {
+            "id": "hey-hermes",
+            "phrase": "Hey Hermes",
+            "profile_id": "family",
+            "active": True,
+        }
+    ],
     "devices": [
         {
             "id": "puck-kitchen",
             "name": "Kitchen Puck",
             "room_id": "kitchen",
-            "profile_id": "family",
             "priority": 1,
             "capabilities": {"wake_claim": True},
         }
@@ -29,6 +41,7 @@ def test_new_store_returns_empty_revision_zero_configuration(tmp_path) -> None:
         assert store.read() == {
             "revision": 0,
             "rooms": [],
+            "profiles": [],
             "wake_mappings": [],
             "devices": [],
         }
@@ -98,6 +111,7 @@ def test_invalid_publish_is_rejected_without_mutating_active_configuration(
         assert store.read() == {
             "revision": 0,
             "rooms": [],
+            "profiles": [],
             "wake_mappings": [],
             "devices": [],
         }
@@ -116,6 +130,41 @@ def test_reopened_store_recovers_the_last_committed_configuration(tmp_path) -> N
         assert reopened.read() == committed
     finally:
         reopened.close()
+
+
+def test_legacy_device_profile_snapshot_requires_trusted_publish(tmp_path) -> None:
+    store = SQLiteConfigurationStore(tmp_path / "home.sqlite3")
+    legacy = {
+        "revision": 7,
+        "rooms": [{"id": "kitchen", "name": "Kitchen"}],
+        "mappings": [{"id": "amanda", "name": "Amanda"}],
+        "devices": [
+            {
+                "id": "puck-kitchen",
+                "name": "Kitchen Puck",
+                "room_id": "kitchen",
+                "profile_id": "amanda",
+                "priority": 1,
+                "capabilities": {"wake_claim": True},
+            }
+        ],
+    }
+    store._connection.execute(
+        "UPDATE configuration SET revision = ?, snapshot = ? WHERE id = 1",
+        (7, json.dumps(legacy)),
+    )
+    store._connection.commit()
+
+    try:
+        with pytest.raises(ConfigurationMigrationRequired) as raised:
+            store.read()
+        assert raised.value.current_revision == 7
+
+        published = store.replace(expected_revision=7, candidate=VALID_CANDIDATE)
+        assert published["revision"] == 8
+        assert store.read() == published
+    finally:
+        store.close()
 
 
 def test_expected_revision_must_be_a_non_negative_integer(tmp_path) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -49,7 +50,7 @@ class RuntimeSettings:
     standard_gateway_url: str | None = None
     standard_token_file: Path | None = None
     standard_token: str | None = field(default=None, repr=False)
-    conversation_grants_file: Path | None = None
+    conversation_idle_timeout_seconds: float = 8.0
 
     @property
     def auth_mode(self) -> str:
@@ -69,6 +70,7 @@ class HomeRuntime:
     diagnostics_store: SQLiteDiagnosticsStore
     diagnostics: DiagnosticsRecorder
     credential_store: SQLiteCredentialStore | None = None
+    conversation_store: object | None = field(default=None, repr=False)
     bridge_server: Server | None = None
     bridge_thread: Thread | None = field(default=None, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
@@ -87,6 +89,8 @@ class HomeRuntime:
         self.server.server_close()
         if self.credential_store is not None:
             self.credential_store.close()
+        if self.conversation_store is not None:
+            self.conversation_store.close()
         self.diagnostics_store.close()
         self.store.close()
 
@@ -156,26 +160,23 @@ def load_settings(
 
     standard_gateway_url = values.get("HERMES_HOME_STANDARD_GATEWAY_URL", "").strip()
     standard_token_file_value = values.get("HERMES_HOME_STANDARD_TOKEN_FILE", "")
-    grants_file_value = values.get("HERMES_HOME_CONVERSATION_GRANTS_FILE", "")
-    standard_configured = bool(
-        standard_gateway_url or standard_token_file_value or grants_file_value
-    )
-    if standard_configured and not (
-        standard_gateway_url and standard_token_file_value and grants_file_value
-    ):
+    standard_configured = bool(standard_gateway_url or standard_token_file_value)
+    if standard_configured and not (standard_gateway_url and standard_token_file_value):
         raise RuntimeConfigurationError(
-            "Standard bridge settings require gateway URL, token file, and grants file"
+            "Standard bridge settings require gateway URL and token file"
         )
+    conversation_idle_timeout_seconds = _positive_seconds_value(
+        values.get("HERMES_HOME_CONVERSATION_IDLE_TIMEOUT_SECONDS", "8")
+    )
     if standard_configured:
+        if device_credentials_file is None and credential_root_secret is None:
+            raise RuntimeConfigurationError(
+                "Standard bridge settings require paired or device credentials"
+            )
         standard_token_file = _path_value(
             standard_token_file_value,
             default=None,
             name="Standard token file",
-        )
-        conversation_grants_file = _path_value(
-            grants_file_value,
-            default=None,
-            name="conversation grants file",
         )
         try:
             standard_token = standard_token_file.read_text(encoding="utf-8").strip()
@@ -189,7 +190,6 @@ def load_settings(
         standard_gateway_url = None
         standard_token_file = None
         standard_token = None
-        conversation_grants_file = None
 
     return RuntimeSettings(
         data_dir=data_dir,
@@ -208,7 +208,7 @@ def load_settings(
         standard_gateway_url=standard_gateway_url,
         standard_token_file=standard_token_file,
         standard_token=standard_token,
-        conversation_grants_file=conversation_grants_file,
+        conversation_idle_timeout_seconds=conversation_idle_timeout_seconds,
     )
 
 
@@ -226,10 +226,15 @@ def create_runtime(
         raise RuntimeConfigurationError(
             "credential sources cannot be configured together"
         )
+    if settings.standard_gateway_url is not None and settings.auth_mode == "disabled":
+        raise RuntimeConfigurationError(
+            "Standard bridge settings require paired or device credentials"
+        )
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     store = SQLiteConfigurationStore(settings.database_path)
     diagnostics_store: SQLiteDiagnosticsStore | None = None
     credential_store = None
+    conversation_store = None
     server: ThreadingHTTPServer | None = None
     bridge_server = None
     bridge_thread = None
@@ -241,12 +246,21 @@ def create_runtime(
             store=diagnostics_store,
             metrics=metrics,
         )
+        if settings.standard_gateway_url is not None or bridge_factory is not None:
+            from hermes_home.bridge.production import ConversationGrantStore
+
+            conversation_store = ConversationGrantStore(
+                settings.database_path,
+                configuration=store.read,
+                idle_timeout_seconds=settings.conversation_idle_timeout_seconds,
+            )
         credential_service = None
         if settings.credential_root_secret is not None:
             credential_store = SQLiteCredentialStore(settings.database_path)
             credential_service = CredentialService(
                 store=credential_store,
                 root_secret=settings.credential_root_secret,
+                revocation_observer=conversation_store,
             )
         engine = ArbitrationEngine(configuration=store.read)
         application = HomeApplication(
@@ -255,14 +269,12 @@ def create_runtime(
             admin_token=settings.admin_token,
             device_credentials=settings.device_credentials,
             credential_service=credential_service,
+            conversation_claim_store=conversation_store,
             metrics=metrics,
             diagnostics=diagnostics,
         )
         if bridge_factory is None and settings.standard_gateway_url is not None:
-            if (
-                settings.standard_token is None
-                or settings.conversation_grants_file is None
-            ):
+            if settings.standard_token is None or conversation_store is None:
                 raise RuntimeConfigurationError(
                     "Standard bridge settings are incomplete"
                 )
@@ -271,7 +283,7 @@ def create_runtime(
             bridge_factory = create_standard_bridge_factory(
                 gateway_url=settings.standard_gateway_url,
                 hermes_token=settings.standard_token,
-                grants_file=settings.conversation_grants_file,
+                conversation_store=conversation_store,
                 device_authenticator=application.device_authenticator,
             )
         server = create_server(
@@ -306,6 +318,8 @@ def create_runtime(
             server.server_close()
         if credential_store is not None:
             credential_store.close()
+        if conversation_store is not None:
+            conversation_store.close()
         if diagnostics_store is not None:
             diagnostics_store.close()
         store.close()
@@ -317,6 +331,7 @@ def create_runtime(
         diagnostics_store=diagnostics_store,
         diagnostics=diagnostics,
         credential_store=credential_store,
+        conversation_store=conversation_store,
         bridge_server=bridge_server,
         bridge_thread=bridge_thread,
     )
@@ -360,6 +375,20 @@ def _port_value(value: str) -> int:
     if not 0 <= port <= 65535:
         raise RuntimeConfigurationError("port must be between 0 and 65535")
     return port
+
+
+def _positive_seconds_value(value: str) -> float:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError) as error:
+        raise RuntimeConfigurationError(
+            "conversation idle timeout must be a positive number of seconds"
+        ) from error
+    if not math.isfinite(seconds) or not 0 < seconds <= 600:
+        raise RuntimeConfigurationError(
+            "conversation idle timeout must be a positive number of seconds no greater than 600"
+        )
+    return seconds
 
 
 def _read_secret(path: Path) -> str:

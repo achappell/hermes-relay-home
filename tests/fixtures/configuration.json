@@ -3,15 +3,22 @@
   "rooms": [
     {"id": "kitchen", "name": "Kitchen"}
   ],
+  "profiles": [
+    {"id": "family", "name": "Family", "available": true}
+  ],
   "wake_mappings": [
-    {"id": "hey-hermes", "name": "Hey Hermes"}
+    {
+      "id": "hey-hermes",
+      "phrase": "Hey Hermes",
+      "profile_id": "family",
+      "active": true
+    }
   ],
   "devices": [
     {
       "id": "puck-kitchen",
       "name": "Kitchen Puck",
       "room_id": "kitchen",
-      "profile_id": "family",
       "priority": 1,
       "capabilities": {"wake_claim": true}
     }

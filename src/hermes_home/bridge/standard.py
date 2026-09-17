@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections import deque
@@ -54,6 +55,7 @@ _PROMPT_EXPIRY_TYPES = {
     "secret.expire": "secret.request",
     "sudo.expire": "sudo.request",
 }
+LOGGER = logging.getLogger(__name__)
 
 
 class GatewayRPCError(RuntimeError):
@@ -140,6 +142,7 @@ class ConversationGrant:
     profile_id: str
     session_id: str | None = None
     status: str = "active"
+    credential_generation: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -715,6 +718,13 @@ class HomeBridge:
         gateway_socket_factory: JsonSocketFactory,
         audio_socket_factory: AudioSocketFactory | None = None,
         session_persistor: Callable[[ConversationGrant, str], None] | None = None,
+        conversation_closer: Callable[..., object] | None = None,
+        activity_recorder: Callable[[str, str, str], None] | None = None,
+        conversation_opener: Callable[[str, str], None] | None = None,
+        revocation_registrar: Callable[[str, Callable[[str], None]], bool]
+        | None = None,
+        revocation_unregistrar: Callable[[str, Callable[[str], None]], None]
+        | None = None,
         request_id_factory: Callable[[int], str] | None = None,
         turn_id_factory: Callable[[int], str] | None = None,
         audio_timeout: float | None = 30.0,
@@ -726,6 +736,13 @@ class HomeBridge:
         self._gateway_socket_factory = gateway_socket_factory
         self._audio_socket_factory = audio_socket_factory
         self._session_persistor = session_persistor
+        self._conversation_closer = conversation_closer
+        self._activity_recorder = activity_recorder
+        self._conversation_opener = conversation_opener
+        self._revocation_registrar = revocation_registrar
+        self._revocation_unregistrar = revocation_unregistrar
+        self._revocation_handler = self._on_claim_revoked
+        self._registered_handle: str | None = None
         self._request_id_factory = request_id_factory
         self._turn_id_factory = turn_id_factory or (lambda index: f"home-turn-{index}")
         self._audio_timeout = _validate_timeout(audio_timeout, "audio timeout")
@@ -808,7 +825,7 @@ class HomeBridge:
             )
 
         try:
-            device_id = self._device_authenticator.authenticate_device(headers)
+            device_id, credential_generation = self._authenticate_device(headers)
         except OSError, RuntimeError, TypeError, ValueError:
             return self._open_failure(conversation_handle, "authorization_unavailable")
         if device_id is None:
@@ -848,6 +865,11 @@ class HomeBridge:
             return self._open_failure(conversation_handle, "stale_conversation")
         if grant.device_id != device_id or grant.handle != conversation_handle:
             return self._open_failure(conversation_handle, "unauthorized")
+        if grant.credential_generation != credential_generation:
+            self._close_claim(grant.handle, grant.device_id, reason="endpoint_revoked")
+            return self._open_failure(conversation_handle, "stale_conversation")
+        if not self._register_revocation_handler(grant.handle):
+            return self._failed_open(grant, conversation_handle, "stale_conversation")
 
         gateway = StandardGatewayClient(
             url=self._gateway_url,
@@ -872,20 +894,38 @@ class HomeBridge:
                 return self._open_failure(conversation_handle, "conversation_mismatch")
         except BridgeTimeoutError:
             gateway.close()
-            return self._open_failure(conversation_handle, "hermes_timeout")
+            return self._failed_open(grant, conversation_handle, "hermes_timeout")
         except GatewayRPCError:
             gateway.close()
-            return self._open_failure(conversation_handle, "request_rejected")
+            return self._failed_open(grant, conversation_handle, "request_rejected")
         except BridgeProtocolError:
             gateway.close()
-            return self._open_failure(conversation_handle, "protocol_error")
+            return self._failed_open(grant, conversation_handle, "protocol_error")
         except ConnectionError, OSError, RuntimeError, TypeError, ValueError:
             gateway.close()
-            return self._open_failure(conversation_handle, "hermes_unavailable")
+            return self._failed_open(grant, conversation_handle, "hermes_unavailable")
         if grant.session_id and durable_session_id not in (None, grant.session_id):
             gateway.close()
-            return self._open_failure(conversation_handle, "conversation_mismatch")
+            return self._failed_open(
+                grant, conversation_handle, "conversation_mismatch"
+            )
         unpersisted_session_id = None
+        try:
+            refreshed_device_id, refreshed_generation = self._authenticate_device(
+                headers
+            )
+        except OSError, RuntimeError, TypeError, ValueError:
+            gateway.close()
+            return self._failed_open(
+                grant, conversation_handle, "authorization_unavailable"
+            )
+        if (
+            refreshed_device_id != device_id
+            or refreshed_generation != credential_generation
+        ):
+            gateway.close()
+            self._close_claim(grant.handle, grant.device_id, reason="endpoint_revoked")
+            return self._open_failure(conversation_handle, "stale_conversation")
         if durable_session_id is not None and not grant.session_id:
             unpersisted_session_id = durable_session_id
         elif durable_session_id is not None:
@@ -894,9 +934,17 @@ class HomeBridge:
                     self._session_persistor(grant, durable_session_id)
                 grant = replace(grant, session_id=durable_session_id)
             except OSError, RuntimeError, TypeError, ValueError:
-                gateway.close()
-                return self._open_failure(
-                    conversation_handle, "authorization_unavailable"
+                self._interrupt_created_session(gateway, runtime_session_id)
+                return self._failed_open(
+                    grant, conversation_handle, "authorization_unavailable"
+                )
+        if self._conversation_opener is not None:
+            try:
+                self._conversation_opener(grant.handle, grant.device_id)
+            except OSError, RuntimeError, TypeError, ValueError:
+                self._interrupt_created_session(gateway, runtime_session_id)
+                return self._failed_open(
+                    grant, conversation_handle, "authorization_unavailable"
                 )
 
         endpoint_capabilities = _capabilities(
@@ -953,6 +1001,7 @@ class HomeBridge:
     def _open_failure(self, conversation_handle: str, reason: str) -> BridgeStatus:
         """Return an open failure without destroying an already-bound conversation."""
 
+        self._unregister_revocation_handler(conversation_handle)
         with self._state_lock:
             has_binding = self._grant is not None or self._gateway is not None
             if not has_binding:
@@ -1057,29 +1106,45 @@ class HomeBridge:
             self._state = "reconnecting"
 
         try:
-            device_id = self._device_authenticator.authenticate_device(headers)
+            device_id, credential_generation = self._authenticate_device(headers)
         except OSError, RuntimeError, TypeError, ValueError:
             return self._reconnect_failure(handle, "authorization_unavailable")
         if device_id is None:
+            self._close_claim(handle, grant.device_id, reason="endpoint_revoked")
+            return self._reconnect_failure(handle, "unauthorized")
+        if device_id != grant.device_id:
+            self._close_claim(handle, grant.device_id, reason="endpoint_revoked")
             return self._reconnect_failure(handle, "unauthorized")
         try:
             refreshed = self._conversation_resolver(handle, device_id)
         except OSError, RuntimeError, TypeError, ValueError:
             return self._reconnect_failure(handle, "authorization_unavailable")
         if refreshed is None or not isinstance(refreshed, ConversationGrant):
+            self._close_claim(handle, grant.device_id, reason="authorization_revoked")
             return self._reconnect_failure(handle, "stale_conversation")
         if refreshed.status != "active":
+            self._close_claim(handle, grant.device_id, reason="authorization_revoked")
             return self._reconnect_failure(handle, "stale_conversation")
         if refreshed.device_id != device_id or refreshed.handle != handle:
+            self._close_claim(handle, grant.device_id, reason="endpoint_revoked")
             return self._reconnect_failure(handle, "unauthorized")
+        if (
+            refreshed.credential_generation != credential_generation
+            or refreshed.credential_generation != grant.credential_generation
+        ):
+            self._close_claim(handle, grant.device_id, reason="endpoint_revoked")
+            return self._reconnect_failure(handle, "stale_conversation")
         if refreshed.profile_id != grant.profile_id:
+            self._close_claim(handle, grant.device_id, reason="authorization_revoked")
             return self._reconnect_failure(handle, "conversation_mismatch")
         if (
             refreshed.session_id not in (None, "")
             and refreshed.session_id != resume_session_id
         ):
+            self._close_claim(handle, grant.device_id, reason="authorization_revoked")
             return self._reconnect_failure(handle, "conversation_mismatch")
         if resume_session_id is None:
+            self._close_claim(handle, grant.device_id, reason="session_startup_failed")
             return self._reconnect_failure(handle, "stale_conversation")
 
         self._drop_transport()
@@ -1120,6 +1185,20 @@ class HomeBridge:
         if durable_session_id not in (None, resume_session_id):
             gateway.close()
             return self._reconnect_failure(handle, "conversation_mismatch")
+        try:
+            refreshed_device_id, refreshed_generation = self._authenticate_device(
+                headers
+            )
+        except OSError, RuntimeError, TypeError, ValueError:
+            gateway.close()
+            return self._reconnect_failure(handle, "authorization_unavailable")
+        if (
+            refreshed_device_id != device_id
+            or refreshed_generation != credential_generation
+        ):
+            gateway.close()
+            self._close_claim(handle, grant.device_id, reason="endpoint_revoked")
+            return self._reconnect_failure(handle, "stale_conversation")
         if durable_session_id is not None and refreshed.session_id:
             try:
                 if self._session_persistor is not None:
@@ -1127,6 +1206,13 @@ class HomeBridge:
                 refreshed = replace(refreshed, session_id=durable_session_id)
             except OSError, RuntimeError, TypeError, ValueError:
                 gateway.close()
+                return self._reconnect_failure(handle, "authorization_unavailable")
+        if self._conversation_opener is not None:
+            try:
+                self._conversation_opener(handle, device_id)
+            except OSError, RuntimeError, TypeError, ValueError:
+                self._interrupt_created_session(gateway, runtime_session_id)
+                self._close_claim(handle, device_id, reason="authorization_revoked")
                 return self._reconnect_failure(handle, "authorization_unavailable")
 
         endpoint_capabilities = _capabilities(
@@ -1202,7 +1288,9 @@ class HomeBridge:
             self._invalidate_binding("unauthorized", gateway=gateway)
             raise BridgeAuthorizationError("unauthorized")
         try:
-            device_id = self._device_authenticator.authenticate_device(endpoint_headers)
+            device_id, credential_generation = self._authenticate_device(
+                endpoint_headers
+            )
         except Exception as error:
             self._invalidate_binding("authorization_unavailable", gateway=gateway)
             raise BridgeAuthorizationError("authorization_unavailable") from error
@@ -1223,6 +1311,12 @@ class HomeBridge:
         if refreshed.device_id != device_id or refreshed.handle != handle:
             self._invalidate_binding("unauthorized", gateway=gateway)
             raise BridgeAuthorizationError("unauthorized")
+        if (
+            refreshed.credential_generation != credential_generation
+            or refreshed.credential_generation != grant.credential_generation
+        ):
+            self._invalidate_binding("stale_conversation", gateway=gateway)
+            raise BridgeAuthorizationError("stale_conversation")
         if refreshed.profile_id != grant.profile_id:
             self._invalidate_binding("conversation_mismatch", gateway=gateway)
             raise BridgeAuthorizationError("conversation_mismatch")
@@ -1271,18 +1365,238 @@ class HomeBridge:
                 self._remember_uncertain_turn_locked(current_active)
             self._active_turn = None
             gateway_to_close = self._gateway
+            runtime_session_id = self._runtime_session_id
+            grant = self._grant
+            device_id = self._device_id
             self._gateway = None
             self._runtime_session_id = None
             self._resume_session_id = None
             self._unpersisted_session_id = None
             self._advertised_commands = frozenset()
-            self._grant = None
-            self._device_id = None
             self._endpoint_headers = {}
             self._state = "unavailable"
         self._close_audio()
+        if (
+            reason in {"unauthorized", "stale_conversation", "conversation_mismatch"}
+            and grant is not None
+            and device_id is not None
+        ):
+            self._close_claim(grant.handle, device_id, reason="authorization_revoked")
+            with self._state_lock:
+                if self._grant is grant:
+                    self._grant = None
+                    self._resume_session_id = None
+            self._unregister_revocation_handler(grant.handle)
+        if gateway_to_close is not None and runtime_session_id is not None:
+            try:
+                gateway_to_close.request(
+                    "session.interrupt",
+                    {"session_id": runtime_session_id},
+                    timeout=1.0,
+                )
+            except Exception as error:  # noqa: BLE001 - revocation must still close locally
+                del error
         if gateway_to_close is not None:
             gateway_to_close.close()
+
+    def _authenticate_device(
+        self, headers: Mapping[str, str]
+    ) -> tuple[str | None, int | None]:
+        authenticate_context = getattr(
+            self._device_authenticator, "authenticate_device_context", None
+        )
+        if callable(authenticate_context):
+            context = authenticate_context(headers)
+            if context is None:
+                return None, None
+            device_id = getattr(context, "device_id", None)
+            generation = getattr(context, "generation", None)
+            if (
+                type(device_id) is not str
+                or not device_id
+                or type(generation) is not int
+                or generation < 1
+            ):
+                raise ValueError("authenticated device context is invalid")
+            return device_id, generation
+        return self._device_authenticator.authenticate_device(headers), None
+
+    def _close_claim(self, handle: str, device_id: str, *, reason: str) -> bool:
+        closer = self._conversation_closer
+        if closer is None:
+            return True
+        try:
+            result = closer(handle, device_id, reason=reason)
+        except Exception:  # noqa: BLE001 - cleanup must not expose claim internals
+            return False
+        return result is not False
+
+    def _register_revocation_handler(self, handle: str) -> bool:
+        registrar = self._revocation_registrar
+        if registrar is None:
+            return True
+        try:
+            registered = registrar(handle, self._revocation_handler)
+        except Exception:  # noqa: BLE001 - fail closed before opening Standard
+            return False
+        if not registered:
+            return False
+        self._registered_handle = handle
+        return True
+
+    def _unregister_revocation_handler(self, handle: str) -> None:
+        if self._registered_handle != handle:
+            return
+        self._registered_handle = None
+        unregistrar = self._revocation_unregistrar
+        if unregistrar is None:
+            return
+        try:
+            unregistrar(handle, self._revocation_handler)
+        except Exception:
+            LOGGER.warning(
+                "could not unregister conversation revocation handler", exc_info=True
+            )
+
+    @staticmethod
+    def _interrupt_created_session(
+        gateway: StandardGatewayClient,
+        runtime_session_id: str,
+    ) -> None:
+        try:
+            gateway.request(
+                "session.interrupt",
+                {"session_id": runtime_session_id},
+                timeout=1.0,
+            )
+        except Exception:
+            LOGGER.warning(
+                "could not interrupt unbound Standard session", exc_info=True
+            )
+        gateway.close()
+
+    def _on_claim_revoked(self, reason: str) -> None:
+        """Stop a live Standard Session after its durable claim is revoked."""
+
+        del reason
+        with self._lifecycle_lock:
+            with self._state_lock:
+                handle = self._conversation_handle
+                gateway = self._gateway
+                runtime_session_id = self._runtime_session_id
+            if gateway is not None and runtime_session_id is not None:
+                try:
+                    gateway.request(
+                        "session.interrupt",
+                        {"session_id": runtime_session_id},
+                        timeout=1.0,
+                    )
+                except Exception:
+                    LOGGER.warning(
+                        "could not interrupt Standard session after claim revocation",
+                        exc_info=True,
+                    )
+            self._close_audio()
+            if gateway is not None:
+                gateway.close()
+            with self._state_lock:
+                self._gateway = None
+                self._runtime_session_id = None
+                self._resume_session_id = None
+                self._endpoint_headers = {}
+                self._advertised_commands = frozenset()
+                self._active_turn = None
+                self._unresolved_turn = None
+                self._grant = None
+                self._last_binding_failure_reason = "stale_conversation"
+                self._state = "unavailable"
+            if handle is not None:
+                self._unregister_revocation_handler(handle)
+
+    def _failed_open(
+        self, grant: ConversationGrant, handle: str, reason: str
+    ) -> BridgeStatus:
+        closed = self._close_claim(
+            grant.handle, grant.device_id, reason="session_startup_failed"
+        )
+        return self._open_failure(
+            handle, reason if closed else "authorization_unavailable"
+        )
+
+    def _record_activity(self, state: str) -> None:
+        recorder = self._activity_recorder
+        if recorder is None:
+            return
+        with self._state_lock:
+            handle = self._conversation_handle
+            device_id = self._device_id
+        if handle is None or device_id is None:
+            raise BridgeAuthorizationError("stale_conversation")
+        try:
+            recorder(handle, device_id, state)
+        except ValueError as error:
+            raise BridgeRequestRejected("conversation activity was rejected") from error
+        except (OSError, RuntimeError, TypeError) as error:
+            raise BridgeAuthorizationError("authorization_unavailable") from error
+
+    def _set_idle_after_known_failure(self) -> None:
+        try:
+            self._record_activity("idle")
+        except BridgeAuthorizationError:
+            self._invalidate_binding("authorization_unavailable")
+
+    def report_activity(self, state: str) -> bool:
+        """Record content-free endpoint activity for this bound conversation."""
+        if state not in {"capture", "turn", "playback", "playback_complete"}:
+            raise ValueError("endpoint activity state is invalid")
+        self._revalidate_ready_binding()
+        self._record_activity(state)
+        return True
+
+    def close_conversation(self) -> bool:
+        """Close the logical claim while retaining route transport semantics."""
+        with self._lifecycle_lock:
+            with self._state_lock:
+                handle = self._conversation_handle
+                device_id = self._device_id
+                gateway = self._gateway
+                runtime_session_id = self._runtime_session_id
+                active = self._active_turn
+            if handle is None or device_id is None:
+                raise BridgeAuthorizationError("stale_conversation")
+            if (
+                active is not None
+                and not active.terminal
+                and gateway is not None
+                and runtime_session_id is not None
+            ):
+                try:
+                    gateway.request(
+                        "session.interrupt",
+                        {"session_id": runtime_session_id},
+                        timeout=1.0,
+                    )
+                except Exception as error:  # noqa: BLE001 - close still proceeds
+                    del error
+            if not self._close_claim(handle, device_id, reason="stopped"):
+                self._drop_transport()
+                with self._state_lock:
+                    self._state = "unavailable"
+                raise BridgeAuthorizationError("authorization_unavailable")
+            self._drop_transport()
+            self._unregister_revocation_handler(handle)
+            with self._state_lock:
+                self._grant = None
+                self._conversation_handle = None
+                self._endpoint_headers = {}
+                self._device_id = None
+                self._resume_session_id = None
+                self._active_turn = None
+                self._unresolved_turn = None
+                self._runtime_session_id = None
+                self._advertised_commands = frozenset()
+                self._state = "disconnected"
+            return True
 
     def dispatch_command(self, name: str, arg: str | None = None) -> dict[str, object]:
         """Forward only an explicitly advertised Standard command."""
@@ -1486,6 +1800,15 @@ class HomeBridge:
             active = _ActiveTurn(turn_id, generation=self._turn_count)
             self._active_turn = active
         try:
+            self._record_activity("turn")
+        except BridgeAuthorizationError:
+            with self._state_lock:
+                if self._active_turn is active:
+                    self._active_turn = None
+                    self._state = "ready"
+            self._invalidate_binding("authorization_unavailable", gateway=gateway)
+            raise
+        try:
             result = gateway.request(
                 "prompt.submit",
                 {"session_id": runtime_session_id, "text": text},
@@ -1496,6 +1819,7 @@ class HomeBridge:
                     self._active_turn = None
                     self._state = "ready"
             self._close_audio(owner=active)
+            self._set_idle_after_known_failure()
             raise BridgeRequestRejected(
                 f"standard gateway rejected prompt: {error.message}"
             ) from error
@@ -1520,6 +1844,7 @@ class HomeBridge:
                     self._active_turn = None
                     self._state = "ready"
             self._close_audio(owner=active)
+            self._set_idle_after_known_failure()
             raise BridgeRequestRejected("standard gateway rejected prompt")
         except BridgeProtocolError:
             with self._state_lock:
@@ -1568,6 +1893,7 @@ class HomeBridge:
     def _next_event(self) -> BridgeEvent:
         """Read the next session event through the gateway's sole reader."""
 
+        revalidate_claim = self._conversation_closer is not None
         with self._state_lock:
             if (
                 self._state != "ready"
@@ -1578,8 +1904,10 @@ class HomeBridge:
             gateway = self._gateway
             runtime_session_id = self._runtime_session_id
         while True:
+            if revalidate_claim:
+                self._revalidate_ready_binding()
             try:
-                raw = gateway.next_event()
+                raw = gateway.next_event(timeout=0.25 if revalidate_claim else None)
             except BridgeProtocolError as error:
                 self._mark_transport_loss(gateway=gateway)
                 raise BridgeProtocolError(
@@ -1588,7 +1916,7 @@ class HomeBridge:
             except BridgeTimeoutError:
                 # next_event() has a bounded queue wait. A quiet but still-open
                 # websocket is an idle poll, not evidence that the transport died.
-                if gateway.is_open:
+                if revalidate_claim or gateway.is_open:
                     continue
                 self._mark_transport_loss(gateway=gateway)
                 raise
@@ -1805,6 +2133,14 @@ class HomeBridge:
                 self._stop_audio(owner=event_active)
             elif terminal_audio_action == "finish":
                 self._finish_audio(owner=event_active)
+            if terminal_audio_action is not None:
+                try:
+                    self._record_activity("response_ready")
+                except BridgeAuthorizationError:
+                    self._invalidate_binding(
+                        "authorization_unavailable", gateway=gateway
+                    )
+                    raise
             with self._state_lock:
                 if (
                     self._gateway is not gateway
@@ -2236,7 +2572,16 @@ class HomeBridge:
 
     def close(self) -> None:
         with self._lifecycle_lock:
+            with self._state_lock:
+                grant = self._grant
+                handle = self._conversation_handle
+                device_id = self._device_id
+                can_resume = self._resume_session_id is not None
+            if grant is not None and device_id is not None and not can_resume:
+                self._close_claim(grant.handle, device_id, reason="session_unavailable")
             self._drop_transport()
+            if handle is not None:
+                self._unregister_revocation_handler(handle)
             with self._state_lock:
                 self._grant = None
                 self._conversation_handle = None

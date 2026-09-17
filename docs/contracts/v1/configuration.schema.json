@@ -3,13 +3,17 @@
   "$id": "https://hermes.home/contracts/v1/configuration.schema.json",
   "title": "Hermes Home configuration snapshot",
   "type": "object",
-  "required": ["revision", "rooms", "wake_mappings", "devices"],
+  "required": ["revision", "rooms", "profiles", "wake_mappings", "devices"],
   "additionalProperties": false,
   "properties": {
     "revision": {"type": "integer", "minimum": 0},
     "rooms": {
       "type": "array",
       "items": {"$ref": "#/$defs/room"}
+    },
+    "profiles": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/profile"}
     },
     "wake_mappings": {
       "type": "array",
@@ -31,24 +35,35 @@
         "name": {"type": "string", "minLength": 1, "maxLength": 128}
       }
     },
-    "wake_mapping": {
+    "profile": {
       "type": "object",
-      "required": ["id", "name"],
+      "required": ["id", "name", "available"],
       "additionalProperties": false,
       "properties": {
         "id": {"$ref": "#/$defs/id"},
-        "name": {"type": "string", "minLength": 1, "maxLength": 128}
+        "name": {"type": "string", "minLength": 1, "maxLength": 128},
+        "available": {"type": "boolean"}
+      }
+    },
+    "wake_mapping": {
+      "type": "object",
+      "required": ["id", "phrase", "profile_id", "active"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "phrase": {"type": "string", "minLength": 1, "maxLength": 128},
+        "profile_id": {"$ref": "#/$defs/id"},
+        "active": {"type": "boolean"}
       }
     },
     "device": {
       "type": "object",
-      "required": ["id", "name", "room_id", "profile_id", "priority", "capabilities"],
+      "required": ["id", "name", "room_id", "priority", "capabilities"],
       "additionalProperties": false,
       "properties": {
         "id": {"$ref": "#/$defs/id"},
         "name": {"type": "string", "minLength": 1, "maxLength": 128},
         "room_id": {"$ref": "#/$defs/id"},
-        "profile_id": {"$ref": "#/$defs/id"},
         "priority": {"type": "integer", "minimum": 1},
         "capabilities": {
           "type": "object",

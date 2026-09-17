@@ -37,15 +37,22 @@ implementation work and are not encoded in the claim body.
     "rooms": [
       {"id": "kitchen", "name": "Kitchen"}
     ],
+    "profiles": [
+      {"id": "family", "name": "Family", "available": true}
+    ],
     "wake_mappings": [
-      {"id": "hey-hermes", "name": "Hey Hermes"}
+      {
+        "id": "hey-hermes",
+        "phrase": "Hey Hermes",
+        "profile_id": "family",
+        "active": true
+      }
     ],
     "devices": [
       {
         "id": "puck-kitchen",
         "name": "Kitchen Puck",
         "room_id": "kitchen",
-        "profile_id": "family",
         "priority": 1,
         "capabilities": {"wake_claim": true}
       }
@@ -62,6 +69,7 @@ implementation work and are not encoded in the claim body.
   "expected_revision": 12,
   "snapshot": {
     "rooms": [],
+    "profiles": [],
     "wake_mappings": [],
     "devices": []
   }
@@ -82,9 +90,38 @@ returns the activated snapshot with its new revision. A stale
 }
 ```
 
-IDs are opaque, stable strings. `priority` is a positive integer unique within
-each Room; `1` is the highest priority. Every Device has one Room, one Profile
-reference, and explicit capabilities. A valid publish is all-or-nothing.
+IDs are opaque, stable strings. Each available Profile is household-wide.
+Each Wake Mapping names one phrase and one Profile; active phrases are unique
+after Unicode compatibility normalization, whitespace folding, and case
+folding. Several distinct phrases may map to the same Profile. A Device has
+one Room, a positive priority unique within that Room (`1` is highest), and
+explicit capabilities. Profile and mapping edits publish atomically.
+
+Existing v1 snapshots with a Device `profile_id` cannot be migrated safely:
+mapping labels do not identify Profile targets. Reads fail with
+`configuration_migration_required` and the current revision; an administrator
+must publish the new shape using that revision. Home never guesses the target.
+
+Paired-device approval uses an explicit mapping choice in the `scope` object:
+
+```json
+{
+  "schema": 1,
+  "scope": {
+    "rooms": ["kitchen"],
+    "capabilities": ["wake_claim"],
+    "wake_mapping_grant": {"mode": "selected", "ids": ["hey-hermes"]}
+  }
+}
+```
+
+The alternative `{"mode":"all_current_profiles"}` is expanded to the active
+mapping IDs for currently available Profiles at approval time. Home stores only
+those exact IDs. Later mappings require a new approval. A paired Device reads
+`GET /api/v1/devices/{device_id}/configuration`; Home returns its current
+revision and only its authorized active mappings, with no Profile IDs. Devices
+fetch on pairing/startup/reconnect, poll every 30 seconds while active, and
+refresh after `stale_configuration` or `stale_mapping`.
 
 ## Wake arbitration
 
@@ -97,6 +134,7 @@ arbitration result:
   "claim_id": "claim-01J...",
   "device_id": "puck-kitchen",
   "wake_mapping_id": "hey-hermes",
+  "configuration_revision": 13,
   "observation": {
     "detector": "device-local",
     "observed_at_ms": 1720000000000
@@ -109,9 +147,11 @@ arbitration result:
 }
 ```
 
-The first valid claim opens a 250 ms window. The service compares eligible
-claims by acoustic proximity evidence and uses configured Device priority to
-resolve an effective tie. The response is tied to the submitted claim:
+The first valid claim opens a 250 ms window in its Room. Other Rooms arbitrate
+independently. The service compares eligible claims by acoustic proximity
+evidence and uses configured Device priority to resolve an effective tie. A
+claim must name its current configuration revision; stale snapshots are
+rejected. The response is tied to the submitted claim:
 
 ```json
 {
@@ -119,7 +159,8 @@ resolve an effective tie. The response is tied to the submitted claim:
   "claim_id": "claim-01J...",
   "decision": "granted",
   "arbitration_id": "arb-01J...",
-  "configuration_revision": 13
+  "configuration_revision": 13,
+  "conversation_handle": "opaque-home-claim-01J..."
 }
 ```
 
@@ -129,6 +170,22 @@ promote a loser. The claimant may proceed to acknowledgement/capture only
 after a grant for its own claim ID.
 
 The claim contains no Profile ID, wake phrase, prompt, transcript, or audio.
+The endpoint's authorized configuration snapshot contains only mapping IDs and
+phrases. Home resolves the Profile and Session after the winner is selected.
+On a granted claim, the response also contains a claim-specific opaque
+`conversation_handle`; denied claims have no handle. The endpoint opens that
+handle on the Home bridge route and begins capture only after `ready`. The
+bridge exposes only the opaque handle and safe readiness or failure state. A
+granted handle expires if its first successful open does not happen within 90
+seconds; expiry closes the claim and releases its Room.
+
+The bridge accepts content-free `conversation.activity` updates with `state`
+`capture`, `turn`, `playback`, or `playback_complete`. Playback completion is
+the device's acknowledgement that starts or resets the default 8-second idle
+timer. `conversation.close` explicitly stops the logical conversation. A Home
+bridge transport reconnect can resume the same claim; it does not create a new
+wake or a new Session.
+
 The server uses its monotonic receive clock; Device wall-clock values are
 observation metadata only. Wi-Fi RSSI is not accepted as physical proximity.
 
@@ -151,5 +208,14 @@ Initial codes are:
 - `unauthorized` — missing or invalid credential;
 - `not_found` — unknown Room, Device, or wake mapping;
 - `revision_conflict` — stale configuration publish;
+- `configuration_migration_required` — old configuration needs an explicit
+  trusted publish in the new shape; configuration reads and wake claims include
+  `current_revision` so the administrator can publish against the stored row;
+- `stale_configuration` — refresh the authorized Device snapshot before
+  submitting another claim;
+- `stale_mapping` — the wake mapping exists but is inactive; refresh the
+  authorized Device snapshot before submitting another claim;
+- `conversation_active` — this Room already has an active conversation; stop or
+  wait for that conversation to close before waking again;
 - `claim_denied` — a valid claim lost arbitration or failed eligibility;
 - `service_unavailable` — the service cannot safely answer the request.

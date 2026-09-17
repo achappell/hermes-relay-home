@@ -57,10 +57,11 @@ class CredentialStateError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class CredentialScope:
-    """The Home-owned rooms and capabilities granted to one endpoint."""
+    """The exact Home-owned authority granted to one endpoint."""
 
     rooms: tuple[str, ...]
     capabilities: tuple[str, ...]
+    wake_mappings: tuple[str, ...] = ()
 
     @classmethod
     def from_values(
@@ -68,15 +69,18 @@ class CredentialScope:
         *,
         rooms: Iterable[object],
         capabilities: Iterable[object],
+        wake_mappings: Iterable[object] = (),
     ) -> CredentialScope:
         normalized_rooms = _bounded_values(rooms, "rooms")
         normalized_capabilities = _bounded_values(capabilities, "capabilities")
+        normalized_mappings = _bounded_values(wake_mappings, "wake_mappings")
         unknown = set(normalized_capabilities) - SUPPORTED_CREDENTIAL_CAPABILITIES
         if unknown:
             raise CredentialValidationError("scope contains an unsupported capability")
         return cls(
             rooms=normalized_rooms,
             capabilities=normalized_capabilities,
+            wake_mappings=normalized_mappings,
         )
 
     def assert_subset_of(self, requested: CredentialScope) -> None:
@@ -439,12 +443,16 @@ class CredentialService:
         scope: CredentialScope,
         *,
         configured_rooms: Iterable[object],
+        configured_wake_mappings: Iterable[object] = (),
     ) -> EnrollmentRequest:
         """Approve only a pending request and only within Home's room policy."""
         request_id = _identifier(request_id, "request_id")
         if not isinstance(scope, CredentialScope):
             raise CredentialValidationError("approved scope is invalid")
         available_rooms = set(_bounded_values(configured_rooms, "configured_rooms"))
+        available_mappings = set(
+            _bounded_values(configured_wake_mappings, "configured_wake_mappings")
+        )
 
         def approve(state: dict[str, object]) -> EnrollmentRequest:
             now = self._now()
@@ -463,6 +471,10 @@ class CredentialService:
             if not set(scope.rooms).issubset(available_rooms):
                 raise CredentialValidationError(
                     "approved scope references an unavailable room"
+                )
+            if not set(scope.wake_mappings).issubset(available_mappings):
+                raise CredentialValidationError(
+                    "approved scope references an unavailable wake mapping"
                 )
             record["approved_scope"] = _scope_record(scope)
             record["status"] = "approved"
@@ -920,6 +932,7 @@ def _scope_record(scope: CredentialScope) -> dict[str, list[str]]:
     return {
         "rooms": list(scope.rooms),
         "capabilities": list(scope.capabilities),
+        "wake_mappings": list(scope.wake_mappings),
     }
 
 
@@ -929,6 +942,7 @@ def _scope_from_record(value: object) -> CredentialScope:
     return CredentialScope.from_values(
         rooms=value.get("rooms", ()),
         capabilities=value.get("capabilities", ()),
+        wake_mappings=value.get("wake_mappings", ()),
     )
 
 
