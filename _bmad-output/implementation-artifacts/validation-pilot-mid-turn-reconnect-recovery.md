@@ -24,39 +24,34 @@ Validated 2026-09-17 in the
 - The signed-in Xcode product reconnected as Amanda's MacBook Air and showed
   Home Ready after the Home service restart. Its existing unsent composer draft
   was preserved through relaunch.
-- One new smoke prompt was sent once. Home diagnostics show it was accepted,
-  completed by Hermes, and its audio completed. The app instead reported
-  `protocol_error`, then `transport_timeout`, and marked the turn unconfirmed.
-  This proves server-side completion but not delivery to the app. The prompt
-  was not resent.
-- After the iOS open-response decoder fix, the rebuilt signed-in Xcode app
-  reconnected and reached Home Ready. The old turn remains visibly unconfirmed.
-  Home explicitly returned `unresolved_turn: false`, so the app offered
-  “Continue without resending.” Selecting it retained the earlier user prompt,
-  cleared only its stale recovery state, and preserved the composer draft. The
-  old prompt was not resent.
-- A distinct composer prompt was then sent once. For correlation
-  `corr-cffc857d828b40c891414f7fff3db66b`, Home recorded endpoint start, Hermes
-  acceptance, Hermes terminal completion, PCM chunks accepted, and audio
-  completion between 1:33:46 and 1:33:50 Central. The app showed some streaming,
-  then reported `transport_timeout` and audio unavailable after about 30
-  seconds. The prompt remains unconfirmed and was not resent. Home's successful
-  socket sends prove server-side delivery attempts, not client receipt or
-  decoding. No prompt text, response text, or audio was added to diagnostics.
+- Two earlier smoke attempts timed out in the app even though Home recorded
+  successful terminal and audio events. Both used the signed-in app process
+  launched at 1:33, before the decoder fix was committed. The bundle on disk had
+  been rebuilt, but that old process remained open with stale code; those runs
+  did not test the decoder fix. Neither prompt was resent.
 - Code review found a protocol mismatch: Home forwards safe Standard event
   payload fields, including future additions, while the Apple client rejected
   unknown payload keys. The iOS follow-up now ignores unconsumed Standard
   payload fields while validating fields it reads; Home envelope keys remain
   strict. A wire-level regression covers `message.complete` with extra
-  metadata. The change postdates the live smoke and has not been validated
-  against a new live turn.
+  metadata.
 - After that change, the full iPhone 17 Pro simulator suite passed (437 tests,
   zero failures), and the macOS Xcode product built and passed strict code
   signature verification.
+- Rebuilt the exact signed Xcode product at 3:02 Central and relaunched it. The
+  app reconnected as Amanda's MacBook Air, reached Home Ready, and recovered
+  the earlier turn as explicitly unresolved=false. Selecting “Continue without
+  resending” cleared only the stale recovery state; the old prompt was not
+  resent.
+- Sent a distinct smoke prompt once at 3:03:15 Central. For correlation
+  `corr-814d90a2e7c34d4ca5ed69a6c51c28d2`, Home recorded endpoint start and
+  acceptance, Hermes text completion at 3:03:16, accepted audio chunks, and
+  audio completion at 3:03:23. The signed-in app displayed the exact
+  `FRESH_PILOT_OK` reply, ended playback, returned to “Tap to record” / Ready,
+  and showed Home Ready and Hermes Complete. No timeout or unconfirmed-turn
+  banner remained. The prompt was not resent, and diagnostics contain no prompt
+  text, response text, or audio.
 
-The Home reconnect fix is deployed and the parked-turn recovery path is
-validated. End-to-end reply delivery and the post-response activity indicator
-remain unconfirmed: the latest live turn timed out in the app despite Home
-recording terminal and audio completion. A new live turn is required to verify
-the Apple decoder follow-up and final UI state. The existing prompts remain
-protected as unconfirmed; no prompt was resent.
+The Home reconnect fix is deployed, and the signed-in macOS end-to-end path is
+validated through reply delivery and return to Ready after voice playback.
+Earlier unconfirmed prompts remain protected; none was resent.
