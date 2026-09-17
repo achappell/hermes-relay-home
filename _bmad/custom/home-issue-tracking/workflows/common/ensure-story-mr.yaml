@@ -1,0 +1,31 @@
+# common/ensure-story-mr.yaml
+#
+# Purpose: Ensures this Home story has a PR against the configured story base
+#          branch before the caller checks CI.
+# Input variables: story_branch, story_base_branch, story_key, epic_num,
+#                  story_num, issue_id, host, project
+# Output variables: (none)
+# Side effects: creates the story PR if it does not exist
+
+- CHECK: empty issue_id
+  TRUE:
+    - OUTPUT:
+        message: "No issue is linked to story '{story_key}'. Add its issue URL to story-index.yaml before opening a PR."
+        stop: true
+  FALSE:
+    - SET: { variable: source_branch, value: "{story_branch}" }
+    - SET: { variable: target_branch, value: "{story_base_branch}" }
+    - SET: { variable: mr_repo, value: "{host}/{project}" }
+    - SET: { variable: mr_title, value: "Story {epic_num}.{story_num}: {story_key}" }
+    - WRITE:
+        file: /tmp/ensure-story-mr-desc.md
+        content: "Sprint key: {story_key}\n\nRelated to #{issue_id}"
+        mode: overwrite
+    - SET: { variable: mr_description_file, value: "/tmp/ensure-story-mr-desc.md" }
+    - SET: { variable: mr_draft, value: "false" }
+    - INCLUDE: common/ensure-mr
+    # Existing story PRs may have the old PRD target; enforce the configured base.
+    - INCLUDE: common/find-mr
+    - RUN: gh pr edit {mr_iid} --base "{story_base_branch}" -R "{mr_repo}"
+      PLATFORM: github
+    - RUN: rm -f /tmp/ensure-story-mr-desc.md

@@ -5,6 +5,7 @@ issue_tracking:
   host: github.com
   project: achappell/hermes-relay-home
   worktree_base: .worktrees
+  story_base_branch: main
   branch_patterns:
     prd: "feat/{prd_key}/prd"
     story: "feat/{prd_key}/{story_key}"
