@@ -280,7 +280,7 @@ Home mints the public choice and freshness IDs. It translates a valid response
 to the upstream object's private IDs inside Home. A response sends
 `{"operation":"choose","option_id":"inspect","object_id":"home-choice-id","freshness":"home-freshness-id"}`
 as `prompt.respond.response`; `explore` has the same shape and requests detail
-without committing the option. Only IDs and labels reach the endpoint. Raw
+without committing the option. Only option IDs and labels reach the endpoint. Raw
 option values and unknown fields are dropped.
 
 Home expires a choice 300 seconds after first delivery using its monotonic

@@ -44,3 +44,8 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-pilot-session-persist-and-runner-log.md`
   summary: Distinguish a Standard `session.resume` "not found" rejection for a never-stored Session from other rejections, so a stale grant session ID can heal instead of requiring manual cleanup.
   evidence: Maybe-false until Standard exposes a distinguishing error code; today a reaped empty Session and a genuine rejection both surface as GatewayRPCError -> request_rejected.
+
+## Deferred from: code review of spec-home-nw-07-freshness-bound-typed-choice-authority (2026-09-17)
+
+- Confirm whether Standard guarantees correlation IDs are globally unique across all structured prompt types. Home currently routes a response to the choice path when any retained choice correlation matches, but the local contract does not promise global uniqueness; if Standard can reuse an ID for a different prompt type, that prompt's valid response is diverted. Evidence to settle it: the pinned Standard protocol contract or a producer implementation guarantee.
+- Audit how endpoint clients render bidirectional and formatting controls in choice text and labels. Home accepts bounded Unicode strings containing these controls; they may visually reorder or spoof options if the client does not neutralize them. Evidence to settle it: a client rendering audit that preserves legitimate right-to-left text.

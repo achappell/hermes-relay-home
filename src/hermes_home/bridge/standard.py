@@ -14,6 +14,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 STANDARD_GATEWAY_PATH = "/api/ws"
 STANDARD_AUDIO_PATH = "/api/audio/speak-stream"
+MAX_TYPED_CHOICE_REVISIONS_PER_TURN = 128
 _STRUCTURED_PROMPT_OPERATIONS = {
     "approval.request": ("approval.respond", "choice", frozenset({"choice", "all"})),
     "clarify.request": ("clarify.respond", "answer", frozenset({"answer"})),
@@ -263,6 +264,10 @@ class _ActiveTurn:
     pending_prompt_type: str | None = None
     pending_prompt_id: str | None = None
     pending_choice_revision: tuple[str, str] | None = field(default=None, repr=False)
+    pending_choice_authority: tuple[object, ...] | None = field(
+        default=None, repr=False
+    )
+    choice_revisions: set[tuple[str, str]] = field(default_factory=set, repr=False)
     event_started: bool = False
     event_terminal_seen: bool = False
     event_start_seq: int | None = None
@@ -1824,6 +1829,7 @@ class HomeBridge:
                 active.pending_prompt_type = None
                 active.pending_prompt_id = None
                 active.pending_choice_revision = None
+                active.pending_choice_authority = None
         return result
 
     def submit_prompt(self, text: str) -> BridgeTurn:
@@ -1984,6 +1990,11 @@ class HomeBridge:
             audio_owner: _ActiveTurn | None = None
             terminal_audio_action: str | None = None
             event_active: _ActiveTurn | None = None
+            lock_choice_revision = (
+                isinstance(raw, Mapping) and raw.get("type") == "prompt.request"
+            )
+            if lock_choice_revision:
+                self._prompt_response_lock.acquire()
             try:
                 with self._state_lock:
                     if (
@@ -2085,6 +2096,18 @@ class HomeBridge:
                                 if event_type == "prompt.request"
                                 else None
                             )
+                            choice_authority = (
+                                _typed_choice_authority(event_payload)
+                                if event_type == "prompt.request"
+                                else None
+                            )
+                            if (
+                                choice_revision is not None
+                                and choice_revision not in active.choice_revisions
+                                and len(active.choice_revisions)
+                                >= MAX_TYPED_CHOICE_REVISIONS_PER_TURN
+                            ):
+                                continue
                             pending_mismatch = (
                                 active.pending_prompt_type is not None
                                 and (
@@ -2099,13 +2122,20 @@ class HomeBridge:
                                 and active.pending_prompt_id != correlation_id
                                 and active.pending_choice_revision is not None
                                 and choice_revision is not None
-                                and active.pending_choice_revision != choice_revision
+                                and (
+                                    active.pending_choice_revision != choice_revision
+                                    or active.pending_choice_authority
+                                    != choice_authority
+                                )
                             )
                             if pending_mismatch and not is_choice_revision:
                                 continue
                             active.pending_prompt_type = event_type
                             active.pending_prompt_id = correlation_id
                             active.pending_choice_revision = choice_revision
+                            active.pending_choice_authority = choice_authority
+                            if choice_revision is not None:
+                                active.choice_revisions.add(choice_revision)
                         elif event_type in _PROMPT_EXPIRY_TYPES:
                             correlation_id = raw.get("correlation_id")
                             if (
@@ -2123,6 +2153,7 @@ class HomeBridge:
                             active.pending_prompt_type = None
                             active.pending_prompt_id = None
                             active.pending_choice_revision = None
+                            active.pending_choice_authority = None
                         else:
                             correlation_id = raw.get("correlation_id")
                             if (
@@ -2150,6 +2181,7 @@ class HomeBridge:
                                 active.pending_prompt_type = None
                                 active.pending_prompt_id = None
                                 active.pending_choice_revision = None
+                                active.pending_choice_authority = None
                                 if _is_interrupted_message(event_payload):
                                     if not active.interrupt_requested:
                                         terminal_audio_action = "stop"
@@ -2203,6 +2235,9 @@ class HomeBridge:
             except BridgeProtocolError:
                 self._mark_transport_loss(gateway=gateway)
                 raise
+            finally:
+                if lock_choice_revision:
+                    self._prompt_response_lock.release()
 
             if (
                 audio_text
@@ -3083,6 +3118,25 @@ def _typed_choice_revision(payload: Mapping[str, object]) -> tuple[str, str]:
     if type(object_id) is not str or type(freshness) is not str:
         raise BridgeProtocolError("typed choice identity is invalid")
     return object_id, freshness
+
+
+def _typed_choice_authority(payload: Mapping[str, object]) -> tuple[object, ...]:
+    """Capture only the fields that determine a choice's public authority."""
+
+    choice = payload["choice"]
+    options = payload["options"]
+    assert isinstance(choice, Mapping)
+    assert isinstance(options, list)
+    return (
+        payload.get("sensitive"),
+        choice.get("sensitive"),
+        tuple(choice["operations"]),
+        tuple(
+            (option.get("id"), option.get("label"), option.get("sensitive"))
+            for option in options
+            if isinstance(option, Mapping)
+        ),
+    )
 
 
 def _validate_structured_event_payload(

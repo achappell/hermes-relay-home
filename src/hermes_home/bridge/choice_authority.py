@@ -9,7 +9,10 @@ from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
-from hermes_home.bridge.standard import BridgeEvent
+from hermes_home.bridge.standard import (
+    MAX_TYPED_CHOICE_REVISIONS_PER_TURN,
+    BridgeEvent,
+)
 
 CHOICE_EVENT_TYPE = "prompt.request"
 CHOICE_EXPIRY_EVENT_TYPE = "prompt.expire"
@@ -19,7 +22,7 @@ MAX_CHOICE_ID_LENGTH = 64
 MAX_CHOICE_TEXT_LENGTH = 1024
 MAX_CHOICE_LABEL_LENGTH = 256
 MAX_CHOICE_CORRELATIONS = 256
-MAX_CHOICE_OBJECTS_PER_TURN = 128
+MAX_CHOICE_OBJECTS_PER_TURN = MAX_TYPED_CHOICE_REVISIONS_PER_TURN
 
 _OPERATIONS = ("choose", "explore")
 _RESPONSE_FIELDS = frozenset({"operation", "option_id", "object_id", "freshness"})
@@ -44,7 +47,7 @@ class _ChoiceObject:
     source_operations: tuple[str, ...]
     supported_operations: tuple[str, ...]
     options: tuple[tuple[str, str], ...]
-    expires_at: float
+    expires_at: float | None = None
     state: str = "active"
 
 
@@ -139,7 +142,11 @@ class ChoiceAuthority:
                 choice.state = "revoked"
                 if self._current.get(turn_key) is choice:
                     self._current.pop(turn_key, None)
-            if choice.state == "active" and now >= choice.expires_at:
+            if (
+                choice.state == "active"
+                and choice.expires_at is not None
+                and now >= choice.expires_at
+            ):
                 choice.state = "expired"
                 if self._current.get(turn_key) is choice:
                     self._current.pop(turn_key, None)
@@ -171,21 +178,19 @@ class ChoiceAuthority:
                 source_operations=source_operations,
                 supported_operations=supported_operations,
                 options=options,
-                expires_at=now + CHOICE_TTL_SECONDS,
             )
             self._objects[source_key] = choice
             self._current[turn_key] = choice
 
         if len(self._correlations) >= MAX_CHOICE_CORRELATIONS:
-            oldest_key, _ = self._correlations.popitem(last=False)
-            del oldest_key
+            self._prune_inactive_correlations()
+        if len(self._correlations) >= MAX_CHOICE_CORRELATIONS:
+            raise ChoiceProtocolError("choice correlation limit exceeded")
         self._correlations[prompt_key] = _ChoiceCorrelation(event=event, choice=choice)
 
         is_current = self._current.get(turn_key) is choice and choice.state == "active"
         operations = list(choice.supported_operations) if is_current else []
-        remaining = (
-            max(0, int(choice.expires_at - now)) if choice.state == "active" else 0
-        )
+        remaining = self._remaining_seconds(choice, now)
         return {
             "prompt_id": event.correlation_id,
             "prompt_kind": "choice",
@@ -200,6 +205,30 @@ class ChoiceAuthority:
                 "operations": operations,
             },
         }
+
+    def mark_delivered(
+        self, *, handle: str, turn_id: str, correlation_id: str
+    ) -> int | None:
+        """Start or read the freshness window immediately before first send."""
+
+        prompt_key = (handle, turn_id, correlation_id, CHOICE_EVENT_TYPE)
+        correlation = self._correlations.get(prompt_key)
+        if correlation is None:
+            return None
+        choice = correlation.choice
+        if (
+            choice.state != "active"
+            or self._current.get((handle, turn_id)) is not choice
+        ):
+            return 0
+        now = self._now()
+        if choice.expires_at is None:
+            choice.expires_at = now + CHOICE_TTL_SECONDS
+        elif now >= choice.expires_at:
+            choice.state = "expired"
+            self._current.pop((handle, turn_id), None)
+            return 0
+        return self._remaining_seconds(choice, now)
 
     def authorize(
         self,
@@ -230,7 +259,9 @@ class ChoiceAuthority:
             return ChoiceDecision("revoked")
         if choice.state == "revoked":
             return ChoiceDecision("revoked")
-        if choice.state == "expired" or self._now() >= choice.expires_at:
+        if choice.state == "expired":
+            return ChoiceDecision("expired")
+        if choice.expires_at is not None and self._now() >= choice.expires_at:
             choice.state = "expired"
             return ChoiceDecision("expired")
         if (
@@ -238,6 +269,8 @@ class ChoiceAuthority:
             or self._current.get((handle, turn_id)) is not choice
         ):
             return ChoiceDecision("replaced")
+        if choice.expires_at is None:
+            return ChoiceDecision("unknown")
         if active_turn_id != turn_id or event is not correlation.event:
             return ChoiceDecision("stale")
         if choice.state == "chosen":
@@ -362,6 +395,23 @@ class ChoiceAuthority:
         ):
             raise ChoiceProtocolError("choice token collision")
         return token
+
+    def _prune_inactive_correlations(self) -> None:
+        for key, correlation in tuple(self._correlations.items()):
+            choice = correlation.choice
+            if (
+                choice.state != "active"
+                or self._current.get((choice.handle, choice.turn_id)) is not choice
+            ):
+                del self._correlations[key]
+
+    @staticmethod
+    def _remaining_seconds(choice: _ChoiceObject, now: float) -> int:
+        if choice.state != "active":
+            return 0
+        if choice.expires_at is None:
+            return int(CHOICE_TTL_SECONDS)
+        return max(0, math.ceil(choice.expires_at - now))
 
 
 def _normalize_choice_payload(

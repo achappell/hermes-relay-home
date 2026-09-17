@@ -22,19 +22,19 @@ deployment support. No sibling repository was changed.
 | Check | Command | Result |
 | --- | --- | --- |
 | Python runtime | `uv run --python 3.14 --locked --extra dev python --version` | `Python 3.14.7` |
-| Focused bridge and diagnostics suite | `uv run --python 3.14 --locked --extra dev pytest -q tests/test_standard_bridge.py tests/test_bridge_endpoint.py tests/test_diagnostics.py` | `202 passed in 0.76s` |
-| Full Home suite | `uv run --python 3.14 --locked --extra dev pytest -q` | `452 passed in 5.99s` |
+| Focused bridge and diagnostics suite | `uv run --python 3.14 --locked --extra dev pytest -q tests/test_standard_bridge.py tests/test_bridge_endpoint.py tests/test_diagnostics.py` | `233 passed in 1.27s` |
+| Full Home suite | `uv run --python 3.14 --locked --extra dev pytest -q` | `493 passed in 6.54s` |
 | Ruff lint | `uvx ruff check src tests` | `All checks passed!` |
-| Ruff format | `uvx ruff format --check src tests` | `52 files already formatted` |
-| Lockfile | `uv lock --check` | `Resolved 11 packages in 6ms` |
-| Configuration schema | `uv run --python 3.14 --locked --extra dev python -m json.tool docs/contracts/v1/configuration.schema.json` | Passed; valid JSON |
+| Ruff format | `uvx ruff format --check src tests` | `53 files already formatted` |
+| Lockfile | `uv lock --check` | `Resolved 16 packages in 4ms` |
+| Configuration schema | `uv run --python 3.14 --locked --extra dev pytest -q tests/test_configuration_schema.py` | `10 passed in 0.11s`; Draft 2020-12 schema validation and omission, boolean, invalid type, and unknown-field cases |
 | Whitespace/diff | `git diff --check` | Passed; no output |
 
 ## Review
 
-All 17 findings were triaged individually. Seven patch groups were applied and
-verified; the other 10 claims were rejected with evidence in the implementation
-spec. Nothing was deferred.
+All review findings were triaged individually. Seventeen patch groups were
+applied and verified; two findings remain deferred and ten were rejected with
+evidence in the implementation spec.
 
 No credentials, `.env` files, generated local state, or database migrations were
 added.

@@ -301,6 +301,7 @@ class BridgeEndpoint:
         self._interrupted_turn_ids: set[str] = set()
         self._retired_turn_ids: set[str] = set()
         self._retired_turn_order: deque[str] = deque()
+        self._retired_turn_correlations: dict[str, str] = {}
         self._pending_prompts: dict[tuple[str, str, str, str], BridgeEvent] = {}
         self._event_thread: threading.Thread | None = None
         self._audio_thread: threading.Thread | None = None
@@ -921,6 +922,8 @@ class BridgeEndpoint:
     def _record_choice_diagnostic(self, turn_id: str, *, outcome: str) -> None:
         with self._state_lock:
             correlation_id = self._turn_correlations.get(turn_id)
+            if correlation_id is None:
+                correlation_id = self._retired_turn_correlations.get(turn_id)
         if correlation_id is None:
             return
         self._record_diagnostic(
@@ -1187,6 +1190,8 @@ class BridgeEndpoint:
                     }
                 )
             except _RequestError as error:
+                if error.code == "choice_revision_limit":
+                    continue
                 LOGGER.warning(
                     "closing Home bridge connection: %s event not forwardable: %s",
                     event.type if isinstance(event, BridgeEvent) else "unknown",
@@ -1231,6 +1236,10 @@ class BridgeEndpoint:
                 with self._state_lock:
                     safe_payload = self._choice_authority.project(event, handle=handle)
             except ChoiceProtocolError as error:
+                if str(error) == "choice revision limit exceeded":
+                    raise _RequestError(
+                        "choice_revision_limit", delivery="known"
+                    ) from error
                 raise _RequestError("protocol_error", delivery="uncertain") from error
         else:
             safe_payload = _safe_public_mapping(event.payload)
@@ -1569,11 +1578,14 @@ class BridgeEndpoint:
                     if len(self._retired_turn_order) >= MAX_RETIRED_TURN_IDS:
                         retired = self._retired_turn_order.popleft()
                         self._retired_turn_ids.discard(retired)
+                        self._retired_turn_correlations.pop(retired, None)
                     self._retired_turn_order.append(turn_id)
                     self._retired_turn_ids.add(turn_id)
                 self._known_turn_ids.discard(turn_id)
                 self._terminal_turn_ids.discard(turn_id)
-                self._turn_correlations.pop(turn_id, None)
+                correlation_id = self._turn_correlations.pop(turn_id, None)
+                if correlation_id is not None:
+                    self._retired_turn_correlations[turn_id] = correlation_id
                 self._pending_prompts = {
                     key: event
                     for key, event in self._pending_prompts.items()
@@ -1642,6 +1654,47 @@ class BridgeEndpoint:
         except Exception as error:  # noqa: BLE001 - telemetry cannot block bridge work
             del error
 
+    def _prepare_choice_delivery(self, message: str) -> str:
+        """Start the choice TTL when its event is about to reach a socket."""
+
+        try:
+            document = json.loads(message)
+        except TypeError, ValueError, json.JSONDecodeError:
+            return message
+        if not isinstance(document, dict) or document.get("method") != "event":
+            return message
+        params = document.get("params")
+        if not isinstance(params, dict):
+            return message
+        event = params.get("event")
+        if not isinstance(event, dict) or event.get("type") != CHOICE_EVENT_TYPE:
+            return message
+        payload = event.get("payload")
+        if not isinstance(payload, dict) or payload.get("prompt_kind") != "choice":
+            return message
+        handle = params.get("conversation_handle")
+        turn_id = params.get("turn_id")
+        correlation_id = params.get("correlation_id")
+        if not all(
+            type(value) is str and value for value in (handle, turn_id, correlation_id)
+        ):
+            return message
+        with self._state_lock:
+            timeout_s = self._choice_authority.mark_delivered(
+                handle=handle,
+                turn_id=turn_id,
+                correlation_id=correlation_id,
+            )
+        if timeout_s is None:
+            return message
+        payload["timeout_s"] = timeout_s
+        return json.dumps(
+            document,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+
     def _send_json(self, payload: dict[str, object]) -> bool:
         message = json.dumps(
             payload,
@@ -1674,6 +1727,8 @@ class BridgeEndpoint:
                         self._parked_event_bytes += message_bytes
                         sent_or_queued = True
             else:
+                if payload.get("method") == "event":
+                    message = self._prepare_choice_delivery(message)
                 try:
                     connection.send(message)
                     sent_or_queued = True
@@ -1726,8 +1781,10 @@ class BridgeEndpoint:
             if connection is None or self._closed:
                 return
             while self._parked_events:
+                message = self._prepare_choice_delivery(self._parked_events[0])
+                self._parked_events[0] = message
                 try:
-                    connection.send(self._parked_events[0])
+                    connection.send(message)
                 except Exception:  # noqa: BLE001 - retain the unsent event
                     self._connection = None
                     failed_connection = connection

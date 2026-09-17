@@ -15,7 +15,7 @@ dependencies = ["cryptography>=44", "websockets>=17,<18"]
 hermes-home = "hermes_home.runtime:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "jsonschema>=4.23,<5"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
