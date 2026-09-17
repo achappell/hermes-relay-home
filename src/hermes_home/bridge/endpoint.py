@@ -5,13 +5,21 @@ from __future__ import annotations
 import json
 import logging
 import math
+import secrets
 import threading
+import time
 import uuid
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
+from hermes_home.bridge.choice_authority import (
+    CHOICE_EVENT_TYPE,
+    CHOICE_EXPIRY_EVENT_TYPE,
+    ChoiceAuthority,
+    ChoiceProtocolError,
+)
 from hermes_home.bridge.routes import HOME_BRIDGE_PATH
 from hermes_home.bridge.standard import (
     AudioFrame,
@@ -55,6 +63,10 @@ _STRUCTURED_PROMPT_FIELDS = {
     "clarify.request": ("answer", frozenset({"answer", "question_id"})),
     "secret.request": ("value", frozenset({"value"})),
     "sudo.request": ("password", frozenset({"password"})),
+    CHOICE_EVENT_TYPE: (
+        "option_id",
+        frozenset({"operation", "option_id", "object_id", "freshness"}),
+    ),
 }
 _TERMINAL_STATUSES = frozenset(
     {
@@ -93,6 +105,7 @@ _PROMPT_EXPIRY_TYPES = {
     "clarify.expire": "clarify.request",
     "secret.expire": "secret.request",
     "sudo.expire": "sudo.request",
+    CHOICE_EXPIRY_EVENT_TYPE: CHOICE_EVENT_TYPE,
 }
 # Standard events an endpoint may receive. Everything else Standard emits
 # (session.info with the system prompt and tool inventory, sessions.changed,
@@ -249,6 +262,8 @@ class BridgeEndpoint:
         route: Mapping[str, object] | BridgeRoute | None = None,
         max_message_size: int = MAX_BRIDGE_MESSAGE_BYTES,
         diagnostics: DiagnosticsRecorder | None = None,
+        choice_clock: Callable[[], float] = time.monotonic,
+        choice_token_factory: Callable[[], str] | None = None,
     ) -> None:
         if type(max_message_size) is not int or max_message_size <= 0:
             raise ValueError("Home bridge message size must be positive")
@@ -258,6 +273,10 @@ class BridgeEndpoint:
         self._route = _safe_route(route)
         self._max_message_size = max_message_size
         self._diagnostics = diagnostics
+        self._choice_authority = ChoiceAuthority(
+            clock=choice_clock,
+            token_factory=choice_token_factory or (lambda: secrets.token_urlsafe(24)),
+        )
         self._send_lock = threading.Lock()
         self._state_lock = threading.RLock()
         self._stop = threading.Event()
@@ -282,6 +301,7 @@ class BridgeEndpoint:
         self._interrupted_turn_ids: set[str] = set()
         self._retired_turn_ids: set[str] = set()
         self._retired_turn_order: deque[str] = deque()
+        self._retired_turn_correlations: dict[str, str] = {}
         self._pending_prompts: dict[tuple[str, str, str, str], BridgeEvent] = {}
         self._event_thread: threading.Thread | None = None
         self._audio_thread: threading.Thread | None = None
@@ -443,6 +463,7 @@ class BridgeEndpoint:
                 return
             self._closed = True
             self._ready = False
+            self._choice_authority.revoke_all()
             self._stop.set()
             self._readiness_changed.set()
             bridge = self._bridge
@@ -625,6 +646,7 @@ class BridgeEndpoint:
         with self._state_lock:
             self._ready = False
             self._availability_reason = "stale_conversation"
+            self._choice_authority.revoke_all()
             self._readiness_changed.set()
         return {
             "schema": HOME_BRIDGE_SCHEMA,
@@ -731,13 +753,26 @@ class BridgeEndpoint:
                 "response",
             },
         )
-        handle = self._require_bound_handle(params["conversation_handle"])
+        handle = _require_handle(params["conversation_handle"])
         turn_id = _require_string(params["turn_id"])
         correlation_id = _require_string(params["correlation_id"])
         event_type = _require_string(params["event_type"])
         response = params["response"]
         if not isinstance(response, Mapping):
             raise _RequestError("invalid_request", rpc_code=-32602)
+        with self._state_lock:
+            is_choice_correlation = self._choice_authority.knows_correlation(
+                correlation_id
+            )
+        if event_type == CHOICE_EVENT_TYPE or is_choice_correlation:
+            return self._choice_respond(
+                handle=handle,
+                turn_id=turn_id,
+                correlation_id=correlation_id,
+                event_type=event_type,
+                response=response,
+            )
+        handle = self._require_bound_handle(handle)
         self._require_ready()
         with self._state_lock:
             active_turn_id = self._active_turn_id
@@ -769,6 +804,136 @@ class BridgeEndpoint:
                     (handle, turn_id, correlation_id, event_type), None
                 )
         return safe_result
+
+    def _choice_respond(
+        self,
+        *,
+        handle: str,
+        turn_id: str,
+        correlation_id: str,
+        event_type: str,
+        response: Mapping[str, object],
+    ) -> dict[str, object]:
+        with self._state_lock:
+            bound_handle = self._bound_handle
+            active_turn_id = self._active_turn_id
+            event = (
+                self._pending_prompts.get(
+                    (handle, turn_id, correlation_id, CHOICE_EVENT_TYPE)
+                )
+                if handle == bound_handle
+                else None
+            )
+            bridge = self._bridge
+            ready = self._ready
+            if bound_handle is None or handle != bound_handle:
+                reason = "revoked"
+                decision = None
+            elif not ready or bridge is None:
+                reason = "revoked"
+                decision = None
+                self._choice_authority.revoke_all()
+            else:
+                decision = self._choice_authority.authorize(
+                    handle=handle,
+                    turn_id=turn_id,
+                    correlation_id=correlation_id,
+                    event_type=event_type,
+                    response=response,
+                    active_turn_id=active_turn_id,
+                    ready=ready,
+                    event=event,
+                )
+                reason = decision.reason
+        if reason is not None:
+            self._record_choice_diagnostic(turn_id, outcome="rejected")
+            return _choice_unavailable_result(
+                handle=handle,
+                turn_id=turn_id,
+                reason=reason,
+            )
+
+        assert decision is not None
+        assert decision.event is not None
+        assert decision.response is not None
+        assert decision.operation is not None
+        assert bridge is not None
+        try:
+            result = bridge.respond_prompt(decision.event, decision.response)
+        except BridgeCapabilityUnavailable:
+            with self._state_lock:
+                self._choice_authority.revoke_all()
+                self._pending_prompts.pop(
+                    (handle, turn_id, correlation_id, CHOICE_EVENT_TYPE), None
+                )
+            self._record_choice_diagnostic(turn_id, outcome="rejected")
+            return _choice_unavailable_result(
+                handle=bound_handle,
+                turn_id=turn_id,
+                reason="unsupported",
+            )
+        except BridgeRequestRejected:
+            with self._state_lock:
+                self._choice_authority.revoke_turn(handle=handle, turn_id=turn_id)
+                self._pending_prompts.pop(
+                    (handle, turn_id, correlation_id, CHOICE_EVENT_TYPE), None
+                )
+            self._record_choice_diagnostic(turn_id, outcome="rejected")
+            return _choice_unavailable_result(
+                handle=bound_handle,
+                turn_id=turn_id,
+                reason="stale",
+            )
+        except BridgeAuthorizationError as error:
+            with self._state_lock:
+                self._choice_authority.revoke_all()
+                self._pending_prompts.pop(
+                    (handle, turn_id, correlation_id, CHOICE_EVENT_TYPE), None
+                )
+            self._mark_unavailable(error.code)
+            self._record_choice_diagnostic(turn_id, outcome="rejected")
+            return _choice_unavailable_result(
+                handle=bound_handle,
+                turn_id=turn_id,
+                reason="revoked",
+            )
+        except Exception as error:  # noqa: BLE001 - never retry an action write
+            self._record_choice_diagnostic(turn_id, outcome="failed")
+            self._raise_bridge_error(error)
+        try:
+            safe_result = _choice_response_result_payload(
+                result,
+                handle=bound_handle,
+                turn_id=turn_id,
+                operation=decision.operation,
+            )
+        except _RequestError as error:
+            if error.delivery == "uncertain":
+                self._mark_unavailable(error.code)
+            raise
+        with self._state_lock:
+            self._choice_authority.complete(decision)
+            self._pending_prompts.pop(
+                (handle, turn_id, correlation_id, CHOICE_EVENT_TYPE), None
+            )
+        self._record_choice_diagnostic(turn_id, outcome="accepted")
+        return safe_result
+
+    def _record_choice_diagnostic(self, turn_id: str, *, outcome: str) -> None:
+        with self._state_lock:
+            correlation_id = self._turn_correlations.get(turn_id)
+            if correlation_id is None:
+                correlation_id = self._retired_turn_correlations.get(turn_id)
+        if correlation_id is None:
+            return
+        self._record_diagnostic(
+            correlation_id,
+            source="endpoint",
+            phase="request",
+            outcome=outcome,
+            failure_code="request_rejected" if outcome == "rejected" else None,
+            turn_id=turn_id,
+        )
 
     def _session_interrupt(self, params: dict[str, object]) -> dict[str, object]:
         _require_param_shape(params, required={"conversation_handle", "turn_id"})
@@ -886,6 +1051,7 @@ class BridgeEndpoint:
                 self._ready = True
                 self._availability_reason = None
                 if reconnect:
+                    self._choice_authority.revoke_all()
                     audio_thread_to_join = self._audio_thread
                     self._active_turn_id = None
                     self._submitting_turn = False
@@ -905,6 +1071,7 @@ class BridgeEndpoint:
             self._start_event_pump()
         else:
             with self._state_lock:
+                self._choice_authority.revoke_all()
                 self._ready = False
                 reason = payload.get("reason")
                 self._availability_reason = (
@@ -952,6 +1119,7 @@ class BridgeEndpoint:
 
     def _mark_unavailable(self, reason: str) -> None:
         with self._state_lock:
+            self._choice_authority.revoke_all()
             self._ready = False
             self._availability_reason = _normalize_code(reason)
         self._readiness_changed.set()
@@ -1022,6 +1190,8 @@ class BridgeEndpoint:
                     }
                 )
             except _RequestError as error:
+                if error.code == "choice_revision_limit":
+                    continue
                 LOGGER.warning(
                     "closing Home bridge connection: %s event not forwardable: %s",
                     event.type if isinstance(event, BridgeEvent) else "unknown",
@@ -1054,7 +1224,6 @@ class BridgeEndpoint:
             _require_string(event.turn_id)
         if event.correlation_id is not None:
             _require_string(event.correlation_id)
-        safe_payload = _safe_public_mapping(event.payload)
         with self._state_lock:
             turn_is_known = (
                 event.turn_id is None or event.turn_id in self._known_turn_ids
@@ -1062,6 +1231,18 @@ class BridgeEndpoint:
             submitting = self._active_turn_id is None and self._submitting_turn
         if not turn_is_known and not submitting:
             raise _RequestError("protocol_error", delivery="uncertain")
+        if event.type == CHOICE_EVENT_TYPE:
+            try:
+                with self._state_lock:
+                    safe_payload = self._choice_authority.project(event, handle=handle)
+            except ChoiceProtocolError as error:
+                if str(error) == "choice revision limit exceeded":
+                    raise _RequestError(
+                        "choice_revision_limit", delivery="known"
+                    ) from error
+                raise _RequestError("protocol_error", delivery="uncertain") from error
+        else:
+            safe_payload = _safe_public_mapping(event.payload)
         if event.type in _STRUCTURED_PROMPT_FIELDS:
             if event.turn_id is None or event.correlation_id is None:
                 raise _RequestError("protocol_error", delivery="uncertain")
@@ -1075,6 +1256,13 @@ class BridgeEndpoint:
                 self._pending_prompts[key] = event
         elif event.type in _PROMPT_EXPIRY_TYPES:
             if event.turn_id is not None and event.correlation_id is not None:
+                if event.type == CHOICE_EXPIRY_EVENT_TYPE:
+                    with self._state_lock:
+                        self._choice_authority.expire_correlation(
+                            handle=handle,
+                            turn_id=event.turn_id,
+                            correlation_id=event.correlation_id,
+                        )
                 with self._state_lock:
                     self._pending_prompts.pop(
                         (
@@ -1378,26 +1566,34 @@ class BridgeEndpoint:
             audio_active = (
                 self._audio_turn_id == turn_id and self._audio_thread is not None
             )
+            released = False
             if (
                 self._active_turn_id == turn_id
                 and turn_id in self._terminal_turn_ids
                 and not audio_active
             ):
+                released = True
                 self._active_turn_id = None
                 if turn_id not in self._retired_turn_ids:
                     if len(self._retired_turn_order) >= MAX_RETIRED_TURN_IDS:
                         retired = self._retired_turn_order.popleft()
                         self._retired_turn_ids.discard(retired)
+                        self._retired_turn_correlations.pop(retired, None)
                     self._retired_turn_order.append(turn_id)
                     self._retired_turn_ids.add(turn_id)
                 self._known_turn_ids.discard(turn_id)
                 self._terminal_turn_ids.discard(turn_id)
-                self._turn_correlations.pop(turn_id, None)
+                correlation_id = self._turn_correlations.pop(turn_id, None)
+                if correlation_id is not None:
+                    self._retired_turn_correlations[turn_id] = correlation_id
                 self._pending_prompts = {
                     key: event
                     for key, event in self._pending_prompts.items()
                     if key[1] != turn_id
                 }
+            handle = self._bound_handle
+            if released and handle is not None:
+                self._choice_authority.revoke_turn(handle=handle, turn_id=turn_id)
 
     def _record_audio_diagnostic(
         self,
@@ -1458,6 +1654,47 @@ class BridgeEndpoint:
         except Exception as error:  # noqa: BLE001 - telemetry cannot block bridge work
             del error
 
+    def _prepare_choice_delivery(self, message: str) -> str:
+        """Start the choice TTL when its event is about to reach a socket."""
+
+        try:
+            document = json.loads(message)
+        except TypeError, ValueError, json.JSONDecodeError:
+            return message
+        if not isinstance(document, dict) or document.get("method") != "event":
+            return message
+        params = document.get("params")
+        if not isinstance(params, dict):
+            return message
+        event = params.get("event")
+        if not isinstance(event, dict) or event.get("type") != CHOICE_EVENT_TYPE:
+            return message
+        payload = event.get("payload")
+        if not isinstance(payload, dict) or payload.get("prompt_kind") != "choice":
+            return message
+        handle = params.get("conversation_handle")
+        turn_id = params.get("turn_id")
+        correlation_id = params.get("correlation_id")
+        if not all(
+            type(value) is str and value for value in (handle, turn_id, correlation_id)
+        ):
+            return message
+        with self._state_lock:
+            timeout_s = self._choice_authority.mark_delivered(
+                handle=handle,
+                turn_id=turn_id,
+                correlation_id=correlation_id,
+            )
+        if timeout_s is None:
+            return message
+        payload["timeout_s"] = timeout_s
+        return json.dumps(
+            document,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+
     def _send_json(self, payload: dict[str, object]) -> bool:
         message = json.dumps(
             payload,
@@ -1490,6 +1727,8 @@ class BridgeEndpoint:
                         self._parked_event_bytes += message_bytes
                         sent_or_queued = True
             else:
+                if payload.get("method") == "event":
+                    message = self._prepare_choice_delivery(message)
                 try:
                     connection.send(message)
                     sent_or_queued = True
@@ -1542,8 +1781,10 @@ class BridgeEndpoint:
             if connection is None or self._closed:
                 return
             while self._parked_events:
+                message = self._prepare_choice_delivery(self._parked_events[0])
+                self._parked_events[0] = message
                 try:
-                    connection.send(self._parked_events[0])
+                    connection.send(message)
                 except Exception:  # noqa: BLE001 - retain the unsent event
                     self._connection = None
                     failed_connection = connection
@@ -1819,6 +2060,12 @@ def _safe_capabilities(value: object) -> dict[str, object]:
             if type(capability) is not bool:
                 raise _RequestError("protocol_error")
             result[key] = capability
+    for key in ("prompt.choose", "prompt.explore"):
+        capability = value.get(key)
+        if capability is not None:
+            if type(capability) is not bool:
+                raise _RequestError("protocol_error")
+            result[key] = capability
     timing = value.get("timing", "absent")
     if type(timing) is not str or not timing:
         raise _RequestError("protocol_error")
@@ -1883,6 +2130,72 @@ def _result_payload(
     if turn_id is not None:
         result["turn_id"] = turn_id
     return result
+
+
+def _choice_unavailable_result(
+    *,
+    handle: str,
+    turn_id: str,
+    reason: str,
+) -> dict[str, object]:
+    if reason not in {
+        "stale",
+        "expired",
+        "replaced",
+        "revoked",
+        "duplicate",
+        "unknown",
+        "unsupported",
+    }:
+        raise _RequestError("protocol_error")
+    return {
+        "schema": HOME_BRIDGE_SCHEMA,
+        "conversation_handle": handle,
+        "turn_id": turn_id,
+        "status": "unavailable",
+        "reason": reason,
+    }
+
+
+def _choice_response_result_payload(
+    value: object,
+    *,
+    handle: str,
+    turn_id: str,
+    operation: str,
+) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        raise _RequestError("protocol_error", delivery="uncertain")
+    for key in ("accepted", "resolved"):
+        if key in value and type(value[key]) is not bool:
+            raise _RequestError("protocol_error", delivery="uncertain")
+    status = value.get("status")
+    if status is not None and type(status) is not str:
+        raise _RequestError("protocol_error", delivery="uncertain")
+    if value.get("accepted") is False or value.get("resolved") is False:
+        raise _RequestError("request_rejected")
+    if isinstance(status, str) and status.casefold() in {
+        "rejected",
+        "denied",
+        "expired",
+        "failed",
+        "error",
+    }:
+        raise _RequestError("request_rejected")
+    accepted_statuses = {"ok", "accepted", "resolved", "complete", "completed"}
+    if not (
+        value.get("accepted") is True
+        or value.get("resolved") is True
+        or (isinstance(status, str) and status.casefold() in accepted_statuses)
+    ):
+        raise _RequestError("protocol_error", delivery="uncertain")
+    return {
+        "schema": HOME_BRIDGE_SCHEMA,
+        "conversation_handle": handle,
+        "turn_id": turn_id,
+        "status": "accepted",
+        "operation": operation,
+    }
 
 
 def _validate_prompt_response(

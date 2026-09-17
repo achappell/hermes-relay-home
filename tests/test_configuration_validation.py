@@ -48,6 +48,48 @@ def test_priorities_can_repeat_in_different_rooms() -> None:
     assert validate_candidate(candidate)["devices"] == candidate["devices"]
 
 
+def test_interactive_choice_is_an_explicit_device_capability() -> None:
+    device = _device("puck-screen", "kitchen", 1)
+    device["capabilities"] = {
+        "wake_claim": True,
+        "interactive_choice": True,
+    }
+    candidate = {
+        "rooms": [{"id": "kitchen", "name": "Kitchen"}],
+        "profiles": [],
+        "wake_mappings": [],
+        "devices": [device],
+    }
+
+    normalized = validate_candidate(candidate)
+
+    assert normalized["devices"][0]["capabilities"] == {
+        "wake_claim": True,
+        "interactive_choice": True,
+    }
+    legacy = validate_candidate(
+        {
+            **candidate,
+            "devices": [_device("puck-audio", "kitchen", 1)],
+        }
+    )
+    assert legacy["devices"][0]["capabilities"] == {"wake_claim": True}
+
+
+def test_interactive_choice_capability_must_be_a_boolean() -> None:
+    device = _device("puck-screen", "kitchen", 1)
+    device["capabilities"] = {"wake_claim": True, "interactive_choice": "yes"}
+    candidate = {
+        "rooms": [{"id": "kitchen", "name": "Kitchen"}],
+        "profiles": [],
+        "wake_mappings": [],
+        "devices": [device],
+    }
+
+    with pytest.raises(ConfigurationValidationError, match="interactive_choice"):
+        validate_candidate(candidate)
+
+
 def test_unknown_fields_are_rejected_from_the_candidate() -> None:
     candidate = {
         "rooms": [],

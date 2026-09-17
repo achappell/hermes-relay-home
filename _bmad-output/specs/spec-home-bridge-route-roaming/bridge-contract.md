@@ -69,11 +69,13 @@ methods are:
 | `dispatch_command(name, arg)` | Dispatches only a command advertised by Standard `commands.catalog`. |
 | `ping()` | Exercises the Standard liveness operation. It is not a substitute for a timing signal. |
 
-`BridgeStatus.to_endpoint()`, `BridgeTurn.to_endpoint()`, and
-`BridgeEvent.to_endpoint()` currently return Home domain dictionaries, not
-JSON-RPC envelopes. The route adapter must wrap those domain values in the
-wire contract below; a front end must not assume that calling the Python seam
-means a public route already exists.
+`BridgeStatus.to_endpoint()`, `BridgeTurn.to_endpoint()`, and ordinary
+`BridgeEvent.to_endpoint()` calls return Home domain dictionaries, not JSON-RPC
+envelopes. The generic event serializer refuses `prompt.request` choices;
+those require the endpoint's freshness authority to redact source IDs and mint
+Home IDs. The route adapter must wrap the resulting domain values in the wire
+contract below; calling the Python seam does not mean a public route already
+exists.
 
 The current domain shapes are:
 
@@ -250,10 +252,51 @@ The structured prompt event types and response keys are fixed at this boundary:
 | `clarify.request` | `clarify.respond` | `answer` |
 | `secret.request` | `secret.respond` | `value` |
 | `sudo.request` | `sudo.respond` | `password` |
+| `prompt.request` with `prompt_kind: "choice"` | `prompt.choose` / `prompt.explore` | `operation`, `option_id`, `object_id`, `freshness` |
 
-Prompt sensitivity, options, values, expiry, turn ownership, and correlation
-IDs remain visible to the endpoint adapter. A prompt response is not ordinary
-model input and must not be converted into a new `prompt.submit`.
+For existing prompt types, sensitivity, options, values, expiry, turn
+ownership, and correlation IDs remain visible to the endpoint adapter. A
+prompt response is not ordinary model input and must not be converted into a
+new `prompt.submit`.
+
+Typed choices use this normalized event payload:
+
+```json
+{
+  "prompt_id": "standard-request-id",
+  "prompt_kind": "choice",
+  "text": "Choose an inspection step.",
+  "timeout_s": 300,
+  "choice": {
+    "object_id": "home-choice-id",
+    "freshness": "home-freshness-id",
+    "operations": ["choose", "explore"]
+  },
+  "options": [{"id": "inspect", "label": "Inspect"}]
+}
+```
+
+Home mints the public choice and freshness IDs. It translates a valid response
+to the upstream object's private IDs inside Home. A response sends
+`{"operation":"choose","option_id":"inspect","object_id":"home-choice-id","freshness":"home-freshness-id"}`
+as `prompt.respond.response`; `explore` has the same shape and requests detail
+without committing the option. Only option IDs and labels reach the endpoint. Raw
+option values and unknown fields are dropped.
+
+Home expires a choice 300 seconds after first delivery using its monotonic
+clock. Exploration does not extend that deadline. A new object revision
+replaces the old one; each correlation authorizes one response. Stale,
+expired, replaced, revoked, duplicate, unknown, and unsupported attempts return
+`status: "unavailable"` with a matching `reason` and cause no new turn.
+
+The `prompt.choose` and `prompt.explore` capability flags are exposed only
+when Standard advertises the matching operation and the bound Home Device has
+`capabilities.interactive_choice: true`. That optional Device capability
+defaults to false, keeping passive Room Displays and audio-only Pucks read-only.
+The pinned Standard contract does not yet advertise typed choices, and the TUI
+Home adapter does not yet return the complete typed response, so this local
+Home slice remains unavailable in live production until those dependencies
+land.
 
 ### Events
 

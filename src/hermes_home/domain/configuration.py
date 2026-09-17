@@ -188,11 +188,24 @@ def _validate_devices(
             )
         capabilities = device["capabilities"]
         _require_mapping(capabilities, f"{path}.capabilities")
-        _require_keys(capabilities, {"wake_claim"}, f"{path}.capabilities")
+        capability_keys = set(capabilities)
+        if (
+            any(type(key) is not str for key in capability_keys)
+            or "wake_claim" not in capability_keys
+            or capability_keys - {"wake_claim", "interactive_choice"}
+        ):
+            raise ConfigurationValidationError(
+                f"{path}.capabilities has invalid fields"
+            )
         wake_claim = capabilities["wake_claim"]
         if type(wake_claim) is not bool:
             raise ConfigurationValidationError(
                 f"{path}.capabilities.wake_claim must be a boolean"
+            )
+        interactive_choice = capabilities.get("interactive_choice", False)
+        if type(interactive_choice) is not bool:
+            raise ConfigurationValidationError(
+                f"{path}.capabilities.interactive_choice must be a boolean"
             )
         if device_id in device_ids:
             raise ConfigurationValidationError(f"duplicate id {device_id!r} in devices")
@@ -208,13 +221,16 @@ def _validate_devices(
 
         device_ids.add(device_id)
         room_priorities.add(priority)
+        normalized_capabilities = {"wake_claim": wake_claim}
+        if interactive_choice:
+            normalized_capabilities["interactive_choice"] = True
         devices.append(
             {
                 "id": device_id,
                 "name": name,
                 "room_id": room_id,
                 "priority": priority,
-                "capabilities": {"wake_claim": wake_claim},
+                "capabilities": normalized_capabilities,
             }
         )
     return devices

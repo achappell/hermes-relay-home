@@ -158,7 +158,8 @@ class ConversationGrantStore:
             try:
                 row = self._connection.execute(
                     "SELECT device_id, room_id, wake_mapping_id, profile_id, "
-                    "session_id, status, idle_deadline, credential_generation, activity "
+                    "session_id, status, idle_deadline, credential_generation, activity, "
+                    "configuration_revision "
                     "FROM conversation_claims WHERE handle = ?",
                     (handle,),
                 ).fetchone()
@@ -178,6 +179,15 @@ class ConversationGrantStore:
                 if profile is None or not profile["available"]:
                     self._close_locked(handle, "profile_revoked", now)
                     return None
+                devices = {
+                    device["id"]: device for device in snapshot.get("devices", [])
+                }
+                device = devices.get(device_id)
+                interactive_choice = (
+                    snapshot.get("revision") == row[9]
+                    and device is not None
+                    and device["capabilities"].get("interactive_choice", False) is True
+                )
                 mappings = {
                     mapping["id"]: mapping for mapping in snapshot["wake_mappings"]
                 }
@@ -199,6 +209,8 @@ class ConversationGrantStore:
                 session_id=row[4],
                 status="active",
                 credential_generation=row[7],
+                configuration_revision=row[9],
+                interactive_choice=interactive_choice,
             )
 
     def persist_session(self, grant: ConversationGrant, session_id: str) -> None:
