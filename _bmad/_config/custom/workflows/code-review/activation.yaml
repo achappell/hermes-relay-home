@@ -1,6 +1,7 @@
 # code-review/activation.yaml
 #
-# Purpose: Finds a story with status "review" and switches to its worktree.
+# Purpose: Finds a local story with status "review", switches to its worktree,
+#          and loads that story's implementation spec.
 # Input variables: (none)
 # Output variables: (set by common/find-stories)
 #   - selected_story: the branch name chosen by the user (or auto-selected)
@@ -8,9 +9,15 @@
 # Side effects: switches agent working directory to selected worktree
 
 - INCLUDE: common/check-config
-- INCLUDE: common/find-prd
+- READ: _bmad/custom/issue-tracking.yaml
+  EXTRACT:
+    prd_key: issue_tracking.prd_key
 - SET: { variable: target_status, value: "review" }
 - INCLUDE: common/find-stories
+- RUN: uv run --no-project python -c "import sys; print(sys.argv[1].rstrip().split('/')[-1])" {selected_story}
+  STORE: selected_story_key
+- SET: { variable: story_spec_file, value: "{selected_worktree_path}/_bmad-output/implementation-artifacts/spec-{selected_story_key}.md" }
 - CD: {selected_worktree_path}
+- READ: {story_spec_file}
 - OUTPUT:
-    message: "Switched to story {selected_story}."
+    message: "Switched to story {selected_story}; loaded its implementation spec."

@@ -6,6 +6,7 @@ issue_tracking:
   project: achappell/hermes-relay-home
   worktree_base: .worktrees
   story_base_branch: main
+  prd_key: hermes-home-next-wave-2026-09-13
   branch_patterns:
     prd: "feat/{prd_key}/prd"
     story: "feat/{prd_key}/{story_key}"
