@@ -64,6 +64,10 @@ def test_windows_deployment_artifacts_install_a_supervised_scraped_runtime() -> 
     assert "promtool.exe" in installer
     assert "Restart-Service" in installer
     assert "hermes_home" in runner
+    # PowerShell must not own the native redirection (stderr would end the runner).
+    assert "2>&1" in runner and "$env:ComSpec" in runner
+    assert "& $python" not in runner
+    assert "PYTHONUNBUFFERED" in runner
 
 
 def test_windows_installer_stops_the_previous_runtime_before_updating_its_venv() -> (

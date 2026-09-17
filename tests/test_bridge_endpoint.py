@@ -46,6 +46,7 @@ class FakeBridge:
     def __init__(self) -> None:
         self.open_calls: list[tuple[dict[str, str], str]] = []
         self.reconnect_calls: list[dict[str, str]] = []
+        self.reauthorize_calls: list[dict[str, str]] = []
         self.prompt_calls: list[str] = []
         self.respond_calls: list[tuple[BridgeEvent, dict[str, object]]] = []
         self.interrupt_calls = 0
@@ -80,6 +81,15 @@ class FakeBridge:
     def reconnect(self, *, headers: dict[str, str]) -> BridgeStatus:
         self.reconnect_calls.append(dict(headers))
         return self.status
+
+    def reauthorize(self, *, headers: dict[str, str]) -> BridgeStatus:
+        self.reauthorize_calls.append(dict(headers))
+        return BridgeStatus(
+            "ready",
+            HANDLE,
+            capabilities=self.status.capabilities,
+            unresolved_turn=BridgeTurn("home-turn-1", HANDLE, "streaming"),
+        )
 
     def submit_prompt(self, text: str) -> BridgeTurn:
         self.prompt_calls.append(text)
@@ -218,11 +228,14 @@ def test_endpoint_dispatches_prompt_controls_and_ping_without_exposing_identity(
             method="prompt.submit",
             params={"conversation_handle": HANDLE, "text": "hello"},
         )
+        correlation_id = prompt["result"].get("correlation_id")
+        assert isinstance(correlation_id, str) and correlation_id.startswith("corr-")
         assert prompt["result"] == {
             "schema": 1,
             "conversation_handle": HANDLE,
             "turn_id": "home-turn-1",
             "status": "submitted",
+            "correlation_id": correlation_id,
         }
         assert _send(
             endpoint,
@@ -279,25 +292,68 @@ def test_endpoint_dispatches_prompt_controls_and_ping_without_exposing_identity(
         endpoint.close()
 
 
+def test_endpoint_forwards_only_allowlisted_standard_events() -> None:
+    connection = FakeConnection()
+    bridge = FakeBridge()
+    endpoint = BridgeEndpoint(connection, bridge, headers=HEADERS, route=ROUTE)
+
+    def forwarded_types() -> list[str]:
+        return [
+            json.loads(item)["params"]["event"]["type"]
+            for item in list(connection.sent)
+            if isinstance(item, str) and json.loads(item).get("method") == "event"
+        ]
+
+    try:
+        _open(endpoint)
+        _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="prompt-1",
+            method="prompt.submit",
+            params={"conversation_handle": HANDLE, "text": "hello"},
+        )
+        bridge.events.extend(
+            [
+                BridgeEvent(
+                    HANDLE,
+                    "session.info",
+                    {"system_prompt": "private", "tools": {"web": ["search"]}},
+                ),
+                BridgeEvent(HANDLE, "sessions.changed", {}),
+                BridgeEvent(HANDLE, "reasoning.delta", {"text": "Considering"}),
+                BridgeEvent(
+                    HANDLE, "tool.start", {"name": "search"}, turn_id="home-turn-1"
+                ),
+                BridgeEvent(
+                    HANDLE, "message.delta", {"text": "OK"}, turn_id="home-turn-1"
+                ),
+                BridgeEvent(
+                    HANDLE,
+                    "message.complete",
+                    {"text": "OK", "status": "complete"},
+                    turn_id="home-turn-1",
+                ),
+            ]
+        )
+        bridge.event_ready.set()
+        _wait_for(lambda: "message.complete" in forwarded_types())
+        assert forwarded_types() == [
+            "reasoning.delta",
+            "message.delta",
+            "message.complete",
+        ]
+        assert "private" not in repr(connection.sent)
+    finally:
+        endpoint.close()
+
+
 def test_structured_prompt_event_is_retained_and_response_is_not_submitted_as_text() -> (
     None
 ):
     connection = FakeConnection()
     bridge = FakeBridge()
-    bridge.events.append(
-        BridgeEvent(
-            HANDLE,
-            "approval.request",
-            {
-                "prompt": "Allow it?",
-                "session_id": "hidden",
-                "profile_id": "hidden",
-            },
-            turn_id="home-turn-1",
-            correlation_id="approval-1",
-        )
-    )
-    bridge.event_ready.set()
     endpoint = BridgeEndpoint(connection, bridge, headers=HEADERS, route=ROUTE)
 
     try:
@@ -310,6 +366,21 @@ def test_structured_prompt_event_is_retained_and_response_is_not_submitted_as_te
             method="prompt.submit",
             params={"conversation_handle": HANDLE, "text": "run it"},
         )
+        # Queue after submit: the event loop drains events as soon as it is ready.
+        bridge.events.append(
+            BridgeEvent(
+                HANDLE,
+                "approval.request",
+                {
+                    "prompt": "Allow it?",
+                    "session_id": "hidden",
+                    "profile_id": "hidden",
+                },
+                turn_id="home-turn-1",
+                correlation_id="approval-1",
+            )
+        )
+        bridge.event_ready.set()
         _wait_for(
             lambda: any(
                 isinstance(item, str) and json.loads(item).get("method") == "event"
@@ -465,6 +536,20 @@ def test_reconnect_keeps_unresolved_turn_separate_from_readiness() -> None:
             params={"conversation_handle": HANDLE},
         )
         assert response["result"]["status"] == "ready"
+        assert set(response["result"]) == {
+            "schema",
+            "status",
+            "conversation_handle",
+            "unresolved_turn",
+            "route",
+            "capabilities",
+        }
+        assert response["result"]["route"] == ROUTE
+        assert response["result"]["capabilities"] == {
+            "commands": [],
+            "heartbeat": True,
+            "timing": "absent",
+        }
         assert response["result"]["unresolved_turn"] == {
             "schema": 1,
             "conversation_handle": HANDLE,
@@ -826,6 +911,233 @@ def test_reconnect_clears_the_previous_endpoint_turn_without_resubmitting_it() -
         )
         assert second["result"]["turn_id"] == "home-turn-2"
         assert bridge.prompt_calls == ["uncertain", "fresh"]
+    finally:
+        endpoint.close()
+
+
+def test_parked_endpoint_adopts_matching_reconnect_and_streams_buffered_events() -> (
+    None
+):
+    first_connection = FakeConnection()
+    bridge = FakeBridge()
+    endpoint = BridgeEndpoint(first_connection, bridge, headers=HEADERS, route=ROUTE)
+
+    _open(endpoint)
+    _send(
+        endpoint,
+        jsonrpc="2.0",
+        schema=1,
+        id="prompt-1",
+        method="prompt.submit",
+        params={"conversation_handle": HANDLE, "text": "keep going"},
+    )
+    endpoint.detach()
+    buffered = endpoint._event_payload(
+        BridgeEvent(
+            HANDLE,
+            "message.delta",
+            {"text": "still running"},
+            turn_id="home-turn-1",
+        )
+    )
+    endpoint._send_json(
+        {"jsonrpc": "2.0", "schema": 1, "method": "event", "params": buffered}
+    )
+
+    second_connection = FakeConnection()
+    endpoint.adopt(second_connection, headers=HEADERS)
+    response = _send(
+        endpoint,
+        jsonrpc="2.0",
+        schema=1,
+        id="reconnect-1",
+        method="conversation.reconnect",
+        params={"conversation_handle": HANDLE},
+    )
+
+    assert set(response["result"]) == {
+        "schema",
+        "status",
+        "conversation_handle",
+        "route",
+        "capabilities",
+        "unresolved_turn",
+    }
+    assert response["result"]["route"] == ROUTE
+    assert isinstance(response["result"]["capabilities"], dict)
+    assert response["result"]["unresolved_turn"] == {
+        "schema": 1,
+        "conversation_handle": HANDLE,
+        "turn_id": "home-turn-1",
+        "status": "streaming",
+    }
+    assert bridge.reauthorize_calls == [HEADERS]
+    assert bridge.reconnect_calls == []
+    assert bridge.prompt_calls == ["keep going"]
+    sent = [
+        json.loads(item) for item in second_connection.sent if isinstance(item, str)
+    ]
+    assert [item.get("id", item.get("method")) for item in sent] == [
+        "reconnect-1",
+        "event",
+    ]
+    assert sent[1]["params"]["event"]["payload"] == {"text": "still running"}
+    endpoint.close()
+
+
+def test_event_send_failure_detaches_socket_without_closing_the_live_bridge() -> None:
+    class FailingSendConnection(FakeConnection):
+        def send(self, message: str | bytes, **_kwargs: object) -> None:
+            raise ConnectionError("peer vanished")
+
+    first_connection = FakeConnection()
+    bridge = FakeBridge()
+    endpoint = BridgeEndpoint(first_connection, bridge, headers=HEADERS, route=ROUTE)
+    _open(endpoint)
+    _send(
+        endpoint,
+        jsonrpc="2.0",
+        schema=1,
+        id="prompt-1",
+        method="prompt.submit",
+        params={"conversation_handle": HANDLE, "text": "keep going"},
+    )
+    endpoint.detach()
+    endpoint.adopt(FailingSendConnection(), headers=HEADERS)
+
+    endpoint._send_json(
+        {
+            "jsonrpc": "2.0",
+            "schema": 1,
+            "method": "event",
+            "params": endpoint._event_payload(
+                BridgeEvent(
+                    HANDLE,
+                    "message.delta",
+                    {"text": "survived"},
+                    turn_id="home-turn-1",
+                )
+            ),
+        }
+    )
+
+    assert endpoint.has_recoverable_state is True
+    assert bridge.close_calls == 0
+    assert len(endpoint._parked_events) == 1
+    endpoint.close()
+
+
+def test_audio_can_end_before_the_terminal_text_event() -> None:
+    connection = FakeConnection()
+    bridge = FakeBridge()
+    bridge.audio.extend(
+        [
+            AudioFrame(
+                "start",
+                turn_id="home-turn-1",
+                sample_rate=24_000,
+                channels=1,
+                sample_width=2,
+                byte_order="little",
+            ),
+            AudioFrame("end", turn_id="home-turn-1"),
+        ]
+    )
+    bridge.audio_ready.set()
+    endpoint = BridgeEndpoint(connection, bridge, headers=HEADERS, route=ROUTE)
+
+    try:
+        _open(endpoint)
+        _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="prompt-1",
+            method="prompt.submit",
+            params={"conversation_handle": HANDLE, "text": "speak then finish text"},
+        )
+        _wait_for(lambda: endpoint._audio_thread is None)
+        assert endpoint._active_turn_id == "home-turn-1"
+
+        payload = endpoint._event_payload(
+            BridgeEvent(
+                HANDLE,
+                "message.delta",
+                {"text": "text after audio"},
+                turn_id="home-turn-1",
+            )
+        )
+        assert payload["event"]["payload"] == {"text": "text after audio"}
+        endpoint._event_payload(
+            BridgeEvent(
+                HANDLE,
+                "message.complete",
+                {"status": "completed"},
+                turn_id="home-turn-1",
+            )
+        )
+        assert endpoint._active_turn_id is None
+    finally:
+        endpoint.close()
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        "turn_complete",
+        "turn.complete",
+        "turn.completed",
+        "turn.end",
+        "turn.ended",
+        "turn_end",
+        "response.complete",
+        "response.completed",
+        "turn_interrupted",
+        "turn.interrupted",
+        "turn.cancelled",
+        "turn.error",
+        "error",
+    ],
+)
+def test_endpoint_releases_turn_for_every_supported_terminal_event(
+    event_type: str,
+) -> None:
+    connection = FakeConnection()
+    bridge = FakeBridge()
+    bridge.audio.append(AudioFrame("unavailable", turn_id="home-turn-1"))
+    bridge.audio_ready.set()
+    endpoint = BridgeEndpoint(connection, bridge, headers=HEADERS, route=ROUTE)
+
+    try:
+        _open(endpoint)
+        _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="prompt-1",
+            method="prompt.submit",
+            params={"conversation_handle": HANDLE, "text": "finish this turn"},
+        )
+        _wait_for(lambda: endpoint._audio_thread is None)
+        payload = (
+            {"status": "completed"}
+            if event_type
+            in {
+                "turn_complete",
+                "turn.complete",
+                "turn.completed",
+                "turn.end",
+                "turn.ended",
+                "turn_end",
+                "response.complete",
+                "response.completed",
+            }
+            else {}
+        )
+        endpoint._event_payload(
+            BridgeEvent(HANDLE, event_type, payload, turn_id="home-turn-1")
+        )
+        assert endpoint._active_turn_id is None
     finally:
         endpoint.close()
 
@@ -1222,5 +1534,56 @@ def test_malformed_audio_frame_is_reported_and_worker_cleans_up() -> None:
             "reason": "protocol_error",
         }
         _wait_for(lambda: endpoint._audio_thread is None)
+    finally:
+        endpoint.close()
+
+
+def test_interrupted_turn_ends_its_audio_instead_of_reporting_a_failure() -> None:
+    connection = FakeConnection()
+    bridge = FakeBridge()
+    bridge.audio.append(
+        AudioFrame(
+            "start",
+            turn_id="home-turn-1",
+            sample_rate=24_000,
+            channels=1,
+            sample_width=2,
+            byte_order="little",
+        )
+    )
+    bridge.audio_ready.set()
+    endpoint = BridgeEndpoint(connection, bridge, headers=HEADERS, route=ROUTE)
+
+    def audio_kinds() -> list[str]:
+        return [
+            json.loads(item)["params"]["frame"]["kind"]
+            for item in list(connection.sent)
+            if isinstance(item, str) and json.loads(item).get("method") == "audio.frame"
+        ]
+
+    try:
+        _open(endpoint)
+        _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="prompt-1",
+            method="prompt.submit",
+            params={"conversation_handle": HANDLE, "text": "count"},
+        )
+        _wait_for(lambda: audio_kinds() == ["start"])
+        interrupted = _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="interrupt-1",
+            method="session.interrupt",
+            params={"conversation_handle": HANDLE, "turn_id": "home-turn-1"},
+        )
+        assert interrupted["result"]["status"] == "accepted"
+        # The sidecar stops once Standard cuts the interrupted turn's speech.
+        bridge.audio.append(RuntimeError("audio stopped"))
+        _wait_for(lambda: len(audio_kinds()) == 2)
+        assert audio_kinds() == ["start", "end"]
     finally:
         endpoint.close()
