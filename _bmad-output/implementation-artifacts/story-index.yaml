@@ -53,6 +53,7 @@ stories:
     title: Add freshness-bound typed-choice authority
     kind: next-wave
     spec: _bmad-output/implementation-artifacts/spec-next-wave-planned.md
+    implementation_spec: _bmad-output/implementation-artifacts/spec-home-nw-07-freshness-bound-typed-choice-authority.md
     github_issue: https://github.com/achappell/hermes-relay-home/issues/17
     horizon: next
   - id: HOME-NW-08

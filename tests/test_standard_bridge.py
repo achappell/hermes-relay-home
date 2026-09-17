@@ -228,6 +228,20 @@ def _event(event_type: str, payload: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _session_event(
+    event_type: str, payload: dict[str, object], session_id: str
+) -> dict[str, object]:
+    return {
+        "jsonrpc": "2.0",
+        "method": "event",
+        "params": {
+            "type": event_type,
+            "session_id": session_id,
+            "payload": payload,
+        },
+    }
+
+
 def _make_bridge(
     socket_factory,
     *,
@@ -1662,6 +1676,442 @@ def test_bridge_resolves_a_structured_prompt_with_its_correlation_id():
             "choice": "allow",
         },
     }
+
+
+def test_bridge_gates_typed_choice_by_gateway_capabilities_and_claim_revision():
+    choice_payload = {
+        "request_id": "choice-request-1",
+        "prompt_kind": "choice",
+        "text": "Choose an inspection step.",
+        "choice": {
+            "object_id": "source-choice-1",
+            "freshness": "source-freshness-1",
+            "operations": ["choose", "explore"],
+        },
+        "options": [{"id": "inspect", "label": "Inspect"}],
+    }
+    gateway_socket = FakeJsonSocket(
+        [
+            _event(
+                "gateway.ready",
+                {
+                    "capabilities": {
+                        "prompt.choose": True,
+                        "prompt.explore": False,
+                    }
+                },
+            ),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {"session_id": "runtime-hermes-hidden"},
+            },
+            {"jsonrpc": "2.0", "id": "home-2", "result": {"accepted": True}},
+            {
+                "jsonrpc": "2.0",
+                "method": "event",
+                "params": {
+                    "type": "prompt.request",
+                    "session_id": "runtime-hermes-hidden",
+                    "payload": choice_payload,
+                },
+            },
+            {"jsonrpc": "2.0", "id": "home-3", "result": {"resolved": True}},
+        ]
+    )
+    bridge = _make_bridge(
+        FakeSocketFactory(gateway_socket),
+        resolver=lambda handle, device_id: ConversationGrant(
+            handle=handle,
+            device_id=device_id,
+            profile_id="family",
+            configuration_revision=17,
+            interactive_choice=True,
+        ),
+    )
+
+    status = bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle="opaque-conversation-1",
+    )
+    bridge.submit_prompt("Run the harmless proof")
+    event = bridge.next_event()
+
+    assert status.capabilities["prompt.choose"] is True
+    assert status.capabilities["prompt.explore"] is False
+    assert event.type == "prompt.request"
+    assert event.choice_capabilities == frozenset({"prompt.choose"})
+    assert event.standard_session_id == "runtime-hermes-hidden"
+    assert event.configuration_revision == 17
+    assert "runtime-hermes-hidden" not in repr(event)
+    with pytest.raises(BridgeProtocolError, match="projected by Home authority"):
+        event.to_endpoint()
+
+    result = bridge.respond_prompt(
+        event,
+        {
+            "operation": "choose",
+            "option_id": "inspect",
+            "object_id": "source-choice-1",
+            "freshness": "source-freshness-1",
+        },
+    )
+
+    assert result == {"resolved": True}
+    assert gateway_socket.sent[-1] == {
+        "jsonrpc": "2.0",
+        "id": "home-4",
+        "method": "prompt.choose",
+        "params": {
+            "session_id": "runtime-hermes-hidden",
+            "request_id": "choice-request-1",
+            "option_id": "inspect",
+            "object_id": "source-choice-1",
+            "freshness": "source-freshness-1",
+        },
+    }
+    with pytest.raises(BridgeRequestRejected, match="no longer pending"):
+        bridge.respond_prompt(
+            event,
+            {
+                "operation": "choose",
+                "option_id": "inspect",
+                "object_id": "source-choice-1",
+                "freshness": "source-freshness-1",
+            },
+        )
+    bridge.close()
+
+
+def test_bridge_forwards_new_typed_choice_revision_while_previous_is_pending():
+    first_payload = {
+        "request_id": "choice-request-1",
+        "prompt_kind": "choice",
+        "text": "Choose an inspection step.",
+        "choice": {
+            "object_id": "source-choice-1",
+            "freshness": "source-freshness-1",
+            "operations": ["choose"],
+        },
+        "options": [{"id": "inspect", "label": "Inspect"}],
+    }
+    revised_payload = {
+        **first_payload,
+        "request_id": "choice-request-2",
+        "choice": {
+            **first_payload["choice"],
+            "freshness": "source-freshness-2",
+        },
+    }
+    gateway_socket = FakeJsonSocket(
+        [
+            _event(
+                "gateway.ready",
+                {"capabilities": {"prompt.choose": True}},
+            ),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {"session_id": "runtime-hermes-hidden"},
+            },
+            {"jsonrpc": "2.0", "id": "home-2", "result": {"accepted": True}},
+            _session_event("prompt.request", first_payload, "runtime-hermes-hidden"),
+            _session_event("prompt.request", revised_payload, "runtime-hermes-hidden"),
+        ]
+    )
+    bridge = _make_bridge(
+        FakeSocketFactory(gateway_socket),
+        resolver=lambda handle, device_id: ConversationGrant(
+            handle=handle,
+            device_id=device_id,
+            profile_id="family",
+            configuration_revision=17,
+            interactive_choice=True,
+        ),
+    )
+
+    try:
+        bridge.open(
+            headers={"Authorization": "Device device-secret"},
+            conversation_handle="opaque-conversation-1",
+        )
+        bridge.submit_prompt("Run the harmless proof")
+        first = bridge.next_event()
+        revised = bridge.next_event()
+
+        assert first.correlation_id == "choice-request-1"
+        assert revised.correlation_id == "choice-request-2"
+        assert revised.payload["choice"]["freshness"] == "source-freshness-2"
+    finally:
+        bridge.close()
+
+
+def test_bridge_rejects_choice_response_after_claim_revision_changes():
+    revision = [17]
+    gateway_socket = FakeJsonSocket(
+        [
+            _event(
+                "gateway.ready",
+                {"capabilities": {"prompt.choose": True}},
+            ),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {"session_id": "runtime-hermes-hidden"},
+            },
+            {"jsonrpc": "2.0", "id": "home-2", "result": {"accepted": True}},
+            _session_event(
+                "prompt.request",
+                {
+                    "request_id": "choice-request-1",
+                    "prompt_kind": "choice",
+                    "text": "Choose an inspection step.",
+                    "choice": {
+                        "object_id": "source-choice-1",
+                        "freshness": "source-freshness-1",
+                        "operations": ["choose"],
+                    },
+                    "options": [{"id": "inspect", "label": "Inspect"}],
+                },
+                "runtime-hermes-hidden",
+            ),
+        ]
+    )
+
+    def resolve_grant(handle: str, device_id: str) -> ConversationGrant:
+        return ConversationGrant(
+            handle=handle,
+            device_id=device_id,
+            profile_id="family",
+            configuration_revision=revision[0],
+            interactive_choice=True,
+        )
+
+    bridge = _make_bridge(FakeSocketFactory(gateway_socket), resolver=resolve_grant)
+
+    try:
+        bridge.open(
+            headers={"Authorization": "Device device-secret"},
+            conversation_handle="opaque-conversation-1",
+        )
+        bridge.submit_prompt("Run the harmless proof")
+        event = bridge.next_event()
+        assert event.configuration_revision == 17
+        revision[0] = 18
+
+        with pytest.raises(BridgeAuthorizationError, match="stale_conversation"):
+            bridge.respond_prompt(
+                event,
+                {
+                    "operation": "choose",
+                    "option_id": "inspect",
+                    "object_id": "source-choice-1",
+                    "freshness": "source-freshness-1",
+                },
+            )
+
+        assert all(
+            frame.get("method") not in {"prompt.choose", "prompt.explore"}
+            for frame in gateway_socket.sent
+        )
+    finally:
+        bridge.close()
+
+
+def test_bridge_dispatches_explore_to_matching_gateway_operation():
+    gateway_socket = FakeJsonSocket(
+        [
+            _event(
+                "gateway.ready",
+                {"capabilities": {"prompt.explore": True}},
+            ),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {"session_id": "runtime-hermes-hidden"},
+            },
+            {"jsonrpc": "2.0", "id": "home-2", "result": {"accepted": True}},
+            _session_event(
+                "prompt.request",
+                {
+                    "request_id": "choice-request-1",
+                    "prompt_kind": "choice",
+                    "text": "Choose an inspection step.",
+                    "choice": {
+                        "object_id": "source-choice-1",
+                        "freshness": "source-freshness-1",
+                        "operations": ["explore"],
+                    },
+                    "options": [{"id": "inspect", "label": "Inspect"}],
+                },
+                "runtime-hermes-hidden",
+            ),
+            {"jsonrpc": "2.0", "id": "home-3", "result": {"resolved": True}},
+        ]
+    )
+    bridge = _make_bridge(
+        FakeSocketFactory(gateway_socket),
+        resolver=lambda handle, device_id: ConversationGrant(
+            handle=handle,
+            device_id=device_id,
+            profile_id="family",
+            configuration_revision=17,
+            interactive_choice=True,
+        ),
+    )
+
+    try:
+        bridge.open(
+            headers={"Authorization": "Device device-secret"},
+            conversation_handle="opaque-conversation-1",
+        )
+        bridge.submit_prompt("Run the harmless proof")
+        event = bridge.next_event()
+
+        result = bridge.respond_prompt(
+            event,
+            {
+                "operation": "explore",
+                "option_id": "inspect",
+                "object_id": "source-choice-1",
+                "freshness": "source-freshness-1",
+            },
+        )
+
+        assert result == {"resolved": True}
+        assert gateway_socket.sent[-1] == {
+            "jsonrpc": "2.0",
+            "id": "home-4",
+            "method": "prompt.explore",
+            "params": {
+                "session_id": "runtime-hermes-hidden",
+                "request_id": "choice-request-1",
+                "option_id": "inspect",
+                "object_id": "source-choice-1",
+                "freshness": "source-freshness-1",
+            },
+        }
+    finally:
+        bridge.close()
+
+
+def test_bridge_rejects_typed_choice_when_gateway_does_not_advertise_it():
+    gateway_socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {"capabilities": {}}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {"session_id": "runtime-hermes-hidden"},
+            },
+            {"jsonrpc": "2.0", "id": "home-2", "result": {"accepted": True}},
+            {
+                "jsonrpc": "2.0",
+                "method": "event",
+                "params": {
+                    "type": "prompt.request",
+                    "session_id": "runtime-hermes-hidden",
+                    "payload": {
+                        "request_id": "choice-request-1",
+                        "prompt_kind": "choice",
+                        "text": "Choose.",
+                        "choice": {
+                            "object_id": "source-choice-1",
+                            "freshness": "source-freshness-1",
+                            "operations": ["choose"],
+                        },
+                        "options": [{"id": "inspect", "label": "Inspect"}],
+                    },
+                },
+            },
+        ]
+    )
+    bridge = _make_bridge(FakeSocketFactory(gateway_socket))
+    status = bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle="opaque-conversation-1",
+    )
+    bridge.submit_prompt("Run the harmless proof")
+    event = bridge.next_event()
+
+    assert "prompt.choose" not in status.capabilities
+    assert event.choice_capabilities == frozenset()
+    with pytest.raises(BridgeCapabilityUnavailable, match="not supported"):
+        bridge.respond_prompt(
+            event,
+            {
+                "operation": "choose",
+                "option_id": "inspect",
+                "object_id": "source-choice-1",
+                "freshness": "source-freshness-1",
+            },
+        )
+    assert all(frame.get("method") != "prompt.choose" for frame in gateway_socket.sent)
+    bridge.close()
+
+
+def test_bridge_withholds_choices_from_devices_without_interactive_opt_in():
+    gateway_socket = FakeJsonSocket(
+        [
+            _event(
+                "gateway.ready",
+                {
+                    "capabilities": {
+                        "prompt.choose": True,
+                        "prompt.explore": True,
+                    }
+                },
+            ),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {"session_id": "runtime-hermes-hidden"},
+            },
+            {"jsonrpc": "2.0", "id": "home-2", "result": {"accepted": True}},
+            {
+                "jsonrpc": "2.0",
+                "method": "event",
+                "params": {
+                    "type": "prompt.request",
+                    "session_id": "runtime-hermes-hidden",
+                    "payload": {
+                        "request_id": "choice-request-1",
+                        "prompt_kind": "choice",
+                        "text": "Choose.",
+                        "choice": {
+                            "object_id": "source-choice-1",
+                            "freshness": "source-freshness-1",
+                            "operations": ["choose"],
+                        },
+                        "options": [{"id": "inspect", "label": "Inspect"}],
+                    },
+                },
+            },
+        ]
+    )
+    bridge = _make_bridge(FakeSocketFactory(gateway_socket))
+
+    status = bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle="opaque-conversation-1",
+    )
+    bridge.submit_prompt("Run the harmless proof")
+    event = bridge.next_event()
+
+    assert "prompt.choose" not in status.capabilities
+    assert event.choice_capabilities == frozenset()
+    with pytest.raises(BridgeCapabilityUnavailable):
+        bridge.respond_prompt(
+            event,
+            {
+                "operation": "choose",
+                "option_id": "inspect",
+                "object_id": "source-choice-1",
+                "freshness": "source-freshness-1",
+            },
+        )
+    assert all(frame.get("method") != "prompt.choose" for frame in gateway_socket.sent)
+    bridge.close()
 
 
 def test_explicit_prompt_rejection_is_not_reported_as_uncertain_delivery():

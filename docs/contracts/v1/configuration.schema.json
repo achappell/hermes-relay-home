@@ -69,7 +69,14 @@
           "type": "object",
           "required": ["wake_claim"],
           "additionalProperties": false,
-          "properties": {"wake_claim": {"type": "boolean"}}
+          "properties": {
+            "wake_claim": {"type": "boolean"},
+            "interactive_choice": {
+              "type": "boolean",
+              "default": false,
+              "description": "Explicitly permits this Device to answer typed choice prompts. Omission denies choice actions."
+            }
+          }
         }
       }
     }

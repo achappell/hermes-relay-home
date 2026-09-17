@@ -61,6 +61,11 @@ implementation work and are not encoded in the claim body.
 }
 ```
 
+The optional Device capability `interactive_choice` defaults to `false`.
+Set it to `true` only for a Device with an active user interface that can
+present and confirm choices. Passive Room Displays and audio-only Pucks remain
+read-only for typed choices unless their role changes deliberately.
+
 `PUT /api/v1/configuration` replaces the complete configuration atomically:
 
 ```json

@@ -11,13 +11,17 @@ import pytest
 
 from hermes_home.bridge import (
     AudioFrame,
+    BridgeAuthorizationError,
     BridgeEndpoint,
     BridgeEvent,
+    BridgeRequestRejected,
     BridgeStatus,
     BridgeTimeoutError,
     BridgeTransportError,
     BridgeTurn,
 )
+from hermes_home.bridge.choice_authority import MAX_CHOICE_OBJECTS_PER_TURN
+from hermes_home.bridge.endpoint import _RequestError
 from hermes_home.observability.diagnostics import (
     DiagnosticsRecorder,
     InMemoryDiagnosticsStore,
@@ -156,6 +160,18 @@ class FailingPromptBridge(FakeBridge):
         raise BridgeTimeoutError("timed out")
 
 
+class ChoiceResponseFailureBridge(FakeBridge):
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self.response_error = error
+
+    def respond_prompt(
+        self, event: BridgeEvent, response: dict[str, object]
+    ) -> dict[str, object]:
+        self.respond_calls.append((event, dict(response)))
+        raise self.response_error
+
+
 def _message(connection: FakeConnection, index: int = -1) -> dict[str, object]:
     raw = connection.sent[index]
     assert isinstance(raw, str)
@@ -176,6 +192,45 @@ def _open(endpoint: BridgeEndpoint) -> dict[str, object]:
         id="open-1",
         method="conversation.open",
         params={"conversation_handle": HANDLE},
+    )
+
+
+def _choice_event(
+    correlation_id: str,
+    *,
+    object_id: str = "source-choice-1",
+    freshness: str = "source-freshness-1",
+    operations: tuple[str, ...] = ("choose", "explore"),
+    options: list[dict[str, object]] | None = None,
+    text: str = "Pick a safe option.",
+) -> BridgeEvent:
+    return BridgeEvent(
+        HANDLE,
+        "prompt.request",
+        {
+            "prompt_kind": "choice",
+            "text": text,
+            "choice": {
+                "object_id": object_id,
+                "freshness": freshness,
+                "operations": list(operations),
+                "private_note": "must not leak",
+            },
+            "options": options
+            or [
+                {"id": "inspect", "label": "Inspect", "value": "raw-private"},
+                {"id": "skip", "label": "Skip", "value": "raw-private-2"},
+            ],
+            "session_id": "hidden-standard-session",
+            "profile_id": "hidden-profile",
+            "credential": "hidden-credential",
+            "unknown_private_field": "must not leak either",
+        },
+        turn_id="home-turn-1",
+        correlation_id=correlation_id,
+        standard_session_id="hidden-standard-session",
+        configuration_revision=7,
+        choice_capabilities=frozenset({"prompt.choose", "prompt.explore"}),
     )
 
 
@@ -509,6 +564,774 @@ def test_structured_prompt_event_is_retained_and_response_is_not_submitted_as_te
         }
         assert bridge.prompt_calls == ["run it"]
         assert bridge.respond_calls[0][1] == {"choice": "allow", "all": True}
+    finally:
+        endpoint.close()
+
+
+def test_typed_choice_projection_hides_source_values_and_consumes_once() -> None:
+    class FixedRecorder(DiagnosticsRecorder):
+        def new_correlation_id(self) -> str:
+            return "corr-" + "a" * 32
+
+    connection = FakeConnection()
+    bridge = FakeBridge()
+    tokens = iter(["home-choice-1", "home-freshness-1"])
+    recorder = FixedRecorder(store=InMemoryDiagnosticsStore(), clock=lambda: 100.0)
+    endpoint = BridgeEndpoint(
+        connection,
+        bridge,
+        headers=HEADERS,
+        route=ROUTE,
+        diagnostics=recorder,
+        choice_token_factory=tokens.__next__,
+    )
+
+    try:
+        _open(endpoint)
+        _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="prompt-1",
+            method="prompt.submit",
+            params={"conversation_handle": HANDLE, "text": "choose"},
+        )
+        source_event = _choice_event("choice-correlation-1")
+        projected = endpoint._event_payload(source_event)["event"]["payload"]
+
+        assert projected == {
+            "prompt_id": "choice-correlation-1",
+            "prompt_kind": "choice",
+            "text": "Pick a safe option.",
+            "timeout_s": 300,
+            "options": [
+                {"id": "inspect", "label": "Inspect"},
+                {"id": "skip", "label": "Skip"},
+            ],
+            "choice": {
+                "object_id": "home-choice-1",
+                "freshness": "home-freshness-1",
+                "operations": ["choose", "explore"],
+            },
+        }
+        public_payload = json.dumps(projected)
+        for private_value in (
+            "source-choice-1",
+            "source-freshness-1",
+            "raw-private",
+            "hidden-standard-session",
+            "hidden-profile",
+            "hidden-credential",
+            "must not leak",
+        ):
+            assert private_value not in public_payload
+
+        response = {
+            "operation": "choose",
+            "option_id": "inspect",
+            "object_id": "home-choice-1",
+            "freshness": "home-freshness-1",
+        }
+        accepted = _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="choice-respond-1",
+            method="prompt.respond",
+            params={
+                "conversation_handle": HANDLE,
+                "turn_id": "home-turn-1",
+                "correlation_id": "choice-correlation-1",
+                "event_type": "prompt.request",
+                "response": response,
+            },
+        )
+        duplicate = _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="choice-respond-2",
+            method="prompt.respond",
+            params={
+                "conversation_handle": HANDLE,
+                "turn_id": "home-turn-1",
+                "correlation_id": "choice-correlation-1",
+                "event_type": "prompt.request",
+                "response": response,
+            },
+        )
+
+        assert accepted["result"] == {
+            "schema": 1,
+            "conversation_handle": HANDLE,
+            "turn_id": "home-turn-1",
+            "status": "accepted",
+            "operation": "choose",
+        }
+        assert duplicate["result"] == {
+            "schema": 1,
+            "conversation_handle": HANDLE,
+            "turn_id": "home-turn-1",
+            "status": "unavailable",
+            "reason": "duplicate",
+        }
+        assert bridge.respond_calls == [
+            (
+                source_event,
+                {
+                    "operation": "choose",
+                    "option_id": "inspect",
+                    "object_id": "source-choice-1",
+                    "freshness": "source-freshness-1",
+                },
+            )
+        ]
+        assert bridge.prompt_calls == ["choose"]
+        timeline = recorder.timeline("corr-" + "a" * 32)
+        serialized_timeline = json.dumps([event.to_dict() for event in timeline])
+        assert [(event.phase, event.outcome) for event in timeline[-2:]] == [
+            ("request", "accepted"),
+            ("request", "rejected"),
+        ]
+        for private_value in (
+            "Pick a safe option.",
+            "Inspect",
+            "source-choice-1",
+            "home-choice-1",
+        ):
+            assert private_value not in serialized_timeline
+    finally:
+        endpoint.close()
+
+
+def test_explore_keeps_object_and_does_not_extend_monotonic_expiry() -> None:
+    connection = FakeConnection()
+    bridge = FakeBridge()
+    now = [100.0]
+    tokens = iter(["home-choice-1", "home-freshness-1"])
+    endpoint = BridgeEndpoint(
+        connection,
+        bridge,
+        headers=HEADERS,
+        route=ROUTE,
+        choice_clock=lambda: now[0],
+        choice_token_factory=tokens.__next__,
+    )
+
+    try:
+        _open(endpoint)
+        _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="prompt-1",
+            method="prompt.submit",
+            params={"conversation_handle": HANDLE, "text": "choose"},
+        )
+        first = endpoint._event_payload(_choice_event("choice-correlation-1"))
+        first_choice = first["event"]["payload"]["choice"]
+        now[0] = 175.0
+        explored = _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="choice-explore-1",
+            method="prompt.respond",
+            params={
+                "conversation_handle": HANDLE,
+                "turn_id": "home-turn-1",
+                "correlation_id": "choice-correlation-1",
+                "event_type": "prompt.request",
+                "response": {
+                    "operation": "explore",
+                    "option_id": "inspect",
+                    "object_id": first_choice["object_id"],
+                    "freshness": first_choice["freshness"],
+                },
+            },
+        )
+        second = endpoint._event_payload(
+            _choice_event("choice-correlation-2", text="More detail.")
+        )
+        second_payload = second["event"]["payload"]
+
+        assert explored["result"]["status"] == "accepted"
+        assert second_payload["choice"] == first_choice
+        assert second_payload["timeout_s"] == 225
+        chosen = _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="choice-choose-2",
+            method="prompt.respond",
+            params={
+                "conversation_handle": HANDLE,
+                "turn_id": "home-turn-1",
+                "correlation_id": "choice-correlation-2",
+                "event_type": "prompt.request",
+                "response": {
+                    "operation": "choose",
+                    "option_id": "skip",
+                    "object_id": first_choice["object_id"],
+                    "freshness": first_choice["freshness"],
+                },
+            },
+        )
+
+        assert chosen["result"]["status"] == "accepted"
+        assert [response[1]["operation"] for response in bridge.respond_calls] == [
+            "explore",
+            "choose",
+        ]
+    finally:
+        endpoint.close()
+
+
+def test_upstream_choice_expiry_returns_expired_without_a_bridge_action() -> None:
+    connection = FakeConnection()
+    bridge = FakeBridge()
+    tokens = iter(["home-choice-1", "home-freshness-1"])
+    endpoint = BridgeEndpoint(
+        connection,
+        bridge,
+        headers=HEADERS,
+        route=ROUTE,
+        choice_token_factory=tokens.__next__,
+    )
+
+    try:
+        _open(endpoint)
+        _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="prompt-1",
+            method="prompt.submit",
+            params={"conversation_handle": HANDLE, "text": "choose"},
+        )
+        event = _choice_event("choice-correlation-1")
+        endpoint._event_payload(event)
+        expiry = BridgeEvent(
+            HANDLE,
+            "prompt.expire",
+            {"credential": "must not leak"},
+            turn_id="home-turn-1",
+            correlation_id="choice-correlation-1",
+        )
+        endpoint._event_payload(expiry)
+
+        result = _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="choice-respond-1",
+            method="prompt.respond",
+            params={
+                "conversation_handle": HANDLE,
+                "turn_id": "home-turn-1",
+                "correlation_id": "choice-correlation-1",
+                "event_type": "prompt.request",
+                "response": {
+                    "operation": "choose",
+                    "option_id": "inspect",
+                    "object_id": "home-choice-1",
+                    "freshness": "home-freshness-1",
+                },
+            },
+        )
+
+        assert result["result"]["status"] == "unavailable"
+        assert result["result"]["reason"] == "expired"
+        assert bridge.respond_calls == []
+        assert "must not leak" not in json.dumps(endpoint._event_payload(expiry))
+    finally:
+        endpoint.close()
+
+
+def test_typed_choice_expires_on_direct_response_after_silent_timeout() -> None:
+    connection = FakeConnection()
+    bridge = FakeBridge()
+    now = [10.0]
+    tokens = iter(["home-choice-1", "home-freshness-1"])
+    endpoint = BridgeEndpoint(
+        connection,
+        bridge,
+        headers=HEADERS,
+        route=ROUTE,
+        choice_clock=lambda: now[0],
+        choice_token_factory=tokens.__next__,
+    )
+
+    try:
+        _open(endpoint)
+        _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="prompt-1",
+            method="prompt.submit",
+            params={"conversation_handle": HANDLE, "text": "choose"},
+        )
+        event = _choice_event("choice-correlation-1")
+        choice = endpoint._event_payload(event)["event"]["payload"]["choice"]
+        now[0] += 300.1
+
+        result = _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="choice-respond-1",
+            method="prompt.respond",
+            params={
+                "conversation_handle": HANDLE,
+                "turn_id": "home-turn-1",
+                "correlation_id": "choice-correlation-1",
+                "event_type": "prompt.request",
+                "response": {
+                    "operation": "choose",
+                    "option_id": "inspect",
+                    "object_id": choice["object_id"],
+                    "freshness": choice["freshness"],
+                },
+            },
+        )
+
+        assert result["result"]["status"] == "unavailable"
+        assert result["result"]["reason"] == "expired"
+        assert bridge.respond_calls == []
+    finally:
+        endpoint.close()
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong_value"),
+    [("object_id", "foreign-choice"), ("freshness", "foreign-freshness")],
+)
+def test_typed_choice_mismatched_public_identity_is_stale(
+    field: str, wrong_value: str
+) -> None:
+    connection = FakeConnection()
+    bridge = FakeBridge()
+    tokens = iter(["home-choice-1", "home-freshness-1"])
+    endpoint = BridgeEndpoint(
+        connection,
+        bridge,
+        headers=HEADERS,
+        route=ROUTE,
+        choice_token_factory=tokens.__next__,
+    )
+
+    try:
+        _open(endpoint)
+        _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="prompt-1",
+            method="prompt.submit",
+            params={"conversation_handle": HANDLE, "text": "choose"},
+        )
+        endpoint._event_payload(_choice_event("choice-correlation-1"))
+        response = {
+            "operation": "choose",
+            "option_id": "inspect",
+            "object_id": "home-choice-1",
+            "freshness": "home-freshness-1",
+        }
+        response[field] = wrong_value
+
+        result = _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="choice-respond-1",
+            method="prompt.respond",
+            params={
+                "conversation_handle": HANDLE,
+                "turn_id": "home-turn-1",
+                "correlation_id": "choice-correlation-1",
+                "event_type": "prompt.request",
+                "response": response,
+            },
+        )
+
+        assert result["result"]["status"] == "unavailable"
+        assert result["result"]["reason"] == "stale"
+        assert bridge.respond_calls == []
+    finally:
+        endpoint.close()
+
+
+def test_choice_revision_limit_preserves_the_last_usable_choice() -> None:
+    connection = FakeConnection()
+    bridge = FakeBridge()
+    tokens = iter(
+        token
+        for revision in range(MAX_CHOICE_OBJECTS_PER_TURN)
+        for token in (f"home-choice-{revision}", f"home-freshness-{revision}")
+    )
+    endpoint = BridgeEndpoint(
+        connection,
+        bridge,
+        headers=HEADERS,
+        route=ROUTE,
+        choice_token_factory=tokens.__next__,
+    )
+
+    try:
+        _open(endpoint)
+        _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="prompt-1",
+            method="prompt.submit",
+            params={"conversation_handle": HANDLE, "text": "choose"},
+        )
+        latest_correlation = ""
+        latest_choice: dict[str, object] = {}
+        for revision in range(MAX_CHOICE_OBJECTS_PER_TURN):
+            latest_correlation = f"choice-correlation-{revision}"
+            payload = endpoint._event_payload(
+                _choice_event(
+                    latest_correlation,
+                    freshness=f"source-freshness-{revision}",
+                )
+            )["event"]["payload"]
+            latest_choice = payload["choice"]
+
+        with pytest.raises(_RequestError) as error:
+            endpoint._event_payload(
+                _choice_event(
+                    "choice-correlation-overflow",
+                    freshness="source-freshness-overflow",
+                )
+            )
+        assert error.value.code == "protocol_error"
+
+        result = _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="choice-respond-last-valid",
+            method="prompt.respond",
+            params={
+                "conversation_handle": HANDLE,
+                "turn_id": "home-turn-1",
+                "correlation_id": latest_correlation,
+                "event_type": "prompt.request",
+                "response": {
+                    "operation": "choose",
+                    "option_id": "inspect",
+                    "object_id": latest_choice["object_id"],
+                    "freshness": latest_choice["freshness"],
+                },
+            },
+        )
+
+        assert result["result"]["status"] == "accepted"
+        assert len(bridge.respond_calls) == 1
+    finally:
+        endpoint.close()
+
+
+def test_replaced_expired_and_unsupported_choices_have_typed_no_effect_results() -> (
+    None
+):
+    connection = FakeConnection()
+    bridge = FakeBridge()
+    now = [10.0]
+    tokens = iter(
+        [
+            "home-choice-1",
+            "home-freshness-1",
+            "home-choice-2",
+            "home-freshness-2",
+            "home-choice-3",
+            "home-freshness-3",
+        ]
+    )
+    endpoint = BridgeEndpoint(
+        connection,
+        bridge,
+        headers=HEADERS,
+        route=ROUTE,
+        choice_clock=lambda: now[0],
+        choice_token_factory=tokens.__next__,
+    )
+
+    def respond(correlation_id: str, choice: dict[str, object], operation: str):
+        return _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id=f"respond-{correlation_id}",
+            method="prompt.respond",
+            params={
+                "conversation_handle": HANDLE,
+                "turn_id": "home-turn-1",
+                "correlation_id": correlation_id,
+                "event_type": "prompt.request",
+                "response": {
+                    "operation": operation,
+                    "option_id": "inspect",
+                    "object_id": choice["object_id"],
+                    "freshness": choice["freshness"],
+                },
+            },
+        )
+
+    try:
+        _open(endpoint)
+        _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="prompt-1",
+            method="prompt.submit",
+            params={"conversation_handle": HANDLE, "text": "choose"},
+        )
+        old_payload = endpoint._event_payload(_choice_event("choice-correlation-old"))[
+            "event"
+        ]["payload"]
+        endpoint._event_payload(
+            _choice_event(
+                "choice-correlation-new",
+                freshness="source-freshness-2",
+            )
+        )
+        replaced = respond("choice-correlation-old", old_payload["choice"], "choose")
+        assert replaced["result"]["reason"] == "replaced"
+        assert bridge.respond_calls == []
+
+        unsupported_event = _choice_event(
+            "choice-correlation-unsupported",
+            freshness="source-freshness-3",
+        )
+        unsupported_event = BridgeEvent(
+            unsupported_event.conversation_handle,
+            unsupported_event.type,
+            unsupported_event.payload,
+            turn_id=unsupported_event.turn_id,
+            correlation_id=unsupported_event.correlation_id,
+            standard_session_id=unsupported_event.standard_session_id,
+            configuration_revision=unsupported_event.configuration_revision,
+            choice_capabilities=frozenset({"prompt.choose"}),
+        )
+        unsupported_payload = endpoint._event_payload(unsupported_event)["event"][
+            "payload"
+        ]
+        unsupported = respond(
+            "choice-correlation-unsupported",
+            unsupported_payload["choice"],
+            "explore",
+        )
+        assert unsupported_payload["choice"]["operations"] == ["choose"]
+        assert unsupported["result"]["reason"] == "unsupported"
+        assert bridge.respond_calls == []
+
+        endpoint._event_payload(_choice_event("choice-correlation-expired"))
+        now[0] = 310.0
+        expired_payload = endpoint._event_payload(
+            _choice_event(
+                "choice-correlation-expired-reprompt",
+            )
+        )["event"]["payload"]
+        assert expired_payload["timeout_s"] == 0
+        expired = respond(
+            "choice-correlation-expired",
+            expired_payload["choice"],
+            "choose",
+        )
+        assert expired["result"]["reason"] == "expired"
+        assert bridge.respond_calls == []
+    finally:
+        endpoint.close()
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda payload: payload["options"].append(
+            {"id": "inspect", "label": "Duplicate"}
+        ),
+        lambda payload: payload["options"].extend(
+            {"id": f"option-{index}", "label": "Option"} for index in range(31)
+        ),
+        lambda payload: payload["options"][0].update({"sensitive": True}),
+        lambda payload: payload["choice"].update({"operations": ["choose", "run"]}),
+    ],
+)
+def test_malformed_typed_choice_is_rejected_before_projection(mutate) -> None:
+    connection = FakeConnection()
+    bridge = FakeBridge()
+    endpoint = BridgeEndpoint(connection, bridge, headers=HEADERS, route=ROUTE)
+    source_event = _choice_event("invalid-choice-1")
+    unsafe_payload = {
+        **source_event.payload,
+        "choice": dict(source_event.payload["choice"]),
+        "options": [dict(option) for option in source_event.payload["options"]],
+    }
+    mutate(unsafe_payload)
+    invalid_event = BridgeEvent(
+        source_event.conversation_handle,
+        source_event.type,
+        unsafe_payload,
+        turn_id=source_event.turn_id,
+        correlation_id=source_event.correlation_id,
+        standard_session_id=source_event.standard_session_id,
+        configuration_revision=source_event.configuration_revision,
+        choice_capabilities=source_event.choice_capabilities,
+    )
+
+    try:
+        _open(endpoint)
+        _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="prompt-1",
+            method="prompt.submit",
+            params={"conversation_handle": HANDLE, "text": "choose"},
+        )
+        with pytest.raises(_RequestError) as error:
+            endpoint._event_payload(invalid_event)
+        assert error.value.code == "protocol_error"
+        assert bridge.respond_calls == []
+    finally:
+        endpoint.close()
+
+
+def test_typed_choice_wrong_context_and_revocation_return_unavailable() -> None:
+    connection = FakeConnection()
+    bridge = FakeBridge()
+    tokens = iter(["home-choice-1", "home-freshness-1"])
+    endpoint = BridgeEndpoint(
+        connection,
+        bridge,
+        headers=HEADERS,
+        route=ROUTE,
+        choice_token_factory=tokens.__next__,
+    )
+    response = {
+        "operation": "choose",
+        "option_id": "inspect",
+        "object_id": "home-choice-1",
+        "freshness": "home-freshness-1",
+    }
+    event = _choice_event("choice-correlation-1")
+
+    def respond(*, handle: str = HANDLE, turn_id: str = "home-turn-1", request_id: str):
+        return _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id=request_id,
+            method="prompt.respond",
+            params={
+                "conversation_handle": handle,
+                "turn_id": turn_id,
+                "correlation_id": "choice-correlation-1",
+                "event_type": "prompt.request",
+                "response": response,
+            },
+        )
+
+    try:
+        _open(endpoint)
+        _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="prompt-1",
+            method="prompt.submit",
+            params={"conversation_handle": HANDLE, "text": "choose"},
+        )
+        endpoint._event_payload(event)
+        wrong_endpoint = respond(handle="other-handle", request_id="wrong-endpoint")
+        wrong_turn = respond(turn_id="other-turn", request_id="wrong-turn")
+        closed = _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="close-1",
+            method="conversation.close",
+            params={"conversation_handle": HANDLE},
+        )
+        revoked = respond(request_id="revoked")
+
+        assert wrong_endpoint["result"]["reason"] == "revoked"
+        assert wrong_endpoint["result"]["conversation_handle"] == "other-handle"
+        assert wrong_turn["result"]["reason"] == "stale"
+        assert closed["result"]["status"] == "closed"
+        assert revoked["result"]["reason"] == "revoked"
+        assert bridge.respond_calls == []
+    finally:
+        endpoint.close()
+
+
+@pytest.mark.parametrize(
+    ("failure", "reason"),
+    [
+        (BridgeRequestRejected("choice is no longer pending"), "stale"),
+        (BridgeAuthorizationError("stale_conversation"), "revoked"),
+    ],
+)
+def test_choice_revalidation_failures_return_typed_unavailable(
+    failure: Exception, reason: str
+) -> None:
+    connection = FakeConnection()
+    bridge = ChoiceResponseFailureBridge(failure)
+    tokens = iter(["home-choice-1", "home-freshness-1"])
+    endpoint = BridgeEndpoint(
+        connection,
+        bridge,
+        headers=HEADERS,
+        route=ROUTE,
+        choice_token_factory=tokens.__next__,
+    )
+
+    try:
+        _open(endpoint)
+        _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="prompt-1",
+            method="prompt.submit",
+            params={"conversation_handle": HANDLE, "text": "choose"},
+        )
+        event = _choice_event("choice-correlation-1")
+        endpoint._event_payload(event)
+
+        result = _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="choice-respond-1",
+            method="prompt.respond",
+            params={
+                "conversation_handle": HANDLE,
+                "turn_id": "home-turn-1",
+                "correlation_id": "choice-correlation-1",
+                "event_type": "prompt.request",
+                "response": {
+                    "operation": "choose",
+                    "option_id": "inspect",
+                    "object_id": "home-choice-1",
+                    "freshness": "home-freshness-1",
+                },
+            },
+        )
+
+        assert result["result"] == {
+            "schema": 1,
+            "conversation_handle": HANDLE,
+            "turn_id": "home-turn-1",
+            "status": "unavailable",
+            "reason": reason,
+        }
+        assert len(bridge.respond_calls) == 1
     finally:
         endpoint.close()
 

@@ -19,6 +19,11 @@ _STRUCTURED_PROMPT_OPERATIONS = {
     "clarify.request": ("clarify.respond", "answer", frozenset({"answer"})),
     "secret.request": ("secret.respond", "value", frozenset({"value"})),
     "sudo.request": ("sudo.respond", "password", frozenset({"password"})),
+    "prompt.request": (
+        "prompt.choose",
+        "option_id",
+        frozenset({"operation", "option_id", "object_id", "freshness"}),
+    ),
 }
 _TERMINAL_MESSAGE_STATUSES = frozenset(
     {
@@ -54,6 +59,7 @@ _PROMPT_EXPIRY_TYPES = {
     "clarify.expire": "clarify.request",
     "secret.expire": "secret.request",
     "sudo.expire": "sudo.request",
+    "prompt.expire": "prompt.request",
 }
 LOGGER = logging.getLogger(__name__)
 
@@ -143,6 +149,8 @@ class ConversationGrant:
     session_id: str | None = None
     status: str = "active"
     credential_generation: int | None = None
+    configuration_revision: int | None = None
+    interactive_choice: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,11 +207,20 @@ class BridgeEvent:
 
     conversation_handle: str
     type: str
-    payload: Mapping[str, object]
+    payload: Mapping[str, object] = field(repr=False)
     turn_id: str | None = None
     correlation_id: str | None = None
+    standard_session_id: str | None = field(default=None, repr=False, compare=False)
+    configuration_revision: int | None = field(default=None, repr=False, compare=False)
+    choice_capabilities: frozenset[str] = field(
+        default_factory=frozenset, repr=False, compare=False
+    )
 
     def to_endpoint(self) -> dict[str, object]:
+        if self.type == "prompt.request":
+            raise BridgeProtocolError(
+                "typed choice must be projected by Home authority"
+            )
         event: dict[str, object] = {
             "type": self.type,
             "payload": _endpoint_safe_payload(self.payload),
@@ -245,6 +262,7 @@ class _ActiveTurn:
     audio_text_sent: str = ""
     pending_prompt_type: str | None = None
     pending_prompt_id: str | None = None
+    pending_choice_revision: tuple[str, str] | None = field(default=None, repr=False)
     event_started: bool = False
     event_terminal_seen: bool = False
     event_start_seq: int | None = None
@@ -951,6 +969,7 @@ class HomeBridge:
             ready_payload,
             commands=advertised_commands,
             audio=self._audio_socket_factory is not None,
+            interactive_choice=grant.interactive_choice,
         )
         with self._state_lock:
             if self._active_turn is not None:
@@ -1219,6 +1238,7 @@ class HomeBridge:
             ready_payload,
             commands=advertised_commands,
             audio=self._audio_socket_factory is not None,
+            interactive_choice=refreshed.interactive_choice,
         )
         with self._state_lock:
             self._gateway = gateway
@@ -1315,6 +1335,9 @@ class HomeBridge:
             refreshed.credential_generation != credential_generation
             or refreshed.credential_generation != grant.credential_generation
         ):
+            self._invalidate_binding("stale_conversation", gateway=gateway)
+            raise BridgeAuthorizationError("stale_conversation")
+        if refreshed.configuration_revision != grant.configuration_revision:
             self._invalidate_binding("stale_conversation", gateway=gateway)
             raise BridgeAuthorizationError("stale_conversation")
         if refreshed.profile_id != grant.profile_id:
@@ -1712,6 +1735,29 @@ class HomeBridge:
         if not isinstance(response, Mapping):
             raise BridgeProtocolError("structured prompt response is not an object")
         operation, _, _ = operation_info
+        if event.type == "prompt.request":
+            choice_operation = response.get("operation")
+            if type(choice_operation) is not str or choice_operation not in {
+                "choose",
+                "explore",
+            }:
+                raise BridgeProtocolError("typed choice operation is invalid")
+            operation = f"prompt.{choice_operation}"
+            if self._endpoint_capabilities.get(operation) is not True:
+                raise BridgeCapabilityUnavailable(
+                    "typed choice operation is not supported by Standard Hermes"
+                )
+            with self._state_lock:
+                grant = self._grant
+            if (
+                grant is None
+                or not grant.interactive_choice
+                or grant.configuration_revision != event.configuration_revision
+                or operation not in event.choice_capabilities
+            ):
+                raise BridgeCapabilityUnavailable(
+                    "typed choice is not authorized for this Home Device"
+                )
         validated_response = _validate_structured_response(event, response)
         with self._state_lock:
             active = self._active_turn
@@ -1777,6 +1823,7 @@ class HomeBridge:
             if not _has_remaining_prompt_questions(event, result):
                 active.pending_prompt_type = None
                 active.pending_prompt_id = None
+                active.pending_choice_revision = None
         return result
 
     def submit_prompt(self, text: str) -> BridgeTurn:
@@ -2033,13 +2080,32 @@ class HomeBridge:
                                 raise BridgeProtocolError(
                                     "structured prompt has no correlation ID"
                                 )
-                            if active.pending_prompt_type is not None and (
-                                active.pending_prompt_type != event_type
-                                or active.pending_prompt_id != correlation_id
-                            ):
+                            choice_revision = (
+                                _typed_choice_revision(event_payload)
+                                if event_type == "prompt.request"
+                                else None
+                            )
+                            pending_mismatch = (
+                                active.pending_prompt_type is not None
+                                and (
+                                    active.pending_prompt_type != event_type
+                                    or active.pending_prompt_id != correlation_id
+                                )
+                            )
+                            is_choice_revision = (
+                                pending_mismatch
+                                and active.pending_prompt_type == "prompt.request"
+                                and event_type == "prompt.request"
+                                and active.pending_prompt_id != correlation_id
+                                and active.pending_choice_revision is not None
+                                and choice_revision is not None
+                                and active.pending_choice_revision != choice_revision
+                            )
+                            if pending_mismatch and not is_choice_revision:
                                 continue
                             active.pending_prompt_type = event_type
                             active.pending_prompt_id = correlation_id
+                            active.pending_choice_revision = choice_revision
                         elif event_type in _PROMPT_EXPIRY_TYPES:
                             correlation_id = raw.get("correlation_id")
                             if (
@@ -2056,6 +2122,7 @@ class HomeBridge:
                                 continue
                             active.pending_prompt_type = None
                             active.pending_prompt_id = None
+                            active.pending_choice_revision = None
                         else:
                             correlation_id = raw.get("correlation_id")
                             if (
@@ -2082,6 +2149,7 @@ class HomeBridge:
                                     self._last_terminal_event_seq = seq
                                 active.pending_prompt_type = None
                                 active.pending_prompt_id = None
+                                active.pending_choice_revision = None
                                 if _is_interrupted_message(event_payload):
                                     if not active.interrupt_requested:
                                         terminal_audio_action = "stop"
@@ -2106,12 +2174,31 @@ class HomeBridge:
                         ):
                             turn_id = active.turn_id
                     conversation_handle = self._require_handle()
+                    choice_context: dict[str, object] = {}
+                    if event_type == "prompt.request":
+                        with self._state_lock:
+                            grant = self._grant
+                            choice_context = {
+                                "standard_session_id": runtime_session_id,
+                                "configuration_revision": (
+                                    grant.configuration_revision if grant else None
+                                ),
+                                "choice_capabilities": frozenset(
+                                    operation
+                                    for operation in ("prompt.choose", "prompt.explore")
+                                    if grant is not None
+                                    and grant.interactive_choice
+                                    and self._endpoint_capabilities.get(operation)
+                                    is True
+                                ),
+                            }
                     event = BridgeEvent(
                         conversation_handle=conversation_handle,
                         type=event_type,
                         payload=event_payload,
                         turn_id=turn_id,
                         correlation_id=correlation_id,
+                        **choice_context,
                     )
             except BridgeProtocolError:
                 self._mark_transport_loss(gateway=gateway)
@@ -2799,6 +2886,7 @@ def _capabilities(
     *,
     commands: list[str] | None = None,
     audio: bool = False,
+    interactive_choice: bool = False,
 ) -> dict[str, object]:
     capabilities = payload.get("capabilities")
     source = capabilities if isinstance(capabilities, Mapping) else payload
@@ -2813,6 +2901,15 @@ def _capabilities(
         heartbeat = payload.get("heartbeat")
     if isinstance(heartbeat, bool):
         result["heartbeat"] = heartbeat
+    for operation in ("prompt.choose", "prompt.explore"):
+        if operation in source:
+            capability = source[operation]
+            if type(capability) is not bool:
+                raise BridgeProtocolError(
+                    f"standard {operation} capability is not a boolean"
+                )
+            if interactive_choice:
+                result[operation] = capability
     return result
 
 
@@ -2968,6 +3065,7 @@ def _is_session_bound_event(event_type: str) -> bool:
             "clarify.",
             "secret.",
             "sudo.",
+            "prompt.",
         )
     ) or event_type in {"text_delta"}
 
@@ -2976,9 +3074,23 @@ def _is_turn_owned_event(event_type: str) -> bool:
     return _is_session_bound_event(event_type)
 
 
+def _typed_choice_revision(payload: Mapping[str, object]) -> tuple[str, str]:
+    choice = payload.get("choice")
+    if not isinstance(choice, Mapping):
+        raise BridgeProtocolError("typed choice event has no choice identity")
+    object_id = choice.get("object_id")
+    freshness = choice.get("freshness")
+    if type(object_id) is not str or type(freshness) is not str:
+        raise BridgeProtocolError("typed choice identity is invalid")
+    return object_id, freshness
+
+
 def _validate_structured_event_payload(
     event_type: str, payload: Mapping[str, object]
 ) -> None:
+    if event_type == "prompt.request":
+        _validate_typed_choice_event_payload(payload)
+        return
     if event_type == "clarify.request" and "questions" in payload:
         questions = payload.get("questions")
         if not isinstance(questions, list) or not questions:
@@ -3001,6 +3113,113 @@ def _validate_structured_event_payload(
             multi_select = question.get("multi_select")
             if type(multi_select) is not bool:
                 raise BridgeProtocolError("batch clarify multi_select is not a boolean")
+
+
+def _validate_typed_choice_event_payload(payload: Mapping[str, object]) -> None:
+    """Reject malformed choice authority before it enters a live turn."""
+
+    if payload.get("prompt_kind") != "choice":
+        raise BridgeProtocolError("typed choice event has an invalid prompt kind")
+    text = payload.get("text")
+    if type(text) is not str or not text.strip() or len(text) > 1024:
+        raise BridgeProtocolError("typed choice event has invalid explanation text")
+    if "sensitive" in payload and type(payload["sensitive"]) is not bool:
+        raise BridgeProtocolError("typed choice privacy flag is not a boolean")
+    if payload.get("sensitive") is True:
+        raise BridgeProtocolError("sensitive prompt cannot be a typed choice")
+    choice = payload.get("choice")
+    if not isinstance(choice, Mapping):
+        raise BridgeProtocolError("typed choice event has no choice identity")
+    object_id = choice.get("object_id")
+    freshness = choice.get("freshness")
+    if not _valid_choice_identifier(object_id) or not _valid_choice_identifier(
+        freshness
+    ):
+        raise BridgeProtocolError("typed choice identity is invalid")
+    operations = choice.get("operations")
+    if (
+        not isinstance(operations, list)
+        or not operations
+        or any(
+            type(value) is not str or value not in {"choose", "explore"}
+            for value in operations
+        )
+        or len(set(operations)) != len(operations)
+    ):
+        raise BridgeProtocolError("typed choice operations are invalid")
+    options = payload.get("options")
+    if not isinstance(options, list) or not options or len(options) > 32:
+        raise BridgeProtocolError("typed choice options are invalid")
+    option_ids: set[str] = set()
+    for option in options:
+        if not isinstance(option, Mapping):
+            raise BridgeProtocolError("typed choice option is not an object")
+        option_id = option.get("id")
+        label = option.get("label")
+        if not _valid_choice_identifier(option_id):
+            raise BridgeProtocolError("typed choice option ID is invalid")
+        if type(label) is not str or not label.strip() or len(label) > 256:
+            raise BridgeProtocolError("typed choice option label is invalid")
+        if option_id in option_ids:
+            raise BridgeProtocolError("typed choice option IDs are duplicated")
+        option_ids.add(option_id)
+
+
+def _validate_typed_choice_response(
+    event: BridgeEvent,
+    response: Mapping[str, object],
+) -> dict[str, object]:
+    if set(response) != {"operation", "option_id", "object_id", "freshness"}:
+        raise BridgeProtocolError("typed choice response has unsupported fields")
+    operation = response.get("operation")
+    option_id = response.get("option_id")
+    object_id = response.get("object_id")
+    freshness = response.get("freshness")
+    if type(operation) is not str or operation not in {"choose", "explore"}:
+        raise BridgeProtocolError("typed choice response operation is invalid")
+    choice = event.payload.get("choice")
+    if not isinstance(choice, Mapping):
+        raise BridgeProtocolError("typed choice response has no active choice")
+    operations = choice.get("operations")
+    if not isinstance(operations, list) or operation not in operations:
+        raise BridgeCapabilityUnavailable(
+            "typed choice operation was not advertised by the prompt"
+        )
+    if f"prompt.{operation}" not in event.choice_capabilities:
+        raise BridgeCapabilityUnavailable(
+            "typed choice operation was not advertised for this Session"
+        )
+    if (
+        not _valid_choice_identifier(option_id)
+        or not _valid_choice_identifier(object_id)
+        or not _valid_choice_identifier(freshness)
+    ):
+        raise BridgeProtocolError("typed choice response identity is invalid")
+    if object_id != choice.get("object_id") or freshness != choice.get("freshness"):
+        raise BridgeRequestRejected("typed choice response is stale")
+    options = event.payload.get("options")
+    option_ids = (
+        {option.get("id") for option in options if isinstance(option, Mapping)}
+        if isinstance(options, list)
+        else set()
+    )
+    if option_id not in option_ids:
+        raise BridgeRequestRejected("typed choice response option is unknown")
+    return {
+        "option_id": option_id,
+        "object_id": object_id,
+        "freshness": freshness,
+    }
+
+
+def _valid_choice_identifier(value: object) -> bool:
+    return (
+        type(value) is str
+        and bool(value)
+        and value == value.strip()
+        and len(value) <= 64
+        and not any(ord(character) < 32 for character in value)
+    )
 
 
 def _is_batch_clarify_event(event: BridgeEvent) -> bool:
@@ -3027,6 +3246,9 @@ def _validate_structured_response(
         )
     if event.type != "clarify.request" and "question_id" in response:
         raise BridgeProtocolError("question_id is only valid for clarify requests")
+
+    if event.type == "prompt.request":
+        return _validate_typed_choice_response(event, response)
 
     if event.type == "approval.request":
         all_value = response.get("all", False)

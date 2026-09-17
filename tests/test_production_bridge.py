@@ -75,6 +75,7 @@ def test_conversation_claim_store_binds_the_winner_and_session(tmp_path) -> None
         profile_id="amanda",
         status="active",
         credential_generation=2,
+        configuration_revision=3,
     )
     assert store.resolve(handle, "different-device") is None
     assert store.resolve("missing", "pixel-6a") is None
@@ -89,6 +90,7 @@ def test_conversation_claim_store_binds_the_winner_and_session(tmp_path) -> None
         session_id="durable-session-1",
         status="active",
         credential_generation=2,
+        configuration_revision=3,
     )
     row = (
         sqlite3.connect(path)
@@ -100,6 +102,45 @@ def test_conversation_claim_store_binds_the_winner_and_session(tmp_path) -> None
         .fetchone()
     )
     assert row == ("claim-1", "amanda", "durable-session-1", 2)
+    store.close()
+
+
+def test_conversation_grant_carries_explicit_interactive_choice_authority(
+    tmp_path,
+) -> None:
+    configuration = _configuration()
+    configuration["devices"] = [
+        {
+            "id": "pixel-6a",
+            "name": "Interactive Puck",
+            "room_id": "kitchen",
+            "priority": 1,
+            "capabilities": {
+                "wake_claim": True,
+                "interactive_choice": True,
+            },
+        }
+    ]
+    store = ConversationGrantStore(
+        tmp_path / "home.sqlite3",
+        configuration=lambda: configuration,
+        handle_factory=lambda: "interactive-choice-handle",
+    )
+    handle = store.create_from_decision(
+        _decision("interactive-choice-claim"),
+        credential_generation=2,
+    )
+
+    grant = store.resolve(handle, "pixel-6a")
+
+    assert grant is not None
+    assert grant.configuration_revision == 3
+    assert grant.interactive_choice is True
+    configuration["revision"] = 4
+    refreshed = store.resolve(handle, "pixel-6a")
+    assert refreshed is not None
+    assert refreshed.configuration_revision == 3
+    assert refreshed.interactive_choice is False
     store.close()
 
 
