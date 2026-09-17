@@ -31,18 +31,32 @@ Validated 2026-09-17 in the
   was not resent.
 - After the iOS open-response decoder fix, the rebuilt signed-in Xcode app
   reconnected and reached Home Ready. The old turn remains visibly unconfirmed.
-  A later, different composer submission was blocked by the app's recovery
-  guard before it was sent; the original prompt was not resent.
-- Inspection of the Home terminal contract found that Standard's successful
-  `message.complete` event carried the completed status and final text, while
-  the iOS normalizer did not emit `turnComplete`. The iOS follow-up maps that
-  status into a terminal event while preserving nonterminal `message.complete`
-  events for continued streaming. Its focused regression, all 431 iOS tests,
-  and the macOS build pass.
+  Home explicitly returned `unresolved_turn: false`, so the app offered
+  “Continue without resending.” Selecting it retained the earlier user prompt,
+  cleared only its stale recovery state, and preserved the composer draft. The
+  old prompt was not resent.
+- A distinct composer prompt was then sent once. For correlation
+  `corr-cffc857d828b40c891414f7fff3db66b`, Home recorded endpoint start, Hermes
+  acceptance, Hermes terminal completion, PCM chunks accepted, and audio
+  completion between 1:33:46 and 1:33:50 Central. The app showed some streaming,
+  then reported `transport_timeout` and audio unavailable after about 30
+  seconds. The prompt remains unconfirmed and was not resent. Home's successful
+  socket sends prove server-side delivery attempts, not client receipt or
+  decoding. No prompt text, response text, or audio was added to diagnostics.
+- Code review found a protocol mismatch: Home forwards safe Standard event
+  payload fields, including future additions, while the Apple client rejected
+  unknown payload keys. The iOS follow-up now ignores unconsumed Standard
+  payload fields while validating fields it reads; Home envelope keys remain
+  strict. A wire-level regression covers `message.complete` with extra
+  metadata. The change postdates the live smoke and has not been validated
+  against a new live turn.
+- After that change, the full iPhone 17 Pro simulator suite passed (437 tests,
+  zero failures), and the macOS Xcode product built and passed strict code
+  signature verification.
 
-The single live turn is not end-to-end confirmed: Home recorded acceptance,
-terminal completion, and audio completion, but the app never rendered that
-reply. The updated app now reconnects cleanly, and the missing terminal mapping
-has a regression test. A fresh live turn could not be tested because the app
-keeps the earlier unconfirmed turn protected from replacement or resubmission.
-The post-response spinner behavior still needs one clean live turn to verify.
+The Home reconnect fix is deployed and the parked-turn recovery path is
+validated. End-to-end reply delivery and the post-response activity indicator
+remain unconfirmed: the latest live turn timed out in the app despite Home
+recording terminal and audio completion. A new live turn is required to verify
+the Apple decoder follow-up and final UI state. The existing prompts remain
+protected as unconfirmed; no prompt was resent.
