@@ -1,6 +1,6 @@
 # common/find-stories.yaml
 #
-# Purpose: Scans story branches, pulls each worktree, reads sprint-status,
+# Purpose: Scans existing story worktrees, resolves each story's status key,
 #          and filters by a target status. Asks the user to choose if multiple match.
 # Input variables:
 #   - target_status: the sprint status to match (e.g. "ready-for-dev", "review")
@@ -9,17 +9,18 @@
 #   - matched_stories: newline-separated list of branch names matching the target status
 #   - selected_story: the branch name chosen by the user (or auto-selected if only one match)
 #   - selected_worktree_path: the filesystem path to the selected story worktree
-# Side effects: pulls each story worktree
+# Side effects: none; reads local branch and worktree state only
 
 - READ: _bmad/custom/issue-tracking.yaml
   EXTRACT:
     story_pattern: issue_tracking.branch_patterns.story
-- RUN: uv run --no-project python -c "
-import sys
-print(sys.argv[1].replace('{prd_key}', sys.argv[2]).replace('{story_key}', '*'))
-" {story_pattern} {prd_key}
+- RUN: |
+    uv run --no-project python -c "
+    import sys
+    print(sys.argv[1].replace('{prd_key}', sys.argv[2]).replace('{story_key}', '*'))
+    " {story_pattern} {prd_key}
   STORE: story_branch_glob
-- RUN: git branch --list '{story_branch_glob}'
+- RUN: git branch --list --format='%(refname:short)' '{story_branch_glob}'
   STORE: story_branches
 - CHECK: empty story_branches
   TRUE:
@@ -37,18 +38,31 @@ print(sys.argv[1].replace('{prd_key}', sys.argv[2]).replace('{story_key}', '*'))
           select: path
           where: branch eq "{branch}"
           store: worktree_path
-      - RUN: cd {worktree_path} && git pull --ff-only
-        EXPECT_EXIT: 0
-      - RUN: uv run --no-project python -c "
-import sys
-parts = sys.argv[1].rstrip().split('/')
-if len(parts) >= 3:
-    print(parts[-1])
-else:
-    print(sys.argv[1])
-" {branch}
+      - RUN: |
+          uv run --no-project python -c "
+          import sys
+          parts = sys.argv[1].rstrip().split('/')
+          if len(parts) >= 3:
+              print(parts[-1])
+          else:
+              print(sys.argv[1])
+          " {branch}
+        STORE: branch_key
+      - SET: { variable: story_spec_path, value: "{worktree_path}/_bmad-output/implementation-artifacts/spec-{branch_key}.md" }
+      - RUN: |
+          uv run --no-project python -c "
+          import pathlib, sys
+          branch_key, spec_path = sys.argv[1], pathlib.Path(sys.argv[2])
+          if spec_path.is_file():
+              content = spec_path.read_text(encoding='utf-8')
+              frontmatter = content.split('---', 2)[1] if content.startswith('---') else ''
+              key = next((line.partition(':')[2].strip().strip(chr(34) + chr(39)) for line in frontmatter.splitlines() if line.startswith('story_key:')), branch_key)
+              print(key)
+          else:
+              print(branch_key)
+          " {branch_key} {story_spec_path}
         STORE: story_key
-      - SET: { variable: story_sprint_status_path, value: "{worktree_path}/{implementation_artifacts}/sprint-status.yaml" }
+      - SET: { variable: story_sprint_status_path, value: "{worktree_path}/_bmad-output/implementation-artifacts/sprint-status.yaml" }
       - READ: {story_sprint_status_path}
         EXTRACT:
           entries: development_status
