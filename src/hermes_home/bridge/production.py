@@ -27,6 +27,10 @@ from hermes_home.bridge.standard import (
 from hermes_home.domain.arbitration import WakeDecision
 from hermes_home.domain.conversations import ConversationClaimConflict
 from hermes_home.domain.credentials import RevocationEvent
+from hermes_home.domain.watch import (
+    WATCH_ACTIVITY_STATES,
+    WatchSnapshot,
+)
 from hermes_home.storage.sqlite import (
     ConfigurationMigrationRequired,
     ConfigurationStoreError,
@@ -48,15 +52,20 @@ class ConversationGrantStore:
         clock: Callable[[], float] = time.monotonic,
         idle_timeout_seconds: float = 8.0,
         first_open_timeout_seconds: float = DEFAULT_FIRST_OPEN_TIMEOUT_SECONDS,
+        route_id: str = "local",
         handle_factory: Callable[[], str] | None = None,
     ) -> None:
         self._configuration = configuration
         self._clock = clock
         self._idle_timeout = _positive_timeout(idle_timeout_seconds)
         self._first_open_timeout = _positive_timeout(first_open_timeout_seconds)
+        if type(route_id) is not str or not 1 <= len(route_id) <= MAX_IDENTIFIER_LENGTH:
+            raise ValueError("watch route ID must be a non-empty bounded string")
+        self._watch_route = {"class": "home", "id": route_id}
         self._handle_factory = handle_factory or (lambda: secrets.token_urlsafe(32))
         self._lock = RLock()
         self._revocation_handlers: dict[str, set[Callable[[str], None]]] = {}
+        self._watch_connected_at: dict[str, float] = {}
         database_path = Path(database)
         database_path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(database_path, check_same_thread=False)
@@ -301,6 +310,20 @@ class ConversationGrantStore:
                 self._connection.rollback()
                 raise OSError("cannot mark Home conversation open") from error
             self._cancel_timer_locked(handle)
+            self._watch_connected_at[handle] = now
+
+    def mark_disconnected(self, handle: str, device_id: str) -> None:
+        """Remove the ephemeral connected marker without closing the claim."""
+        with self._lock:
+            try:
+                row = self._connection.execute(
+                    "SELECT device_id FROM conversation_claims WHERE handle = ?",
+                    (handle,),
+                ).fetchone()
+            except sqlite3.Error as error:
+                raise OSError("cannot read Home conversation claim") from error
+            if row is not None and row[0] == device_id:
+                self._watch_connected_at.pop(handle, None)
 
     def register_revocation_handler(
         self,
@@ -434,6 +457,55 @@ class ConversationGrantStore:
             self._cancel_timer_locked(handle)
             if idle_deadline is not None:
                 self._schedule_timer_locked(handle, idle_deadline, now)
+            if handle in self._watch_connected_at:
+                self._watch_connected_at[handle] = now
+
+    def watch_snapshot(
+        self,
+        device_id: str,
+        *,
+        configuration_revision: int,
+    ) -> WatchSnapshot | None:
+        """Return one connected, non-expired claim as content-free Watch state."""
+        now = _finite_time(self._clock())
+        with self._lock:
+            try:
+                rows = self._connection.execute(
+                    "SELECT handle, profile_id, configuration_revision, "
+                    "credential_generation, session_id, activity, idle_deadline "
+                    "FROM conversation_claims "
+                    "WHERE device_id = ? AND status = 'active' "
+                    "AND (idle_deadline IS NULL OR idle_deadline > ?)",
+                    (device_id, now),
+                ).fetchall()
+            except sqlite3.Error as error:
+                raise OSError("cannot read Home Watch state") from error
+            if len(rows) != 1:
+                return None
+            (
+                handle,
+                profile_id,
+                revision,
+                generation,
+                session_id,
+                activity,
+                _deadline,
+            ) = rows[0]
+            if revision != configuration_revision:
+                return None
+            if handle not in self._watch_connected_at:
+                return None
+            if activity not in WATCH_ACTIVITY_STATES:
+                return None
+            return WatchSnapshot(
+                device_id=device_id,
+                profile_id=profile_id,
+                configuration_revision=revision,
+                credential_generation=generation,
+                activity=activity,
+                route=self._watch_route,
+                session_present=isinstance(session_id, str) and bool(session_id),
+            )
 
     def close_claim(
         self,
@@ -549,6 +621,7 @@ class ConversationGrantStore:
                 raise OSError("cannot revoke Home conversation claims") from error
             for (handle,) in handles:
                 self._cancel_timer_locked(handle)
+                self._watch_connected_at.pop(handle, None)
                 for handler in self._revocation_handlers.pop(handle, set()):
                     notifications.append((handler, reason))
             closed_count = cursor.rowcount
@@ -576,6 +649,7 @@ class ConversationGrantStore:
             except sqlite3.Error:
                 return
             self._timers.pop(handle, None)
+            self._watch_connected_at.pop(handle, None)
 
     def _expire_due_locked(self, now: float) -> None:
         try:
@@ -597,6 +671,7 @@ class ConversationGrantStore:
             raise OSError("cannot expire Home conversation claims") from error
         for (handle,) in rows:
             self._cancel_timer_locked(handle)
+            self._watch_connected_at.pop(handle, None)
 
     def _close_locked(self, handle: str, reason: str, now: float) -> None:
         try:
@@ -610,6 +685,7 @@ class ConversationGrantStore:
         except sqlite3.Error as error:
             raise OSError("cannot close Home conversation claim") from error
         self._cancel_timer_locked(handle)
+        self._watch_connected_at.pop(handle, None)
         self._revocation_handlers.pop(handle, None)
 
     def _cancel_timer_locked(self, handle: str) -> None:
@@ -633,6 +709,7 @@ class ConversationGrantStore:
             for timer in self._timers.values():
                 timer.cancel()
             self._timers.clear()
+            self._watch_connected_at.clear()
             self._revocation_handlers.clear()
             self._connection.close()
 
@@ -748,6 +825,7 @@ def create_standard_bridge_factory(
             conversation_closer=conversation_store.close_claim,
             activity_recorder=conversation_store.record_activity,
             conversation_opener=conversation_store.mark_open,
+            conversation_disconnector=conversation_store.mark_disconnected,
             revocation_registrar=conversation_store.register_revocation_handler,
             revocation_unregistrar=conversation_store.unregister_revocation_handler,
             audio_timeout=audio_timeout,

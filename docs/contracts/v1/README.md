@@ -128,6 +128,36 @@ revision and only its authorized active mappings, with no Profile IDs. Devices
 fetch on pairing/startup/reconnect, poll every 30 seconds while active, and
 refresh after `stale_configuration` or `stale_mapping`.
 
+The independent `watch_view` credential capability permits one bounded read-only observation of an endpoint in an authorized Room. It does not grant wake claims, prompts, choices, interruption, configuration changes, microphone access, audio, or transcript replay. The capability is checked against the observer's current credential generation and Room scope on every request.
+
+## Watch View
+
+`GET /api/v1/devices/{device_id}/watch` returns one current snapshot for an authorized endpoint. The response contains only a configured display label, a safe route and health state, and a bounded content-free task summary:
+
+```json
+{
+  "schema": 1,
+  "watch": {
+    "status": "available",
+    "endpoint": {"id": "display-living", "name": "Living Display"},
+    "profile_label": "Family",
+    "route": {"class": "home", "id": "local"},
+    "health": "ready",
+    "task": {
+      "state": "turn",
+      "summary": "Processing the current turn",
+      "session_present": true
+    },
+    "preview": {
+      "kind": "safe_state",
+      "summary": "Processing the current turn"
+    }
+  }
+}
+```
+
+If no eligible current state exists, the authenticated request returns the same envelope with `watch.status: "unavailable"` and one of `no_current_state`, `stale_state`, or `observation_unavailable`. Revoked, expired, stale, or disconnected state never falls back to another endpoint or Profile. The response never contains Profile IDs, prompts, transcripts, raw audio, credentials, Sensitive Entry values, private notifications, or unrelated room content. The endpoint remains read-only; ongoing transcript/status fan-out is a separate future contract.
+
 ## Wake arbitration
 
 `POST /api/v1/wake-claims` submits one claim and waits for the bounded

@@ -253,6 +253,7 @@ def create_runtime(
                 settings.database_path,
                 configuration=store.read,
                 idle_timeout_seconds=settings.conversation_idle_timeout_seconds,
+                route_id=settings.bridge_route_id,
             )
         credential_service = None
         if settings.credential_root_secret is not None:

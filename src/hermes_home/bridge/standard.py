@@ -744,6 +744,7 @@ class HomeBridge:
         conversation_closer: Callable[..., object] | None = None,
         activity_recorder: Callable[[str, str, str], None] | None = None,
         conversation_opener: Callable[[str, str], None] | None = None,
+        conversation_disconnector: Callable[[str, str], None] | None = None,
         revocation_registrar: Callable[[str, Callable[[str], None]], bool]
         | None = None,
         revocation_unregistrar: Callable[[str, Callable[[str], None]], None]
@@ -762,6 +763,7 @@ class HomeBridge:
         self._conversation_closer = conversation_closer
         self._activity_recorder = activity_recorder
         self._conversation_opener = conversation_opener
+        self._conversation_disconnector = conversation_disconnector
         self._revocation_registrar = revocation_registrar
         self._revocation_unregistrar = revocation_unregistrar
         self._revocation_handler = self._on_claim_revoked
@@ -978,6 +980,7 @@ class HomeBridge:
         )
         with self._state_lock:
             if self._active_turn is not None:
+                self._mark_disconnected(grant.handle, grant.device_id)
                 gateway.close()
                 return BridgeStatus(
                     "unavailable",
@@ -986,6 +989,7 @@ class HomeBridge:
                     unresolved_turn=self._unresolved_turn,
                 )
             if self._state == "turn_uncertain":
+                self._mark_disconnected(grant.handle, grant.device_id)
                 gateway.close()
                 return BridgeStatus(
                     "unavailable",
@@ -995,6 +999,8 @@ class HomeBridge:
                 )
             old_gateway = self._gateway
             old_audio = self._audio_socket
+            old_handle = self._conversation_handle
+            old_device_id = self._device_id
             self._gateway = gateway
             self._grant = grant
             self._conversation_handle = conversation_handle
@@ -1012,6 +1018,8 @@ class HomeBridge:
             self._unresolved_turn = None
             self._last_terminal_event_seq = None
             self._state = "ready"
+        if (old_handle, old_device_id) != (conversation_handle, device_id):
+            self._mark_disconnected(old_handle, old_device_id)
         if old_audio is not None:
             _close_quietly(old_audio)
         if old_gateway is not None and old_gateway is not gateway:
@@ -1404,6 +1412,10 @@ class HomeBridge:
             self._endpoint_headers = {}
             self._state = "unavailable"
         self._close_audio()
+        self._mark_disconnected(
+            grant.handle if grant is not None else None,
+            device_id,
+        )
         if (
             reason in {"unauthorized", "stale_conversation", "conversation_mismatch"}
             and grant is not None
@@ -2645,13 +2657,29 @@ class HomeBridge:
         """Close live sockets while retaining the opaque session for resume."""
 
         with self._state_lock:
+            handle = self._conversation_handle
+            device_id = self._device_id
             self._close_audio()
             gateway = self._gateway
             self._gateway = None
             self._runtime_session_id = None
             self._advertised_commands = frozenset()
+        self._mark_disconnected(handle, device_id)
         if gateway is not None:
             gateway.close()
+
+    def _mark_disconnected(
+        self,
+        handle: str | None,
+        device_id: str | None,
+    ) -> None:
+        callback = self._conversation_disconnector
+        if callback is None or handle is None or device_id is None:
+            return
+        try:
+            callback(handle, device_id)
+        except OSError, RuntimeError, TypeError, ValueError:
+            LOGGER.debug("could not clear Home Watch connection marker", exc_info=True)
 
     def _mark_transport_loss(
         self,
@@ -2674,7 +2702,10 @@ class HomeBridge:
             self._advertised_commands = frozenset()
             gateway_to_close = self._gateway
             self._gateway = None
+            handle = self._conversation_handle
+            device_id = self._device_id
         self._close_audio()
+        self._mark_disconnected(handle, device_id)
         if gateway_to_close is not None:
             gateway_to_close.close()
 
