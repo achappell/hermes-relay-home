@@ -228,6 +228,43 @@ def test_open_claim_does_not_expire_on_the_first_open_deadline(tmp_path) -> None
     store.close()
 
 
+def test_production_watch_snapshot_revalidates_connection_revision_and_expiry(
+    tmp_path,
+) -> None:
+    now = [100.0]
+    store = ConversationGrantStore(
+        tmp_path / "home.sqlite3",
+        configuration=_configuration,
+        clock=lambda: now[0],
+        idle_timeout_seconds=8,
+        handle_factory=lambda: "watch-production-handle",
+    )
+    handle = store.create_from_decision(
+        _decision("watch-production-claim"), credential_generation=2
+    )
+
+    assert store.watch_snapshot("pixel-6a", configuration_revision=3) is None
+    store.mark_open(handle, "pixel-6a")
+    snapshot = store.watch_snapshot("pixel-6a", configuration_revision=3)
+    assert snapshot is not None
+    assert snapshot.credential_generation == 2
+    assert snapshot.activity == "open"
+    assert store.watch_snapshot("pixel-6a", configuration_revision=4) is None
+
+    now[0] += 60
+    assert store.watch_snapshot("pixel-6a", configuration_revision=3) is not None
+    store.mark_disconnected(handle, "pixel-6a")
+    assert store.watch_snapshot("pixel-6a", configuration_revision=3) is None
+    assert store.resolve(handle, "pixel-6a") is not None
+
+    store.mark_open(handle, "pixel-6a")
+    store.record_activity(handle, "pixel-6a", "response_ready")
+    store.record_activity(handle, "pixel-6a", "playback_complete")
+    now[0] += 8
+    assert store.watch_snapshot("pixel-6a", configuration_revision=3) is None
+    store.close()
+
+
 def test_conversation_claim_store_rejects_replay_and_same_room_overlap(
     tmp_path,
 ) -> None:
@@ -507,6 +544,7 @@ def test_production_factory_keeps_standard_authority_server_side(tmp_path) -> No
 
     bridge = factory()
     assert isinstance(bridge, HomeBridge)
+    assert getattr(bridge._conversation_disconnector, "__self__", None) is store
     assert "server-secret" not in repr(bridge)
     bridge.close()
     store.close()

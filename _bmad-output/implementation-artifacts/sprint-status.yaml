@@ -1,6 +1,6 @@
 schema_version: 1
 generated: 2026-09-12
-last_updated: 2026-09-17
+last_updated: 2026-09-20
 project: hermes-relay-home
 tracking_system: file-system
 status_authority: local
@@ -15,7 +15,7 @@ development_status:
   home-nw-05-profile-mappings-conversation-claims: done
   home-nw-06-diagnostics-incident-review: done
   home-nw-07-typed-choice-authority: done
-  home-nw-08-watch-safe-preview: backlog
+  home-nw-08-watch-safe-preview: review
   home-nw-09-device-health-check: backlog
   home-nw-10-device-permissions-sensitive-entry: backlog
   home-nw-11-endpoint-notifications-quiet-hours: backlog

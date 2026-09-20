@@ -1059,6 +1059,7 @@ def test_bridge_marks_command_transport_loss_before_reporting_it():
         ],
         catalog_pairs=["status"],
     )
+    disconnected: list[tuple[str, str]] = []
     bridge = HomeBridge(
         gateway_url="wss://hermes.example/api/ws",
         hermes_token="server-hermes-secret",
@@ -1072,6 +1073,9 @@ def test_bridge_marks_command_transport_loss_before_reporting_it():
             profile_id="family",
         ),
         gateway_socket_factory=FakeSocketFactory(gateway_socket),
+        conversation_disconnector=lambda handle, device_id: disconnected.append(
+            (handle, device_id)
+        ),
     )
 
     bridge.open(
@@ -1082,6 +1086,7 @@ def test_bridge_marks_command_transport_loss_before_reporting_it():
     with pytest.raises(BridgeTransportError, match="command"):
         bridge.dispatch_command("status")
     assert bridge.state == "disconnected"
+    assert ("opaque-conversation-1", "puck-kitchen") in disconnected
 
 
 def test_old_command_loss_cannot_clobber_a_newly_opened_bridge():

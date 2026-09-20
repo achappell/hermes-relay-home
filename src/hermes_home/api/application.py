@@ -23,6 +23,13 @@ from hermes_home.domain.credentials import (
     CredentialStateError,
     CredentialValidationError,
 )
+from hermes_home.domain.watch import (
+    WATCH_VIEW_CAPABILITY,
+    WatchSnapshot,
+    WatchSnapshotProvider,
+    activity_summary,
+    serialize_watch_route,
+)
 from hermes_home.observability.diagnostics import (
     DiagnosticEvent,
     DiagnosticsRecorder,
@@ -61,6 +68,7 @@ class HomeApplication:
         credential_service: CredentialService | None = None,
         conversation_claim_store: ConversationClaimStore | None = None,
         static_device_scopes: Mapping[str, CredentialScope] | None = None,
+        watch_snapshot_provider: WatchSnapshotProvider | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleeper: Callable[[float], None] = time.sleep,
         metrics: MetricsRegistry | None = None,
@@ -75,6 +83,7 @@ class HomeApplication:
             int, tuple[Mapping[str, object] | None, Mapping[str, object]]
         ] = {}
         self._static_device_scopes = dict(static_device_scopes or {})
+        self._watch_snapshot_provider = watch_snapshot_provider
         if credential_service is None:
             self._authenticator = StaticCredentialAuthenticator(
                 admin_token=admin_token,
@@ -191,6 +200,8 @@ class HomeApplication:
                     return self._revoke_device(headers, body, device_id)
                 if method == "GET" and parts[5] == "configuration":
                     return self._get_device_configuration(headers, device_id)
+                if method == "GET" and parts[5] == "watch":
+                    return self._get_watch(headers, device_id)
             if (
                 len(parts) == 7
                 and parts[1:4] == ["api", "v1", "devices"]
@@ -457,6 +468,130 @@ class HomeApplication:
                 },
             },
         )
+
+    def _get_watch(
+        self,
+        headers: Mapping[str, str],
+        target_device_id: str,
+    ) -> HTTPResponse:
+        try:
+            watcher_device_id, _generation, scope = self._watch_context(headers)
+        except OSError, RuntimeError, TypeError, ValueError:
+            return _error(503, "service_unavailable")
+        if watcher_device_id is None:
+            return _error(401, "unauthorized")
+        if WATCH_VIEW_CAPABILITY not in scope.capabilities:
+            return _error(403, "forbidden")
+        try:
+            configuration = self._configuration_store.read()
+        except ConfigurationMigrationRequired as error:
+            return HTTPResponse(
+                409,
+                {
+                    "schema": 1,
+                    "error": {
+                        "code": "configuration_migration_required",
+                        "current_revision": error.current_revision,
+                    },
+                },
+            )
+        except OSError, RuntimeError, TypeError, ValueError:
+            return _error(503, "service_unavailable")
+
+        target = next(
+            (
+                device
+                for device in configuration["devices"]
+                if device["id"] == target_device_id
+            ),
+            None,
+        )
+        if target is None or target["room_id"] not in scope.rooms:
+            return _error(404, "not_found")
+
+        provider = self._watch_snapshot_provider or self._conversation_claim_store
+        read_snapshot = getattr(provider, "watch_snapshot", None)
+        if not callable(read_snapshot):
+            return _watch_unavailable("observation_unavailable", target)
+        try:
+            current = read_snapshot(
+                target_device_id,
+                configuration_revision=configuration["revision"],
+            )
+        except OSError, RuntimeError, TypeError, ValueError:
+            return _watch_unavailable("observation_unavailable", target)
+        if current is None:
+            return _watch_unavailable("no_current_state", target)
+        if not isinstance(current, WatchSnapshot):
+            return _watch_unavailable("observation_unavailable", target)
+        if (
+            current.device_id != target_device_id
+            or current.configuration_revision != configuration["revision"]
+        ):
+            return _watch_unavailable("stale_state", target)
+
+        profiles = {profile["id"]: profile for profile in configuration["profiles"]}
+        profile = profiles.get(current.profile_id)
+        if profile is None or profile["available"] is not True:
+            return _watch_unavailable("no_current_state", target)
+        try:
+            route = serialize_watch_route(current.route)
+        except TypeError, ValueError:
+            return _watch_unavailable("observation_unavailable", target)
+        summary = activity_summary(
+            current.activity,
+            session_present=current.session_present,
+        )
+        return HTTPResponse(
+            200,
+            {
+                "schema": 1,
+                "watch": {
+                    "status": "available",
+                    "endpoint": {
+                        "id": target["id"],
+                        "name": target["name"],
+                    },
+                    "profile_label": profile["name"],
+                    "route": route,
+                    "health": current.health,
+                    "task": {
+                        "state": current.activity,
+                        "summary": summary,
+                        "session_present": current.session_present,
+                    },
+                    "preview": {
+                        "kind": "safe_state",
+                        "summary": summary,
+                    },
+                },
+            },
+        )
+
+    def _watch_context(
+        self,
+        headers: Mapping[str, str],
+    ) -> tuple[str | None, int | None, CredentialScope]:
+        if self._credential_service is None:
+            device_id = self._authenticator.authenticate_device(headers)
+            if device_id is None:
+                return (
+                    None,
+                    None,
+                    CredentialScope.from_values(rooms=(), capabilities=()),
+                )
+            return (
+                device_id,
+                None,
+                self._static_device_scopes.get(
+                    device_id,
+                    CredentialScope.from_values(rooms=(), capabilities=()),
+                ),
+            )
+        context = self._durable_device_context(headers)
+        if context is None:
+            return None, None, CredentialScope.from_values(rooms=(), capabilities=())
+        return context.device_id, context.generation, context.scope
 
     def _reject_enrollment_request(
         self,
@@ -1224,9 +1359,31 @@ def _error(status: int, code: str) -> HTTPResponse:
     return HTTPResponse(status, {"schema": 1, "error": {"code": code}})
 
 
+def _watch_unavailable(
+    reason: str,
+    target: Mapping[str, object],
+) -> HTTPResponse:
+    return HTTPResponse(
+        200,
+        {
+            "schema": 1,
+            "watch": {
+                "status": "unavailable",
+                "reason": reason,
+                "endpoint": {
+                    "id": target["id"],
+                    "name": target["name"],
+                },
+            },
+        },
+    )
+
+
 def _metric_route(path: str) -> str:
     if path.startswith("/api/v1/diagnostics/timeline/"):
         return "diagnostics_timeline"
+    if path.startswith("/api/v1/devices/") and path.endswith("/watch"):
+        return "device_watch"
     if path.startswith("/api/v1/devices/"):
         return "device_configuration"
     return {
