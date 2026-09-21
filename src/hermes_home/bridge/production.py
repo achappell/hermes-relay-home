@@ -20,13 +20,22 @@ from hermes_home.bridge.standard import (
     STANDARD_GATEWAY_PATH,
     AudioSocket,
     BridgeProtocolError,
+    BridgeTimeoutError,
+    BridgeTransportError,
     ConversationGrant,
+    GatewayRPCError,
     HomeBridge,
     JsonSocket,
+    StandardGatewayClient,
 )
 from hermes_home.domain.arbitration import WakeDecision
 from hermes_home.domain.conversations import ConversationClaimConflict
 from hermes_home.domain.credentials import RevocationEvent
+from hermes_home.domain.health import (
+    HealthDeliveryState,
+    HealthProbeResult,
+    HealthStageName,
+)
 from hermes_home.domain.watch import (
     WATCH_ACTIVITY_STATES,
     WatchSnapshot,
@@ -507,6 +516,41 @@ class ConversationGrantStore:
                 session_present=isinstance(session_id, str) and bool(session_id),
             )
 
+    def delivery_state(self, device_id: str) -> HealthDeliveryState:
+        """Read one active claim without changing its timers or status."""
+        now = _finite_time(self._clock())
+        with self._lock:
+            try:
+                rows = self._connection.execute(
+                    "SELECT activity FROM conversation_claims "
+                    "WHERE device_id = ? AND status = 'active' "
+                    "AND (idle_deadline IS NULL OR idle_deadline > ?)",
+                    (device_id, now),
+                ).fetchall()
+            except sqlite3.Error as error:
+                raise OSError("cannot read Home delivery state") from error
+            if not rows:
+                return HealthDeliveryState(status="idle")
+            if len(rows) != 1:
+                return HealthDeliveryState(
+                    status="unavailable", reason="delivery_state_unavailable"
+                )
+            activity = rows[0][0]
+            if activity not in {
+                "ready",
+                "open",
+                "capture",
+                "turn",
+                "playback",
+                "response_ready",
+                "playback_complete",
+                "idle",
+            }:
+                return HealthDeliveryState(
+                    status="unavailable", reason="delivery_state_unavailable"
+                )
+            return HealthDeliveryState(status="active", activity=activity)
+
     def close_claim(
         self,
         handle: str,
@@ -794,6 +838,157 @@ class WebsocketsAudioSocketFactory:
         return WebsocketsAudioSocket(
             connect(url, open_timeout=self._open_timeout, max_size=4 * 1_048_576)
         )
+
+
+class StandardHealthProbeProvider:
+    """Run a fresh, non-conversation Standard readiness probe.
+
+    The route and bridge checks are deliberately separate from the Standard
+    socket check. A configured route selector may prove the approved Home
+    route; without one, reaching the authenticated Home HTTP handler proves
+    the local route boundary. The Standard check uses only ``gateway.ready``
+    and ``gateway.ping`` and always closes the temporary gateway client.
+    """
+
+    def __init__(
+        self,
+        *,
+        gateway_url: str,
+        hermes_token: str,
+        socket_factory: object | None = None,
+        route_selector: object | None = None,
+        bridge_probe: Callable[[str, str, float], HealthProbeResult] | None = None,
+        bridge_configured: bool = False,
+        connect_timeout: float = 5.0,
+    ) -> None:
+        _validate_gateway_url(gateway_url)
+        if not isinstance(hermes_token, str) or not hermes_token.strip():
+            raise ValueError("Standard gateway token must be non-empty")
+        if type(bridge_configured) is not bool:
+            raise ValueError("bridge_configured must be a boolean")
+        self._gateway_url = gateway_url
+        self._hermes_token = hermes_token
+        self._socket_factory = socket_factory or WebsocketsJsonSocketFactory(
+            open_timeout=connect_timeout
+        )
+        self._route_selector = route_selector
+        self._bridge_probe = bridge_probe
+        self._bridge_configured = bridge_configured
+        self._connect_timeout = _positive_timeout(connect_timeout)
+
+    def probe(
+        self,
+        stage: HealthStageName,
+        *,
+        device_id: str,
+        room_id: str,
+        timeout: float,
+    ) -> HealthProbeResult:
+        if stage == "route":
+            return self._probe_route(timeout)
+        if stage == "bridge":
+            return self._probe_bridge(device_id, room_id, timeout)
+        if stage == "standard":
+            return self._probe_standard(timeout)
+        return HealthProbeResult.unsupported()
+
+    def _probe_route(self, timeout: float) -> HealthProbeResult:
+        del timeout
+        selector = self._route_selector
+        if selector is None:
+            return HealthProbeResult.verified()
+        try:
+            select = selector.select
+            selection = select()
+        except AttributeError, OSError, RuntimeError, TypeError, ValueError:
+            return HealthProbeResult.unavailable(
+                "route_unavailable", next_action="retry_health_check"
+            )
+        if getattr(selection, "status", None) == "selected":
+            return HealthProbeResult.verified()
+        reason = getattr(selection, "safe_failure_reason", None)
+        if reason is None:
+            reason = getattr(selection, "reason", None)
+        reason_map = {
+            "route_identity_mismatch": "route_identity_mismatch",
+            "route_timeout": "route_timeout",
+            "route_unauthorized": "route_unauthorized",
+            "route_unavailable": "route_unavailable",
+        }
+        safe_reason = reason_map.get(reason, "route_unavailable")
+        action = (
+            "retry_health_check"
+            if safe_reason != "route_unauthorized"
+            else "refresh_pairing"
+        )
+        if safe_reason == "route_identity_mismatch":
+            action = "refresh_pairing"
+        return HealthProbeResult.unavailable(safe_reason, next_action=action)
+
+    def _probe_bridge(
+        self,
+        device_id: str,
+        room_id: str,
+        timeout: float,
+    ) -> HealthProbeResult:
+        if self._bridge_probe is not None:
+            try:
+                result = self._bridge_probe(device_id, room_id, timeout)
+            except OSError, RuntimeError, TypeError, ValueError:
+                return HealthProbeResult.unavailable(
+                    "bridge_unavailable", next_action="inspect_home_bridge"
+                )
+            return (
+                result
+                if isinstance(result, HealthProbeResult)
+                else HealthProbeResult.unavailable(
+                    "bridge_unavailable", next_action="inspect_home_bridge"
+                )
+            )
+        if not self._bridge_configured:
+            return HealthProbeResult.unavailable(
+                "bridge_unavailable", next_action="inspect_home_bridge"
+            )
+        return HealthProbeResult.verified()
+
+    def _probe_standard(self, timeout: float) -> HealthProbeResult:
+        if timeout <= 0:
+            return HealthProbeResult.timed_out(
+                reason="standard_timeout", next_action="inspect_standard_gateway"
+            )
+        client = StandardGatewayClient(
+            url=self._gateway_url,
+            token=self._hermes_token,
+            socket_factory=self._socket_factory,
+            connect_timeout=min(self._connect_timeout, timeout),
+            request_timeout=timeout,
+            event_timeout=timeout,
+        )
+        try:
+            client.probe_readiness(timeout=timeout)
+            return HealthProbeResult.verified()
+        except BridgeTimeoutError:
+            return HealthProbeResult.timed_out(
+                reason="standard_timeout", next_action="inspect_standard_gateway"
+            )
+        except TimeoutError:
+            return HealthProbeResult.timed_out(
+                reason="standard_timeout", next_action="inspect_standard_gateway"
+            )
+        except BridgeProtocolError:
+            return HealthProbeResult.unavailable(
+                "standard_protocol_error", next_action="inspect_standard_gateway"
+            )
+        except GatewayRPCError, BridgeTransportError, ConnectionError, OSError:
+            return HealthProbeResult.unavailable(
+                "standard_unavailable", next_action="inspect_standard_gateway"
+            )
+        except RuntimeError, TypeError, ValueError:
+            return HealthProbeResult.unavailable(
+                "standard_unavailable", next_action="inspect_standard_gateway"
+            )
+        finally:
+            client.close()
 
 
 def create_standard_bridge_factory(

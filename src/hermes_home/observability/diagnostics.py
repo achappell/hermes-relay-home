@@ -150,9 +150,12 @@ _SAFE_ROUTE_IDS = frozenset(
     {
         "bridge",
         "configuration",
+        "device_health",
+        "device_watch",
         "diagnostics_status",
         "diagnostics_timeline",
         "home",
+        "health",
         "local",
         "metrics",
         "other",

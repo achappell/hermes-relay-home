@@ -45,6 +45,14 @@
   summary: Distinguish a Standard `session.resume` "not found" rejection for a never-stored Session from other rejections, so a stale grant session ID can heal instead of requiring manual cleanup.
   evidence: Maybe-false until Standard exposes a distinguishing error code; today a reaped empty Session and a genuine rejection both surface as GatewayRPCError -> request_rejected.
 
+- source_spec: `_bmad-output/implementation-artifacts/spec-home-nw-09-device-health-check.md`
+  summary: Expose unresolved Standard delivery state from the live per-connection Home bridge through the health delivery projection.
+  evidence: `HomeBridge` keeps `turn_uncertain` and its unresolved turn in per-connection memory, while the production `ConversationGrantStore.delivery_state` reads only the durable claim activity; wiring the two requires a bridge-state registry or a new durable uncertainty handoff.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-home-nw-09-device-health-check.md`
+  summary: Add cancellable or bounded worker ownership for injected health probes that ignore their supplied timeout.
+  evidence: The production route and Standard adapters pass deadlines through, but the generic safety wrapper can only abandon an uncooperative injected callable; a production provider that ignores the deadline and mutates or holds resources after return would settle this as a real defect.
+
 ## Deferred from: code review of spec-home-nw-07-freshness-bound-typed-choice-authority (2026-09-17)
 
 - Confirm whether Standard guarantees correlation IDs are globally unique across all structured prompt types. Home currently routes a response to the choice path when any retained choice correlation matches, but the local contract does not promise global uniqueness; if Standard can reuse an ID for a different prompt type, that prompt's valid response is diverted. Evidence to settle it: the pinned Standard protocol contract or a producer implementation guarantee.

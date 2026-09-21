@@ -268,6 +268,16 @@ class RouteSelection:
     def available(self) -> bool:
         return self.status == "selected"
 
+    @property
+    def safe_failure_reason(self) -> str | None:
+        """Return only the bounded failure vocabulary usable by health checks."""
+        if self.status == "selected":
+            return None
+        for attempt in self.attempts:
+            if attempt.reason is not None:
+                return attempt.reason
+        return self.reason
+
     def to_endpoint(self) -> dict[str, object]:
         payload: dict[str, object] = {
             "status": self.status,

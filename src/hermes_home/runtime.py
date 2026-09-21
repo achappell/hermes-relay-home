@@ -19,6 +19,7 @@ from hermes_home.api.server import create_server
 from hermes_home.bridge.endpoint import BridgeRoute
 from hermes_home.domain.arbitration import ArbitrationEngine
 from hermes_home.domain.credentials import CredentialService
+from hermes_home.domain.health import HealthProbeResult
 from hermes_home.observability.diagnostics import DiagnosticsRecorder
 from hermes_home.observability.metrics import MetricsRegistry
 from hermes_home.storage.credentials import SQLiteCredentialStore
@@ -217,6 +218,7 @@ def create_runtime(
     *,
     bridge_factory: Callable[[], object] | None = None,
     bridge_server_factory: Callable[..., Server] | None = None,
+    health_probe_provider: object | None = None,
 ) -> HomeRuntime:
     """Build the application, server, and durable store for one process."""
     if (
@@ -239,6 +241,38 @@ def create_runtime(
     bridge_server = None
     bridge_thread = None
     bridge_thread_started = False
+    bridge_runtime_state: dict[str, object] = {
+        "factory": bridge_factory,
+        "server": None,
+        "started": False,
+    }
+
+    def probe_bridge(*_args: object) -> HealthProbeResult:
+        if (
+            bridge_runtime_state["factory"] is None
+            or bridge_runtime_state["started"] is not True
+        ):
+            return HealthProbeResult.unavailable(
+                "bridge_unavailable", next_action="inspect_home_bridge"
+            )
+        server = bridge_runtime_state["server"]
+        if server is None:
+            return HealthProbeResult.unavailable(
+                "bridge_unavailable", next_action="inspect_home_bridge"
+            )
+        is_serving = getattr(server, "is_serving", None)
+        if callable(is_serving):
+            try:
+                if not is_serving():
+                    return HealthProbeResult.unavailable(
+                        "bridge_unavailable", next_action="inspect_home_bridge"
+                    )
+            except Exception:  # noqa: BLE001 - health must fail closed
+                return HealthProbeResult.unavailable(
+                    "bridge_unavailable", next_action="inspect_home_bridge"
+                )
+        return HealthProbeResult.verified()
+
     try:
         diagnostics_store = SQLiteDiagnosticsStore(settings.database_path)
         metrics = MetricsRegistry()
@@ -263,6 +297,19 @@ def create_runtime(
                 root_secret=settings.credential_root_secret,
                 revocation_observer=conversation_store,
             )
+        if health_probe_provider is None and settings.standard_gateway_url is not None:
+            if settings.standard_token is None:
+                raise RuntimeConfigurationError(
+                    "Standard bridge settings are incomplete"
+                )
+            from hermes_home.bridge.production import StandardHealthProbeProvider
+
+            health_probe_provider = StandardHealthProbeProvider(
+                gateway_url=settings.standard_gateway_url,
+                hermes_token=settings.standard_token,
+                bridge_probe=probe_bridge,
+                bridge_configured=True,
+            )
         engine = ArbitrationEngine(configuration=store.read)
         application = HomeApplication(
             configuration_store=store,
@@ -271,6 +318,7 @@ def create_runtime(
             device_credentials=settings.device_credentials,
             credential_service=credential_service,
             conversation_claim_store=conversation_store,
+            health_probe_provider=health_probe_provider,
             metrics=metrics,
             diagnostics=diagnostics,
         )
@@ -287,6 +335,7 @@ def create_runtime(
                 conversation_store=conversation_store,
                 device_authenticator=application.device_authenticator,
             )
+        bridge_runtime_state["factory"] = bridge_factory
         server = create_server(
             application,
             host=settings.bind_host,
@@ -300,6 +349,7 @@ def create_runtime(
             port=settings.bridge_port,
             diagnostics=diagnostics,
         )
+        bridge_runtime_state["server"] = bridge_server
         bridge_thread = Thread(
             target=bridge_server.serve_forever,
             name="hermes-home-bridge-server",
@@ -307,6 +357,7 @@ def create_runtime(
         )
         bridge_thread.start()
         bridge_thread_started = True
+        bridge_runtime_state["started"] = True
     except Exception:
         if bridge_server is not None:
             try:

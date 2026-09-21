@@ -503,6 +503,22 @@ class StandardGatewayClient:
 
         return self.request("gateway.ping", {}, timeout=timeout)
 
+    def probe_readiness(self, *, timeout: float | None = None) -> dict[str, object]:
+        """Run a fresh gateway readiness probe without creating a Session."""
+        readiness_timeout = (
+            self._request_timeout
+            if timeout is None
+            else _validate_timeout(timeout, "readiness timeout")
+        )
+        deadline = (
+            None if readiness_timeout is None else time.monotonic() + readiness_timeout
+        )
+        ready = self.connect()
+        ping_timeout = (
+            None if deadline is None else _remaining(deadline, "gateway.ping")
+        )
+        return {"ready": ready, "ping": self.ping(timeout=ping_timeout)}
+
     def next_event(self, *, timeout: float | None = None) -> dict[str, object]:
         event_timeout = (
             self._event_timeout

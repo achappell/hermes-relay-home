@@ -15,6 +15,7 @@ from hermes_home.bridge.endpoint import (
 )
 from hermes_home.bridge.production import (
     ConversationGrantStore,
+    StandardHealthProbeProvider,
     WebsocketsAudioSocket,
     WebsocketsAudioSocketFactory,
     WebsocketsJsonSocket,
@@ -111,6 +112,7 @@ __all__ = [
     "RouteValidationError",
     "SelectedRoute",
     "StandardGatewayClient",
+    "StandardHealthProbeProvider",
     "WebSocketConnection",
     "WebsocketsAudioSocket",
     "WebsocketsAudioSocketFactory",
