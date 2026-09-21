@@ -130,6 +130,14 @@ refresh after `stale_configuration` or `stale_mapping`.
 
 The independent `watch_view` credential capability permits one bounded read-only observation of an endpoint in an authorized Room. It does not grant wake claims, prompts, choices, interruption, configuration changes, microphone access, audio, or transcript replay. The capability is checked against the observer's current credential generation and Room scope on every request.
 
+The independent `health_view` credential capability permits one bounded,
+read-only health check for one endpoint in an authorized Room. It does not
+grant wake claims, prompts, choices, interruption, configuration changes,
+microphone access, audio, or transcript replay. Home checks the target's
+route, Home authorization, bridge readiness, and Standard Hermes readiness as
+separate stages. Device-local microphone, speaker, wake-listener, and display
+checks remain `unsupported` until an endpoint adapter owns those probes.
+
 ## Watch View
 
 `GET /api/v1/devices/{device_id}/watch` returns one current snapshot for an authorized endpoint. The response contains only a configured display label, a safe route and health state, and a bounded content-free task summary:
@@ -157,6 +165,47 @@ The independent `watch_view` credential capability permits one bounded read-only
 ```
 
 If no eligible current state exists, the authenticated request returns the same envelope with `watch.status: "unavailable"` and one of `no_current_state`, `stale_state`, or `observation_unavailable`. Revoked, expired, stale, or disconnected state never falls back to another endpoint or Profile. The response never contains Profile IDs, prompts, transcripts, raw audio, credentials, Sensitive Entry values, private notifications, or unrelated room content. The endpoint remains read-only; ongoing transcript/status fan-out is a separate future contract.
+
+## Device Health
+
+`GET /api/v1/devices/{device_id}/health` runs one bounded check for an
+authorized endpoint. The caller must hold `health_view`, and the target must
+be in one of the caller's authorized Rooms. A successful request returns HTTP
+`200` even when a boundary is unavailable so clients can explain the failure
+without treating a transport error as a healthy device:
+
+```json
+{
+  "schema": 1,
+  "health": {
+    "status": "degraded",
+    "correlation_id": "corr-01J...",
+    "stages": [
+      {"name": "route", "status": "verified"},
+      {"name": "authorization", "status": "verified"},
+      {"name": "bridge", "status": "verified"},
+      {"name": "standard", "status": "verified"},
+      {
+        "name": "device_local",
+        "status": "unsupported",
+        "reason": "unsupported",
+        "next_action": "check_endpoint_capabilities"
+      }
+    ],
+    "delivery": {"status": "active", "activity": "turn"}
+  }
+}
+```
+
+Stage results use only `verified`, `unavailable`, `stale`, `timed_out`, and
+`unsupported`, with an allowlisted reason and safe next action when needed.
+The health status describes the check just completed; `delivery` is a separate
+read-only view of any current or uncertain delivery. The check never opens,
+resumes, closes, or replays a conversation, and never captures audio or sends
+a prompt. Standard readiness uses a fresh `gateway.ready` and read-only
+`gateway.ping` connection, which is closed when the check finishes. The full
+document is capped at 16 KiB; an oversized result becomes an unavailable
+projection with `response_too_large` and no probe payload.
 
 ## Wake arbitration
 

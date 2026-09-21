@@ -19,7 +19,9 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 LOGGER = logging.getLogger(__name__)
 
-SUPPORTED_CREDENTIAL_CAPABILITIES = frozenset({"wake_claim", "watch_view"})
+SUPPORTED_CREDENTIAL_CAPABILITIES = frozenset(
+    {"health_view", "wake_claim", "watch_view"}
+)
 ENROLLMENT_TTL_SECONDS = 300.0
 CREDENTIAL_TTL_SECONDS = 90 * 24 * 60 * 60
 RENEWAL_WINDOW_SECONDS = 14 * 24 * 60 * 60

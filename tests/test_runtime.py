@@ -5,6 +5,7 @@ import threading
 import pytest
 from websockets.sync.client import connect
 
+from hermes_home.bridge.production import StandardHealthProbeProvider
 from hermes_home.domain.credentials import CredentialService
 from hermes_home.observability.diagnostics import DiagnosticEvent
 from hermes_home.runtime import (
@@ -274,6 +275,9 @@ def test_create_runtime_auto_wires_the_standard_backed_pilot_factory(
         assert captured["conversation_store"] is runtime.conversation_store
         assert captured["device_authenticator"] is not None
         application = runtime.server.RequestHandlerClass.application
+        assert isinstance(
+            application._health_probe_provider, StandardHealthProbeProvider
+        )
         assert application._credential_service._revocation_observer is (
             runtime.conversation_store
         )

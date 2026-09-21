@@ -23,6 +23,17 @@ from hermes_home.domain.credentials import (
     CredentialStateError,
     CredentialValidationError,
 )
+from hermes_home.domain.health import (
+    HEALTH_CHECK_TIMEOUT_SECONDS,
+    HEALTH_VIEW_CAPABILITY,
+    HealthDeliveryState,
+    HealthProbeResult,
+    HealthResult,
+    HealthStage,
+    HealthValidationError,
+    bounded_health_body,
+    run_health_check,
+)
 from hermes_home.domain.watch import (
     WATCH_VIEW_CAPABILITY,
     WatchSnapshot,
@@ -69,6 +80,7 @@ class HomeApplication:
         conversation_claim_store: ConversationClaimStore | None = None,
         static_device_scopes: Mapping[str, CredentialScope] | None = None,
         watch_snapshot_provider: WatchSnapshotProvider | None = None,
+        health_probe_provider=None,
         clock: Callable[[], float] = time.monotonic,
         sleeper: Callable[[float], None] = time.sleep,
         metrics: MetricsRegistry | None = None,
@@ -84,6 +96,7 @@ class HomeApplication:
         ] = {}
         self._static_device_scopes = dict(static_device_scopes or {})
         self._watch_snapshot_provider = watch_snapshot_provider
+        self._health_probe_provider = health_probe_provider
         if credential_service is None:
             self._authenticator = StaticCredentialAuthenticator(
                 admin_token=admin_token,
@@ -127,7 +140,13 @@ class HomeApplication:
         started = time.perf_counter()
         correlation_id = self._diagnostics.new_correlation_id()
         try:
-            response = self._dispatch(method, request_path, headers, body)
+            response = self._dispatch(
+                method,
+                request_path,
+                headers,
+                body,
+                correlation_id=correlation_id,
+            )
         except OSError, RuntimeError, TypeError, ValueError:
             self._record_http(method, request_path, 500, started)
             self._record_diagnostic(
@@ -154,6 +173,8 @@ class HomeApplication:
         path: str,
         headers: Mapping[str, str],
         body: bytes | str,
+        *,
+        correlation_id: str | None = None,
     ) -> HTTPResponse:
         if path == "/api/v1/configuration":
             if method == "GET":
@@ -202,6 +223,13 @@ class HomeApplication:
                     return self._get_device_configuration(headers, device_id)
                 if method == "GET" and parts[5] == "watch":
                     return self._get_watch(headers, device_id)
+                if method == "GET" and parts[5] == "health":
+                    return self._get_health(
+                        headers,
+                        device_id,
+                        correlation_id=correlation_id
+                        or self._diagnostics.new_correlation_id(),
+                    )
             if (
                 len(parts) == 7
                 and parts[1:4] == ["api", "v1", "devices"]
@@ -567,6 +595,93 @@ class HomeApplication:
                 },
             },
         )
+
+    def _get_health(
+        self,
+        headers: Mapping[str, str],
+        target_device_id: str,
+        *,
+        correlation_id: str,
+    ) -> HTTPResponse:
+        try:
+            _caller_device_id, _generation, scope = self._watch_context(headers)
+        except OSError, RuntimeError, TypeError, ValueError:
+            return _error(503, "service_unavailable")
+        if _caller_device_id is None:
+            return _error(401, "unauthorized")
+        if HEALTH_VIEW_CAPABILITY not in scope.capabilities:
+            return _error(403, "forbidden")
+        try:
+            configuration = self._configuration_store.read()
+        except ConfigurationMigrationRequired as error:
+            return HTTPResponse(
+                409,
+                {
+                    "schema": 1,
+                    "error": {
+                        "code": "configuration_migration_required",
+                        "current_revision": error.current_revision,
+                    },
+                },
+            )
+        except OSError, RuntimeError, TypeError, ValueError:
+            return _error(503, "service_unavailable")
+
+        target = next(
+            (
+                device
+                for device in configuration["devices"]
+                if device["id"] == target_device_id
+            ),
+            None,
+        )
+        if target is None or target["room_id"] not in scope.rooms:
+            return _error(404, "not_found")
+
+        provider = self._health_probe_provider
+        delivery_provider = provider
+        if not callable(getattr(delivery_provider, "delivery_state", None)):
+            delivery_provider = self._conversation_claim_store
+        try:
+            result = run_health_check(
+                correlation_id=correlation_id,
+                device_id=target_device_id,
+                room_id=target["room_id"],
+                authorization=HealthProbeResult.verified(),
+                provider=provider,
+                delivery_provider=delivery_provider,
+                timeout=HEALTH_CHECK_TIMEOUT_SECONDS,
+                clock=self._clock,
+            )
+            current_configuration = self._configuration_store.read()
+            current_target = next(
+                (
+                    device
+                    for device in current_configuration["devices"]
+                    if device["id"] == target_device_id
+                ),
+                None,
+            )
+            if current_target is None or current_target["room_id"] != target["room_id"]:
+                result = _stale_health_failure(correlation_id)
+            body = bounded_health_body(result)
+        except HealthValidationError:
+            result = _safe_health_failure(correlation_id)
+            body = bounded_health_body(result)
+        except ConfigurationMigrationRequired as error:
+            return HTTPResponse(
+                409,
+                {
+                    "schema": 1,
+                    "error": {
+                        "code": "configuration_migration_required",
+                        "current_revision": error.current_revision,
+                    },
+                },
+            )
+        except OSError, RuntimeError, TypeError, ValueError:
+            return _error(503, "service_unavailable")
+        return HTTPResponse(200, body)
 
     def _watch_context(
         self,
@@ -1165,6 +1280,71 @@ class HomeApplication:
             )
         except Exception as error:  # noqa: BLE001 - telemetry cannot block HTTP work
             del error
+        if path.startswith("/api/v1/devices/") and path.endswith("/health"):
+            self._record_health_diagnostic(
+                correlation_id,
+                path=path,
+                started=started,
+                response=response,
+            )
+
+    def _record_health_diagnostic(
+        self,
+        correlation_id: str,
+        *,
+        path: str,
+        started: float,
+        response: HTTPResponse | None,
+    ) -> None:
+        if response is None or response.status != 200:
+            return
+        body = response.body
+        if not isinstance(body, Mapping):
+            return
+        health = body.get("health")
+        if not isinstance(health, Mapping):
+            return
+        status = health.get("status")
+        if status not in {"healthy", "degraded", "unavailable"}:
+            return
+        stages = health.get("stages")
+        failure_reason = None
+        if isinstance(stages, list):
+            for stage in stages:
+                if not isinstance(stage, Mapping):
+                    continue
+                if stage.get("status") != "verified":
+                    reason = stage.get("reason")
+                    if isinstance(reason, str):
+                        failure_reason = reason
+                    break
+        endpoint_fingerprint = None
+        parts = path.split("/")
+        if len(parts) == 6 and parts[4]:
+            try:
+                endpoint_fingerprint = self._diagnostics.fingerprint(parts[4])
+            except TypeError, ValueError:
+                endpoint_fingerprint = None
+        try:
+            self._diagnostics.record(
+                DiagnosticEvent.create(
+                    correlation_id=correlation_id,
+                    source="home",
+                    phase="health",
+                    outcome="completed"
+                    if status in {"healthy", "degraded"}
+                    else "unavailable",
+                    occurred_at=self._diagnostics.now(),
+                    duration_ms=max(0, round((time.perf_counter() - started) * 1000)),
+                    failure_code=_health_diagnostic_code(failure_reason),
+                    route_class="home",
+                    route_id="health",
+                    health=status,
+                    endpoint_fingerprint=endpoint_fingerprint,
+                )
+            )
+        except Exception as error:  # noqa: BLE001 - telemetry cannot block HTTP work
+            del error
 
     def _record_outcome(
         self,
@@ -1379,11 +1559,93 @@ def _watch_unavailable(
     )
 
 
+def _safe_health_failure(correlation_id: str) -> HealthResult:
+    stages = (
+        HealthStage(
+            name="route",
+            status="unavailable",
+            reason="probe_failed",
+            next_action="retry_health_check",
+        ),
+        HealthStage(name="authorization", status="verified"),
+        HealthStage(
+            name="bridge",
+            status="unavailable",
+            reason="probe_failed",
+            next_action="inspect_home_bridge",
+        ),
+        HealthStage(
+            name="standard",
+            status="unavailable",
+            reason="probe_failed",
+            next_action="inspect_standard_gateway",
+        ),
+        HealthStage(
+            name="device_local",
+            status="unsupported",
+            reason="unsupported",
+            next_action="check_endpoint_capabilities",
+        ),
+    )
+    return HealthResult(
+        correlation_id=correlation_id,
+        status="unavailable",
+        stages=stages,
+        delivery=HealthDeliveryState(
+            status="unavailable", reason="delivery_state_unavailable"
+        ),
+    )
+
+
+def _stale_health_failure(correlation_id: str) -> HealthResult:
+    stale_stages = tuple(
+        HealthStage(
+            name=name,
+            status="stale",
+            reason="stale_target",
+            next_action="refresh_configuration",
+        )
+        for name in ("route", "authorization", "bridge", "standard")
+    )
+    return HealthResult(
+        correlation_id=correlation_id,
+        status="unavailable",
+        stages=(
+            *stale_stages,
+            HealthStage(
+                name="device_local",
+                status="unsupported",
+                reason="unsupported",
+                next_action="check_endpoint_capabilities",
+            ),
+        ),
+        delivery=HealthDeliveryState(
+            status="unavailable", reason="delivery_state_unavailable"
+        ),
+    )
+
+
+def _health_diagnostic_code(reason: str | None) -> str | None:
+    if reason is None:
+        return None
+    return {
+        "unsupported": "capability_unavailable",
+        "route_unauthorized": "unauthorized",
+        "route_timeout": "transport_timeout",
+        "standard_timeout": "transport_timeout",
+        "probe_timeout": "transport_timeout",
+        "standard_protocol_error": "protocol_error",
+        "authorization_unavailable": "authorization_unavailable",
+    }.get(reason, "service_unavailable")
+
+
 def _metric_route(path: str) -> str:
     if path.startswith("/api/v1/diagnostics/timeline/"):
         return "diagnostics_timeline"
     if path.startswith("/api/v1/devices/") and path.endswith("/watch"):
         return "device_watch"
+    if path.startswith("/api/v1/devices/") and path.endswith("/health"):
+        return "device_health"
     if path.startswith("/api/v1/devices/"):
         return "device_configuration"
     return {

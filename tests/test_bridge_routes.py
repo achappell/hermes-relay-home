@@ -88,6 +88,7 @@ def test_empty_routes_return_redacted_unavailable_selection() -> None:
 
     assert result.status == "unavailable"
     assert result.reason == "route_unavailable"
+    assert result.safe_failure_reason == "route_unavailable"
     assert result.selected_route is None
     assert result.attempts == ()
     assert result.to_endpoint() == {

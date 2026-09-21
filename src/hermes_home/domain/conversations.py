@@ -8,6 +8,7 @@ from threading import RLock
 from typing import Protocol
 
 from hermes_home.domain.arbitration import WakeDecision
+from hermes_home.domain.health import HealthDeliveryState
 from hermes_home.domain.watch import (
     WATCH_ACTIVITY_STATES,
     WatchSnapshot,
@@ -67,6 +68,8 @@ class ConversationClaimStore(Protocol):
         *,
         configuration_revision: int,
     ) -> WatchSnapshot | None: ...
+
+    def delivery_state(self, device_id: str) -> HealthDeliveryState: ...
 
 
 class InMemoryConversationClaimStore:
@@ -263,3 +266,33 @@ class InMemoryConversationClaimStore:
                 route=self._watch_route,
                 session_present=isinstance(session_id, str) and bool(session_id),
             )
+
+    def delivery_state(self, device_id: str) -> HealthDeliveryState:
+        """Read current delivery state without touching the claim."""
+        with self._lock:
+            matches = [
+                claim
+                for claim in self._claims.values()
+                if claim["device_id"] == device_id and claim["status"] == "active"
+            ]
+            if not matches:
+                return HealthDeliveryState(status="idle")
+            if len(matches) != 1:
+                return HealthDeliveryState(
+                    status="unavailable", reason="delivery_state_unavailable"
+                )
+            activity = matches[0].get("activity")
+            if not isinstance(activity, str) or activity not in {
+                "ready",
+                "open",
+                "capture",
+                "turn",
+                "playback",
+                "response_ready",
+                "playback_complete",
+                "idle",
+            }:
+                return HealthDeliveryState(
+                    status="unavailable", reason="delivery_state_unavailable"
+                )
+            return HealthDeliveryState(status="active", activity=activity)
