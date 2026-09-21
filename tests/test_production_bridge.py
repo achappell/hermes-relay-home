@@ -12,6 +12,7 @@ from hermes_home.bridge.production import (
 )
 from hermes_home.bridge.standard import ConversationGrant, HomeBridge
 from hermes_home.domain.arbitration import WakeDecision
+from hermes_home.domain.credentials import CredentialScope
 
 
 def _configuration() -> dict[str, object]:
@@ -141,6 +142,98 @@ def test_conversation_grant_carries_explicit_interactive_choice_authority(
     assert refreshed is not None
     assert refreshed.configuration_revision == 3
     assert refreshed.interactive_choice is False
+    store.close()
+
+
+def test_conversation_grant_intersects_current_device_and_credential_authority(
+    tmp_path,
+) -> None:
+    configuration = _configuration()
+    configuration["devices"] = [
+        {
+            "id": "pixel-6a",
+            "name": "Kitchen Puck",
+            "room_id": "kitchen",
+            "priority": 1,
+            "capabilities": {
+                "wake_claim": True,
+                "sensitive_entry": True,
+                "consequence_confirm": False,
+            },
+        }
+    ]
+    scopes = {
+        ("pixel-6a", 2): CredentialScope.from_values(
+            rooms=["kitchen"],
+            capabilities=["sensitive_entry", "consequence_confirm"],
+        )
+    }
+    store = ConversationGrantStore(
+        tmp_path / "home.sqlite3",
+        configuration=lambda: configuration,
+        credential_scope_resolver=lambda device_id, generation: scopes.get(
+            (device_id, generation)
+        ),
+        handle_factory=lambda: "protected-handle",
+    )
+    handle = store.create_from_decision(
+        _decision("protected-claim"), credential_generation=2
+    )
+
+    grant = store.resolve(handle, "pixel-6a")
+
+    assert grant is not None
+    assert grant.protected_capabilities == frozenset({"sensitive_entry"})
+    assert grant.capability_revision == 3
+    configuration["revision"] = 4
+    configuration["devices"][0]["capabilities"]["sensitive_entry"] = False
+    refreshed = store.resolve(handle, "pixel-6a")
+
+    assert refreshed is not None
+    assert refreshed.configuration_revision == 3
+    assert refreshed.capability_revision == 4
+    assert refreshed.protected_capabilities == frozenset()
+    store.close()
+
+
+@pytest.mark.parametrize(
+    "credential_capability", ["sensitive_entry", "consequence_confirm"]
+)
+def test_conversation_grant_requires_each_protected_credential_capability(
+    tmp_path, credential_capability: str
+) -> None:
+    configuration = _configuration()
+    configuration["devices"] = [
+        {
+            "id": "pixel-6a",
+            "name": "Kitchen Puck",
+            "room_id": "kitchen",
+            "priority": 1,
+            "capabilities": {
+                "wake_claim": True,
+                "sensitive_entry": True,
+                "consequence_confirm": True,
+            },
+        }
+    ]
+    store = ConversationGrantStore(
+        tmp_path / "home.sqlite3",
+        configuration=lambda: configuration,
+        credential_scope_resolver=lambda device_id, generation: (
+            CredentialScope.from_values(
+                rooms=["kitchen"], capabilities=[credential_capability]
+            )
+        ),
+        handle_factory=lambda: "protected-single-capability-handle",
+    )
+    handle = store.create_from_decision(
+        _decision("protected-single-capability-claim"), credential_generation=2
+    )
+
+    grant = store.resolve(handle, "pixel-6a")
+
+    assert grant is not None
+    assert grant.protected_capabilities == frozenset({credential_capability})
     store.close()
 
 

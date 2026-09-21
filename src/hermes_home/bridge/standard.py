@@ -15,6 +15,19 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 STANDARD_GATEWAY_PATH = "/api/ws"
 STANDARD_AUDIO_PATH = "/api/audio/speak-stream"
 MAX_TYPED_CHOICE_REVISIONS_PER_TURN = 128
+MAX_PROTECTED_INPUT_BYTES = 4096
+PROTECTED_CAPABILITIES = frozenset({"sensitive_entry", "consequence_confirm"})
+PROTECTED_PROMPT_TYPES = frozenset(
+    {"approval.request", "secret.request", "sudo.request"}
+)
+PROTECTED_PROMPT_EXPIRY_TYPES = frozenset(
+    {"approval.expire", "secret.expire", "sudo.expire"}
+)
+PROTECTED_PROMPT_CAPABILITIES = {
+    "approval.request": "consequence_confirm",
+    "secret.request": "sensitive_entry",
+    "sudo.request": "sensitive_entry",
+}
 _STRUCTURED_PROMPT_OPERATIONS = {
     "approval.request": ("approval.respond", "choice", frozenset({"choice", "all"})),
     "clarify.request": ("clarify.respond", "answer", frozenset({"answer"})),
@@ -152,6 +165,10 @@ class ConversationGrant:
     credential_generation: int | None = None
     configuration_revision: int | None = None
     interactive_choice: bool = False
+    protected_capabilities: frozenset[str] = field(
+        default_factory=frozenset, repr=False, compare=False
+    )
+    capability_revision: int | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +233,7 @@ class BridgeEvent:
     choice_capabilities: frozenset[str] = field(
         default_factory=frozenset, repr=False, compare=False
     )
+    capability_revision: int | None = field(default=None, repr=False, compare=False)
 
     def to_endpoint(self) -> dict[str, object]:
         if self.type == "prompt.request":
@@ -224,7 +242,7 @@ class BridgeEvent:
             )
         event: dict[str, object] = {
             "type": self.type,
-            "payload": _endpoint_safe_payload(self.payload),
+            "payload": endpoint_safe_payload(self.type, self.payload),
         }
         result: dict[str, object] = {
             "schema": 1,
@@ -1768,6 +1786,9 @@ class HomeBridge:
         if not isinstance(response, Mapping):
             raise BridgeProtocolError("structured prompt response is not an object")
         operation, _, _ = operation_info
+        protected_prompt = event.type in PROTECTED_PROMPT_TYPES
+        if protected_prompt:
+            self._authorize_protected_prompt(event)
         if event.type == "prompt.request":
             choice_operation = response.get("operation")
             if type(choice_operation) is not str or choice_operation not in {
@@ -1813,6 +1834,11 @@ class HomeBridge:
                 "request_id": event.correlation_id,
                 **validated_response,
             }
+            if protected_prompt:
+                active.pending_prompt_type = None
+                active.pending_prompt_id = None
+                active.pending_choice_revision = None
+                active.pending_choice_authority = None
         try:
             result = gateway.request(operation, params)
         except GatewayRPCError as error:
@@ -1823,6 +1849,10 @@ class HomeBridge:
             ):
                 raise BridgeTransportError(
                     "bridge changed during structured prompt delivery"
+                ) from error
+            if protected_prompt:
+                raise BridgeRequestRejected(
+                    f"protected {operation} request was rejected"
                 ) from error
             raise BridgeRequestRejected(
                 f"standard gateway rejected {operation}: {error.message}"
@@ -1847,6 +1877,8 @@ class HomeBridge:
                 "bridge changed during structured prompt delivery"
             )
         _require_prompt_resolution_result(result, event)
+        if protected_prompt:
+            return result
         with self._state_lock:
             if (
                 active.pending_prompt_type != event.type
@@ -1859,6 +1891,22 @@ class HomeBridge:
                 active.pending_choice_revision = None
                 active.pending_choice_authority = None
         return result
+
+    def _authorize_protected_prompt(self, event: BridgeEvent) -> None:
+        capability = PROTECTED_PROMPT_CAPABILITIES.get(event.type)
+        if capability is None:
+            return
+        with self._state_lock:
+            grant = self._grant
+        if (
+            grant is None
+            or capability not in grant.protected_capabilities
+            or event.capability_revision is None
+            or grant.capability_revision != event.capability_revision
+        ):
+            raise BridgeCapabilityUnavailable(
+                "protected prompt is not authorized for this Home Device"
+            )
 
     def submit_prompt(self, text: str) -> BridgeTurn:
         """Submit one fresh prompt; an uncertain submission is never retried."""
@@ -2157,6 +2205,11 @@ class HomeBridge:
                                 )
                             )
                             if pending_mismatch and not is_choice_revision:
+                                if active.pending_prompt_type in PROTECTED_PROMPT_TYPES:
+                                    active.pending_prompt_type = None
+                                    active.pending_prompt_id = None
+                                    active.pending_choice_revision = None
+                                    active.pending_choice_authority = None
                                 continue
                             active.pending_prompt_type = event_type
                             active.pending_prompt_id = correlation_id
@@ -2235,23 +2288,36 @@ class HomeBridge:
                             turn_id = active.turn_id
                     conversation_handle = self._require_handle()
                     choice_context: dict[str, object] = {}
-                    if event_type == "prompt.request":
+                    if event_type in _STRUCTURED_PROMPT_OPERATIONS:
                         with self._state_lock:
                             grant = self._grant
-                            choice_context = {
-                                "standard_session_id": runtime_session_id,
-                                "configuration_revision": (
-                                    grant.configuration_revision if grant else None
-                                ),
-                                "choice_capabilities": frozenset(
-                                    operation
-                                    for operation in ("prompt.choose", "prompt.explore")
-                                    if grant is not None
-                                    and grant.interactive_choice
-                                    and self._endpoint_capabilities.get(operation)
-                                    is True
-                                ),
-                            }
+                            choice_context["capability_revision"] = (
+                                grant.capability_revision if grant else None
+                            )
+                            if event_type == "prompt.request":
+                                choice_context.update(
+                                    {
+                                        "standard_session_id": runtime_session_id,
+                                        "configuration_revision": (
+                                            grant.configuration_revision
+                                            if grant
+                                            else None
+                                        ),
+                                        "choice_capabilities": frozenset(
+                                            operation
+                                            for operation in (
+                                                "prompt.choose",
+                                                "prompt.explore",
+                                            )
+                                            if grant is not None
+                                            and grant.interactive_choice
+                                            and self._endpoint_capabilities.get(
+                                                operation
+                                            )
+                                            is True
+                                        ),
+                                    }
+                                )
                     event = BridgeEvent(
                         conversation_handle=conversation_handle,
                         type=event_type,
@@ -2813,6 +2879,110 @@ def _audio_url(gateway_url: str) -> str:
 _ENDPOINT_HIDDEN_SESSION_KEYS = frozenset(
     {"session_id", "runtime_session_id", "stored_session_id", "session_key"}
 )
+_PROTECTED_PROMPT_METADATA_KEYS = frozenset(
+    {
+        "choices",
+        "description",
+        "hint",
+        "kind",
+        "label",
+        "options",
+        "placeholder",
+        "prompt",
+        "question",
+        "request_id",
+        "sensitivity",
+        "timeout_s",
+        "title",
+    }
+)
+_PROTECTED_PROMPT_OPTION_KEYS = frozenset({"description", "id", "label"})
+_PROTECTED_PROMPT_STRING_KEYS = frozenset(
+    {
+        "description",
+        "hint",
+        "kind",
+        "label",
+        "placeholder",
+        "prompt",
+        "question",
+        "request_id",
+        "sensitivity",
+        "title",
+    }
+)
+_PROTECTED_PROMPT_NUMERIC_KEYS = frozenset({"timeout_s"})
+_PROTECTED_PROMPT_LIST_KEYS = frozenset({"choices", "options"})
+_PROTECTED_METADATA_DROP = object()
+
+
+def endpoint_safe_payload(
+    event_type: str, payload: Mapping[str, object]
+) -> dict[str, object]:
+    """Project one Standard event into the endpoint-safe public payload."""
+    if event_type in PROTECTED_PROMPT_TYPES | PROTECTED_PROMPT_EXPIRY_TYPES:
+        return _protected_prompt_safe_payload(payload)
+    return _endpoint_safe_payload(payload)
+
+
+def _protected_prompt_safe_payload(
+    payload: Mapping[str, object],
+) -> dict[str, object]:
+    safe: dict[str, object] = {}
+    for key, value in payload.items():
+        if key not in _PROTECTED_PROMPT_METADATA_KEYS:
+            continue
+        if key in _PROTECTED_PROMPT_STRING_KEYS and type(value) is not str:
+            continue
+        if key in _PROTECTED_PROMPT_NUMERIC_KEYS and type(value) not in {
+            int,
+            float,
+        }:
+            continue
+        if key in _PROTECTED_PROMPT_LIST_KEYS and not isinstance(value, (list, tuple)):
+            continue
+        normalized = _protected_prompt_metadata_value(
+            value, option_list=key in _PROTECTED_PROMPT_LIST_KEYS
+        )
+        if normalized is not _PROTECTED_METADATA_DROP:
+            safe[key] = normalized
+    return safe
+
+
+def _protected_prompt_metadata_value(
+    value: object,
+    *,
+    option_list: bool = False,
+    option: bool = False,
+) -> object:
+    if type(value) is str:
+        if len(value) > 1024 or any(ord(character) < 32 for character in value):
+            return _PROTECTED_METADATA_DROP
+        return value
+    if type(value) in {bool, int}:
+        return value
+    if type(value) is float and math.isfinite(value):
+        return value
+    if isinstance(value, (list, tuple)):
+        if len(value) > 32:
+            return _PROTECTED_METADATA_DROP
+        normalized_items = []
+        for item in value:
+            normalized = _protected_prompt_metadata_value(item, option=option_list)
+            if normalized is _PROTECTED_METADATA_DROP:
+                return _PROTECTED_METADATA_DROP
+            normalized_items.append(normalized)
+        return normalized_items
+    if isinstance(value, Mapping) and option:
+        result: dict[str, object] = {}
+        for key, nested in value.items():
+            if key not in _PROTECTED_PROMPT_OPTION_KEYS:
+                continue
+            normalized = _protected_prompt_metadata_value(nested)
+            if normalized is not _PROTECTED_METADATA_DROP:
+                result[key] = normalized
+        return result
+    return _PROTECTED_METADATA_DROP
 
 
 def _endpoint_safe_payload(payload: Mapping[str, object]) -> dict[str, object]:
@@ -3399,6 +3569,19 @@ def _validate_structured_response(
         raise BridgeProtocolError(
             f"{event.type} response {primary_key} has an invalid type"
         )
+    if event.type in {"secret.request", "sudo.request"}:
+        if not value:
+            raise BridgeProtocolError(f"{event.type} response {primary_key} is empty")
+        try:
+            byte_count = len(value.encode("utf-8"))
+        except UnicodeEncodeError as error:
+            raise BridgeProtocolError(
+                f"{event.type} response {primary_key} is not valid UTF-8"
+            ) from error
+        if byte_count > MAX_PROTECTED_INPUT_BYTES:
+            raise BridgeProtocolError(
+                f"{event.type} response exceeds the protected input limit"
+            )
     return {primary_key: value}
 
 

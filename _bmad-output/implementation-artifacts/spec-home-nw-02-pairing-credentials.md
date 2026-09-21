@@ -107,8 +107,10 @@ Identifiers and labels are non-empty UTF-8 strings of at most 128 characters.
 `endpoint_id` is generated and retained by the endpoint in its secure store;
 it is not a secret. `requested_rooms` and `scope.rooms` are duplicate-free
 arrays of configured room IDs. `requested_capabilities` and
-`scope.capabilities` are duplicate-free arrays; the only supported capability
-is the literal `wake_claim`, and unknown capabilities are invalid.
+`scope.capabilities` are duplicate-free arrays; the supported capabilities are
+the literal `wake_claim`, `sensitive_entry`, and `consequence_confirm`, and
+unknown capabilities are invalid. The latter two are consumed by the later
+NW-10 protected-prompt boundary; they do not change the wake-claim rules here.
 `requested_profile_mappings` is an optional list of at most 16 records shaped
 as `{"profile_id": string, "label": string}` with the same length bound;
 Home displays it but never interprets it as authorization. Client
@@ -124,10 +126,11 @@ expired or consumed code returns `410 expired_or_consumed`; and unavailable
 durable storage returns `503 service_unavailable`. Every error uses the
 existing redacted schema envelope and contains no secret or submitted value.
 
-The only initially supported approved capability is `wake_claim`. Its scope
-is enforced before arbitration: the authenticated device must have that
-capability and the requested wake mapping must resolve to an approved room.
-Future capabilities are rejected until explicitly added to the policy.
+The wake-claim capability is enforced before arbitration: the authenticated
+device must have `wake_claim`, and the requested wake mapping must resolve to
+an approved room. `sensitive_entry` and `consequence_confirm` are approved
+scope categories for NW-10's existing Standard structured-prompt boundary;
+they do not grant wake claims or any configuration/artifact operation.
 Requested Profile mappings are retained only as display data for approval;
 they never become credential authority and are owned by NW-05.
 
@@ -202,8 +205,9 @@ checks pass without changing NW-03 or sibling repositories.
 
 Implemented the Home-owned pairing boundary in the domain, SQLite, auth, HTTP,
 and runtime layers. Pairing uses a five-minute keyed enrollment code and
-trusted-admin approval; credentials are opaque, scoped to `wake_claim`, and
-stored only as keyed digests. Rotation retry material is AES-256-GCM encrypted
+trusted-admin approval; credentials are opaque, scoped to explicit approved
+capabilities, and stored only as keyed digests. Rotation retry material is
+AES-256-GCM encrypted
 and short-lived; the old credential is accepted only for the matching renewal
 retry, not for new wake claims. Paired and legacy authentication modes are
 explicit and mutually exclusive.

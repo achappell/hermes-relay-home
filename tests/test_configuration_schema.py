@@ -52,6 +52,34 @@ def test_configuration_schema_accepts_omitted_and_boolean_choice_capability(
     assert _validator().is_valid(candidate)
 
 
+@pytest.mark.parametrize(
+    ("sensitive_entry", "consequence_confirm"),
+    [(None, None), (False, True), (True, False), (True, True)],
+)
+def test_configuration_schema_accepts_protected_capability_flags(
+    sensitive_entry: bool | None,
+    consequence_confirm: bool | None,
+) -> None:
+    candidate = _configuration()
+    capabilities = candidate["devices"][0]["capabilities"]
+    if sensitive_entry is not None:
+        capabilities["sensitive_entry"] = sensitive_entry
+    if consequence_confirm is not None:
+        capabilities["consequence_confirm"] = consequence_confirm
+
+    assert _validator().is_valid(candidate)
+
+
+@pytest.mark.parametrize("capability", ["sensitive_entry", "consequence_confirm"])
+def test_configuration_schema_rejects_non_boolean_protected_capability(
+    capability: str,
+) -> None:
+    candidate = _configuration()
+    candidate["devices"][0]["capabilities"][capability] = "yes"
+
+    assert not _validator().is_valid(candidate)
+
+
 @pytest.mark.parametrize("invalid_value", ["yes", 1, None])
 def test_configuration_schema_rejects_non_boolean_choice_capability(
     invalid_value: object,

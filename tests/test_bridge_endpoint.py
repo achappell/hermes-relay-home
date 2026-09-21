@@ -184,6 +184,14 @@ class ResolvedTrueBridge(FakeBridge):
         return {"resolved": True}
 
 
+class RejectedProtectedBridge(FakeBridge):
+    def respond_prompt(
+        self, event: BridgeEvent, response: dict[str, object]
+    ) -> dict[str, object]:
+        self.respond_calls.append((event, dict(response)))
+        return {"status": "rejected", "detail": "secret-value-must-not-leak"}
+
+
 def _message(connection: FakeConnection, index: int = -1) -> dict[str, object]:
     raw = connection.sent[index]
     assert isinstance(raw, str)
@@ -564,6 +572,9 @@ def test_structured_prompt_event_is_retained_and_response_is_not_submitted_as_te
                     "prompt": "Allow it?",
                     "session_id": "hidden",
                     "profile_id": "hidden",
+                    "value": "must-not-leak",
+                    "password": "must-not-leak",
+                    "unknown_private_field": "must-not-leak",
                 },
                 turn_id="home-turn-1",
                 correlation_id="approval-1",
@@ -604,12 +615,266 @@ def test_structured_prompt_event_is_retained_and_response_is_not_submitted_as_te
         )
         assert response["result"] == {
             "schema": 1,
-            "accepted": True,
             "conversation_handle": HANDLE,
             "turn_id": "home-turn-1",
+            "status": "accepted",
+            "operation": "approval.respond",
         }
         assert bridge.prompt_calls == ["run it"]
         assert bridge.respond_calls[0][1] == {"choice": "allow", "all": True}
+    finally:
+        endpoint.close()
+
+
+def test_endpoint_rejects_an_oversized_sensitive_entry_before_bridge_delivery() -> None:
+    connection = FakeConnection()
+    bridge = FakeBridge()
+    endpoint = BridgeEndpoint(connection, bridge, headers=HEADERS, route=ROUTE)
+
+    try:
+        _open(endpoint)
+        _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="prompt-1",
+            method="prompt.submit",
+            params={"conversation_handle": HANDLE, "text": "enter it"},
+        )
+        endpoint._event_payload(
+            BridgeEvent(
+                HANDLE,
+                "secret.request",
+                {"request_id": "secret-1", "value": "must-not-leak"},
+                turn_id="home-turn-1",
+                correlation_id="secret-1",
+            )
+        )
+
+        response = _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="respond-1",
+            method="prompt.respond",
+            params={
+                "conversation_handle": HANDLE,
+                "turn_id": "home-turn-1",
+                "correlation_id": "secret-1",
+                "event_type": "secret.request",
+                "response": {"value": "🙂" * 1025},
+            },
+        )
+
+        assert response["error"]["code"] == -32602
+        assert bridge.respond_calls == []
+    finally:
+        endpoint.close()
+
+
+@pytest.mark.parametrize(
+    ("event_type", "response_key", "operation"),
+    [
+        ("secret.request", "value", "secret.respond"),
+        ("sudo.request", "password", "sudo.respond"),
+    ],
+)
+def test_endpoint_projects_and_resolves_each_protected_prompt_type(
+    event_type: str,
+    response_key: str,
+    operation: str,
+) -> None:
+    connection = FakeConnection()
+    bridge = FakeBridge()
+    endpoint = BridgeEndpoint(connection, bridge, headers=HEADERS, route=ROUTE)
+
+    try:
+        _open(endpoint)
+        _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="prompt-1",
+            method="prompt.submit",
+            params={"conversation_handle": HANDLE, "text": "enter it"},
+        )
+        projected = endpoint._event_payload(
+            BridgeEvent(
+                HANDLE,
+                event_type,
+                {
+                    "request_id": "protected-1",
+                    "question": "Enter it",
+                    "sensitivity": "high",
+                    "value": "raw-secret",
+                    "password": "raw-password",
+                },
+                turn_id="home-turn-1",
+                correlation_id="protected-1",
+            )
+        )
+        assert "raw-secret" not in json.dumps(projected)
+        assert "raw-password" not in json.dumps(projected)
+
+        response = _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="respond-1",
+            method="prompt.respond",
+            params={
+                "conversation_handle": HANDLE,
+                "turn_id": "home-turn-1",
+                "correlation_id": "protected-1",
+                "event_type": event_type,
+                "response": {response_key: "current-secret"},
+            },
+        )
+
+        assert response["result"] == {
+            "schema": 1,
+            "conversation_handle": HANDLE,
+            "turn_id": "home-turn-1",
+            "status": "accepted",
+            "operation": operation,
+        }
+        assert bridge.respond_calls[-1][1] == {response_key: "current-secret"}
+    finally:
+        endpoint.close()
+
+
+def test_endpoint_redacts_protected_expiry_payloads() -> None:
+    connection = FakeConnection()
+    bridge = FakeBridge()
+    endpoint = BridgeEndpoint(connection, bridge, headers=HEADERS, route=ROUTE)
+
+    try:
+        _open(endpoint)
+        _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="prompt-1",
+            method="prompt.submit",
+            params={"conversation_handle": HANDLE, "text": "enter it"},
+        )
+        projected = endpoint._event_payload(
+            BridgeEvent(
+                HANDLE,
+                "secret.expire",
+                {
+                    "request_id": "protected-1",
+                    "value": "expired-secret",
+                    "password": "expired-password",
+                },
+                turn_id="home-turn-1",
+                correlation_id="protected-1",
+            )
+        )
+
+        assert "expired-secret" not in json.dumps(projected)
+        assert "expired-password" not in json.dumps(projected)
+    finally:
+        endpoint.close()
+
+
+def test_endpoint_does_not_claim_a_rejected_protected_result_was_accepted() -> None:
+    connection = FakeConnection()
+    bridge = RejectedProtectedBridge()
+    endpoint = BridgeEndpoint(connection, bridge, headers=HEADERS, route=ROUTE)
+
+    try:
+        _open(endpoint)
+        _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="prompt-1",
+            method="prompt.submit",
+            params={"conversation_handle": HANDLE, "text": "enter it"},
+        )
+        endpoint._event_payload(
+            BridgeEvent(
+                HANDLE,
+                "secret.request",
+                {"request_id": "protected-1"},
+                turn_id="home-turn-1",
+                correlation_id="protected-1",
+            )
+        )
+
+        response = _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="respond-1",
+            method="prompt.respond",
+            params={
+                "conversation_handle": HANDLE,
+                "turn_id": "home-turn-1",
+                "correlation_id": "protected-1",
+                "event_type": "secret.request",
+                "response": {"value": "current-secret"},
+            },
+        )
+
+        assert response["error"]["data"]["code"] == "request_rejected"
+        assert "secret-value-must-not-leak" not in json.dumps(response)
+    finally:
+        endpoint.close()
+
+
+def test_endpoint_replaces_an_older_protected_prompt_before_response() -> None:
+    connection = FakeConnection()
+    bridge = FakeBridge()
+    endpoint = BridgeEndpoint(connection, bridge, headers=HEADERS, route=ROUTE)
+
+    try:
+        _open(endpoint)
+        _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="prompt-1",
+            method="prompt.submit",
+            params={"conversation_handle": HANDLE, "text": "enter it"},
+        )
+        endpoint._event_payload(
+            BridgeEvent(
+                HANDLE,
+                "secret.request",
+                {"request_id": "protected-old"},
+                turn_id="home-turn-1",
+                correlation_id="protected-old",
+            )
+        )
+        endpoint._event_payload(
+            BridgeEvent(
+                HANDLE,
+                "secret.request",
+                {"request_id": "protected-new"},
+                turn_id="home-turn-1",
+                correlation_id="protected-new",
+            )
+        )
+
+        replaced = _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="respond-old",
+            method="prompt.respond",
+            params={
+                "conversation_handle": HANDLE,
+                "turn_id": "home-turn-1",
+                "correlation_id": "protected-old",
+                "event_type": "secret.request",
+                "response": {"value": "old-secret"},
+            },
+        )
+
+        assert replaced["error"]["data"]["code"] == "request_rejected"
+        assert bridge.respond_calls == []
     finally:
         endpoint.close()
 

@@ -33,6 +33,62 @@ def test_approved_scope_must_be_a_subset_of_the_requested_scope() -> None:
         ).assert_subset_of(requested)
 
 
+def test_credential_scope_accepts_protected_capabilities() -> None:
+    scope = CredentialScope.from_values(
+        rooms=["kitchen"],
+        capabilities=["sensitive_entry", "consequence_confirm"],
+    )
+
+    assert scope.capabilities == ("sensitive_entry", "consequence_confirm")
+
+
+def test_current_scope_requires_the_active_current_generation(tmp_path) -> None:
+    store = SQLiteCredentialStore(tmp_path / "home.sqlite3")
+    service = CredentialService(
+        store=store,
+        root_secret=b"r" * 32,
+        clock=lambda: 1_000.0,
+        id_factory=iter(["offer-1", "request-1", "device-1"]).__next__,
+        token_factory=iter(["enrollment-secret", "device-secret"]).__next__,
+        confirmation_factory=lambda: "ABCD2345",
+    )
+
+    try:
+        offer = service.create_offer()
+        request = service.submit_request(
+            enrollment_code=offer.enrollment_code,
+            endpoint_id="endpoint-1",
+            label="Kitchen Puck",
+            endpoint_type="puck",
+            requested_rooms=["kitchen"],
+            requested_capabilities=["sensitive_entry"],
+            secure_storage="platform_secure_store",
+        )
+        service.approve_request(
+            request.request_id,
+            CredentialScope.from_values(
+                rooms=["kitchen"], capabilities=["sensitive_entry"]
+            ),
+            configured_rooms=["kitchen"],
+        )
+        material = service.consume_request(
+            request.request_id,
+            enrollment_code=offer.enrollment_code,
+            secure_storage="platform_secure_store",
+        )
+
+        assert service.current_scope(material.device_id, material.generation) == (
+            material.scope
+        )
+        assert (
+            service.current_scope(material.device_id, material.generation + 1) is None
+        )
+        service.revoke(material.device_id)
+        assert service.current_scope(material.device_id, material.generation) is None
+    finally:
+        store.close()
+
+
 def test_scanning_an_offer_creates_a_pending_request_without_granting_access(
     tmp_path,
 ) -> None:

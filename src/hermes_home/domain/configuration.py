@@ -192,7 +192,13 @@ def _validate_devices(
         if (
             any(type(key) is not str for key in capability_keys)
             or "wake_claim" not in capability_keys
-            or capability_keys - {"wake_claim", "interactive_choice"}
+            or capability_keys
+            - {
+                "consequence_confirm",
+                "interactive_choice",
+                "sensitive_entry",
+                "wake_claim",
+            }
         ):
             raise ConfigurationValidationError(
                 f"{path}.capabilities has invalid fields"
@@ -206,6 +212,16 @@ def _validate_devices(
         if type(interactive_choice) is not bool:
             raise ConfigurationValidationError(
                 f"{path}.capabilities.interactive_choice must be a boolean"
+            )
+        sensitive_entry = capabilities.get("sensitive_entry", False)
+        if type(sensitive_entry) is not bool:
+            raise ConfigurationValidationError(
+                f"{path}.capabilities.sensitive_entry must be a boolean"
+            )
+        consequence_confirm = capabilities.get("consequence_confirm", False)
+        if type(consequence_confirm) is not bool:
+            raise ConfigurationValidationError(
+                f"{path}.capabilities.consequence_confirm must be a boolean"
             )
         if device_id in device_ids:
             raise ConfigurationValidationError(f"duplicate id {device_id!r} in devices")
@@ -224,6 +240,10 @@ def _validate_devices(
         normalized_capabilities = {"wake_claim": wake_claim}
         if interactive_choice:
             normalized_capabilities["interactive_choice"] = True
+        if sensitive_entry:
+            normalized_capabilities["sensitive_entry"] = True
+        if consequence_confirm:
+            normalized_capabilities["consequence_confirm"] = True
         devices.append(
             {
                 "id": device_id,
