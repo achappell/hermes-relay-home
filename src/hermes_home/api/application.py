@@ -10,7 +10,11 @@ from threading import RLock
 
 from hermes_home.auth.credentials import PersistentCredentialAuthenticator
 from hermes_home.auth.static import StaticCredentialAuthenticator
-from hermes_home.domain.arbitration import ArbitrationEngine, ClaimSubmission
+from hermes_home.domain.arbitration import (
+    ArbitrationEngine,
+    ClaimSubmission,
+    WakeDecision,
+)
 from hermes_home.domain.configuration import ConfigurationValidationError
 from hermes_home.domain.conversations import (
     ConversationClaimConflict,
@@ -22,6 +26,7 @@ from hermes_home.domain.credentials import (
     CredentialService,
     CredentialStateError,
     CredentialValidationError,
+    TouchBinding,
 )
 from hermes_home.domain.health import (
     HEALTH_CHECK_TIMEOUT_SECONDS,
@@ -183,6 +188,8 @@ class HomeApplication:
                 return self._put_configuration(headers, body)
         elif path == "/api/v1/wake-claims" and method == "POST":
             return self._post_wake_claim(headers, body)
+        elif path == "/api/v1/touch-claims" and method == "POST":
+            return self._post_touch_claim(headers, body)
         elif path == "/api/v1/enrollment/offers" and method == "POST":
             return self._post_enrollment_offer(headers, body)
         elif path == "/api/v1/enrollment/requests" and method == "GET":
@@ -394,28 +401,49 @@ class HomeApplication:
         try:
             request = self._json_request(headers, body, {"schema", "scope"})
             scope_data = request["scope"]
-            if not isinstance(scope_data, Mapping) or set(scope_data) != {
-                "rooms",
-                "capabilities",
-                "wake_mapping_grant",
-            }:
+            if (
+                not isinstance(scope_data, Mapping)
+                or not {
+                    "rooms",
+                    "capabilities",
+                    "wake_mapping_grant",
+                }.issubset(scope_data)
+                or set(scope_data)
+                - {
+                    "rooms",
+                    "capabilities",
+                    "wake_mapping_grant",
+                    "touch_binding",
+                }
+            ):
                 raise ValueError("invalid scope")
             snapshot = self._configuration_store.read()
             mapping_ids = _approved_wake_mapping_ids(
                 snapshot, scope_data["wake_mapping_grant"]
             )
+            touch_binding = _approved_touch_binding(
+                snapshot,
+                scope_data.get("touch_binding"),
+            )
             scope = CredentialScope.from_values(
                 rooms=scope_data["rooms"],
                 capabilities=scope_data["capabilities"],
                 wake_mappings=mapping_ids,
+                touch_binding=touch_binding,
             )
             configured_rooms = [room["id"] for room in snapshot["rooms"]]
             configured_wake_mappings = _available_wake_mapping_ids(snapshot)
+            configured_profiles = [
+                profile["id"]
+                for profile in snapshot["profiles"]
+                if profile["available"]
+            ]
             enrollment = self._credential_service.approve_request(
                 request_id,
                 scope,
                 configured_rooms=configured_rooms,
                 configured_wake_mappings=configured_wake_mappings,
+                configured_profiles=configured_profiles,
             )
         except CredentialStateError as error:
             return _credential_error(error)
@@ -457,7 +485,10 @@ class HomeApplication:
             return _error(503, "service_unavailable")
         if context is None or context.device_id != device_id:
             return _error(401, "unauthorized")
-        if "wake_claim" not in context.scope.capabilities:
+        if not {
+            "wake_claim",
+            "touch_claim",
+        }.intersection(context.scope.capabilities):
             return _error(403, "forbidden")
         try:
             snapshot = self._configuration_store.read()
@@ -1223,6 +1254,156 @@ class HomeApplication:
             payload,
         )
 
+    def _post_touch_claim(
+        self,
+        headers: Mapping[str, str],
+        body: bytes | str,
+    ) -> HTTPResponse:
+        try:
+            durable_context = self._durable_device_context(headers)
+        except OSError, RuntimeError, TypeError, ValueError:
+            return _error(503, "service_unavailable")
+        if self._credential_service is None:
+            authenticated_device_id = self._authenticator.authenticate_device(headers)
+            if authenticated_device_id is None:
+                return _error(401, "unauthorized")
+            scope = self._static_device_scopes.get(
+                authenticated_device_id,
+                CredentialScope.from_values(rooms=(), capabilities=()),
+            )
+        else:
+            if durable_context is None:
+                return _error(401, "unauthorized")
+            authenticated_device_id = durable_context.device_id
+            scope = durable_context.scope
+
+        try:
+            request = self._json_request(
+                headers,
+                body,
+                {
+                    "schema",
+                    "claim_id",
+                    "device_id",
+                    "configuration_revision",
+                    "initiation",
+                },
+            )
+            claim_id, device_id, configuration_revision = _touch_claim_values(request)
+        except TypeError, ValueError, json.JSONDecodeError:
+            return _error(400, "invalid_request")
+
+        if device_id != authenticated_device_id:
+            return _error(401, "unauthorized")
+        if "touch_claim" not in scope.capabilities or scope.touch_binding is None:
+            return _error(403, "touch_claim_unavailable")
+
+        try:
+            snapshot = self._configuration_store.read()
+        except ConfigurationMigrationRequired as error:
+            return HTTPResponse(
+                409,
+                {
+                    "schema": 1,
+                    "error": {
+                        "code": "configuration_migration_required",
+                        "current_revision": error.current_revision,
+                    },
+                },
+            )
+        except OSError, RuntimeError, TypeError, ValueError:
+            return _error(503, "service_unavailable")
+
+        if configuration_revision != snapshot["revision"]:
+            return _error(409, "stale_configuration")
+        device = next(
+            (
+                candidate
+                for candidate in snapshot["devices"]
+                if candidate["id"] == device_id
+            ),
+            None,
+        )
+        if device is None:
+            return _error(404, "not_found")
+        binding = scope.touch_binding
+        if binding.room_id not in scope.rooms or device["room_id"] != binding.room_id:
+            return _error(403, "touch_claim_unavailable")
+        profile = next(
+            (
+                candidate
+                for candidate in snapshot["profiles"]
+                if candidate["id"] == binding.profile_id
+            ),
+            None,
+        )
+        if profile is None or profile["available"] is not True:
+            return _error(409, "profile_unavailable")
+
+        if durable_context is not None:
+            try:
+                refreshed = self._durable_device_context(headers)
+            except OSError, RuntimeError, TypeError, ValueError:
+                return _error(503, "service_unavailable")
+            if (
+                refreshed is None
+                or refreshed.device_id != durable_context.device_id
+                or refreshed.generation != durable_context.generation
+            ):
+                return _error(401, "unauthorized")
+
+        if self._conversation_claim_store is None:
+            return _error(503, "service_unavailable")
+        decision = WakeDecision(
+            claim_id=claim_id,
+            decision="granted",
+            arbitration_id="touch",
+            configuration_revision=configuration_revision,
+            device_id=device_id,
+            room_id=binding.room_id,
+            profile_id=binding.profile_id,
+            claim_kind="touch",
+        )
+        try:
+            conversation_handle = self._conversation_claim_store.create_from_decision(
+                decision,
+                credential_generation=(
+                    None if durable_context is None else durable_context.generation
+                ),
+            )
+        except ConversationClaimConflict as error:
+            return _touch_claim_error(getattr(error, "reason", "conversation_active"))
+        except OSError, RuntimeError, TypeError, ValueError:
+            return _error(503, "service_unavailable")
+
+        if durable_context is not None:
+            try:
+                refreshed = self._durable_device_context(headers)
+            except OSError, RuntimeError, TypeError, ValueError:
+                self._discard_new_claim(conversation_handle, durable_context.device_id)
+                return _error(503, "service_unavailable")
+            if (
+                refreshed is None
+                or refreshed.device_id != durable_context.device_id
+                or refreshed.generation != durable_context.generation
+            ):
+                if not self._discard_new_claim(
+                    conversation_handle, durable_context.device_id
+                ):
+                    return _error(503, "service_unavailable")
+                return _error(401, "unauthorized")
+
+        return HTTPResponse(
+            200,
+            {
+                "schema": 1,
+                "claim_id": claim_id,
+                "decision": "granted",
+                "configuration_revision": configuration_revision,
+                "conversation_handle": conversation_handle,
+            },
+        )
+
     def _record_http(
         self,
         method: str,
@@ -1375,6 +1556,19 @@ class HomeApplication:
                         "hermes_home_wake_decisions_total",
                         labels={"decision": decision},
                     )
+        elif path == "/api/v1/touch-claims" and method == "POST":
+            result = _claim_result(response)
+            self._metrics.inc(
+                "hermes_home_touch_claims_total",
+                labels={"result": result},
+            )
+            if response.status == 200 and isinstance(response.body, dict):
+                decision = response.body.get("decision")
+                if decision in {"granted", "denied"}:
+                    self._metrics.inc(
+                        "hermes_home_touch_decisions_total",
+                        labels={"decision": decision},
+                    )
 
     def _record_revision(self, response: HTTPResponse) -> None:
         if not isinstance(response.body, dict):
@@ -1430,18 +1624,52 @@ def _credential_error(error: CredentialStateError) -> HTTPResponse:
 
 
 def _material_payload(material: CredentialMaterial) -> dict[str, object]:
+    # The Touch binding is Home authority, not endpoint configuration. In
+    # particular, do not disclose the bound Profile ID to the Touch panel.
+    scope = {
+        "rooms": list(material.scope.rooms),
+        "capabilities": list(material.scope.capabilities),
+        "wake_mappings": list(material.scope.wake_mappings),
+    }
     return {
         "schema": 1,
         "device_id": material.device_id,
         "credential": material.credential,
         "generation": material.generation,
         "expires_at": material.expires_at,
-        "scope": {
-            "rooms": list(material.scope.rooms),
-            "capabilities": list(material.scope.capabilities),
-            "wake_mappings": list(material.scope.wake_mappings),
-        },
+        "scope": scope,
     }
+
+
+def _approved_touch_binding(
+    snapshot: Mapping[str, object],
+    selection: object,
+) -> TouchBinding | None:
+    if selection is None:
+        return None
+    if not isinstance(selection, Mapping) or set(selection) != {
+        "room_id",
+        "profile_id",
+    }:
+        raise ValueError("invalid touch binding")
+    binding = CredentialScope.from_values(
+        rooms=(),
+        capabilities=(),
+        touch_binding=selection,
+    ).touch_binding
+    if binding is None:
+        raise ValueError("invalid touch binding")
+    if binding.room_id not in {room["id"] for room in snapshot["rooms"]}:
+        raise CredentialValidationError(
+            "approved scope references an unavailable touch room"
+        )
+    profiles = {profile["id"]: profile for profile in snapshot["profiles"]}
+    profile = profiles.get(binding.profile_id)
+    if profile is None or profile["available"] is not True:
+        raise CredentialValidationError(
+            "approved scope references an unavailable touch profile"
+        )
+    return binding
 
 
 def _available_wake_mapping_ids(snapshot: Mapping[str, object]) -> tuple[str, ...]:
@@ -1475,6 +1703,37 @@ def _approved_wake_mapping_ids(
             "approved scope references an unavailable wake mapping"
         )
     return mapping_ids
+
+
+def _touch_claim_values(request: Mapping[str, object]) -> tuple[str, str, int]:
+    claim_id = _claim_identifier(request.get("claim_id"), "claim_id")
+    device_id = _claim_identifier(request.get("device_id"), "device_id")
+    configuration_revision = request.get("configuration_revision")
+    if type(configuration_revision) is not int or configuration_revision < 0:
+        raise ValueError("invalid configuration revision")
+    initiation = request.get("initiation")
+    if not isinstance(initiation, Mapping) or set(initiation) != {
+        "kind",
+        "observed_at_ms",
+    }:
+        raise ValueError("invalid initiation")
+    if initiation.get("kind") != "tap":
+        raise ValueError("invalid initiation")
+    observed_at_ms = initiation.get("observed_at_ms")
+    if type(observed_at_ms) is not int or observed_at_ms < 0:
+        raise ValueError("invalid initiation")
+    return claim_id, device_id, configuration_revision
+
+
+def _claim_identifier(value: object, field: str) -> str:
+    if (
+        type(value) is not str
+        or not 1 <= len(value) <= 128
+        or "\r" in value
+        or "\n" in value
+    ):
+        raise ValueError(f"invalid {field}")
+    return value
 
 
 def _device_credential(headers: Mapping[str, str]) -> str:
@@ -1533,6 +1792,22 @@ def _claim_submission_error(submission: ClaimSubmission) -> HTTPResponse:
         status = 403
         code = "claim_denied"
     return _error(status, code)
+
+
+def _touch_claim_error(reason: str) -> HTTPResponse:
+    status_by_reason = {
+        "unauthorized": 401,
+        "touch_claim_unavailable": 403,
+        "not_found": 404,
+        "invalid_request": 400,
+        "stale_configuration": 409,
+        "profile_unavailable": 409,
+        "room_busy": 409,
+        "conversation_active": 409,
+        "duplicate_claim": 409,
+        "service_unavailable": 503,
+    }
+    return _error(status_by_reason.get(reason, 409), reason)
 
 
 def _error(status: int, code: str) -> HTTPResponse:
@@ -1651,6 +1926,7 @@ def _metric_route(path: str) -> str:
     return {
         "/api/v1/configuration": "configuration",
         "/api/v1/wake-claims": "wake_claims",
+        "/api/v1/touch-claims": "touch_claims",
         "/api/v1/devices": "device_configuration",
         "/metrics": "metrics",
         "/api/v1/diagnostics/status": "diagnostics_status",

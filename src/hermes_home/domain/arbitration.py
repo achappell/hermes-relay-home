@@ -43,6 +43,7 @@ class WakeDecision:
     room_id: str = ""
     wake_mapping_id: str = ""
     profile_id: str = field(default="", repr=False)
+    claim_kind: Literal["wake", "touch"] = "wake"
 
 
 @dataclass(frozen=True, slots=True)

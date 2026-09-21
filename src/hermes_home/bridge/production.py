@@ -124,21 +124,56 @@ class ConversationGrantStore:
             type(credential_generation) is not int or credential_generation < 1
         ):
             raise ValueError("credential generation must be a positive integer")
-        handle = _identifier(self._handle_factory(), "conversation handle")
         now = _finite_time(self._clock())
         first_open_deadline = now + self._first_open_timeout
+        superseded_handle: str | None = None
         with self._lock:
             self._expire_due_locked(now)
             try:
                 self._connection.execute("BEGIN IMMEDIATE")
                 active = self._connection.execute(
-                    "SELECT 1 FROM conversation_claims "
+                    "SELECT handle, device_id, activity, idle_deadline "
+                    "FROM conversation_claims "
                     "WHERE room_id = ? AND status = 'active' LIMIT 1",
                     (decision.room_id,),
                 ).fetchone()
                 if active is not None:
-                    self._connection.rollback()
-                    raise ConversationClaimConflict("room has an active conversation")
+                    active_handle, active_device_id, activity, idle_deadline = active
+                    idle_tail = (
+                        decision.claim_kind == "touch"
+                        and activity == "idle"
+                        and idle_deadline is not None
+                        and idle_deadline > now
+                    )
+                    if idle_tail:
+                        cursor = self._connection.execute(
+                            "UPDATE conversation_claims SET status = 'closed', "
+                            "activity = 'closed', idle_deadline = NULL, "
+                            "close_reason = 'superseded_by_touch', updated_at = ? "
+                            "WHERE handle = ? AND status = 'active' "
+                            "AND activity = 'idle' AND idle_deadline > ?",
+                            (now, active_handle, now),
+                        )
+                        if cursor.rowcount != 1:
+                            self._connection.rollback()
+                            raise ConversationClaimConflict(
+                                "Room has an active conversation",
+                                reason="room_busy",
+                            )
+                        superseded_handle = active_handle
+                    else:
+                        self._connection.rollback()
+                        reason = (
+                            "conversation_active"
+                            if decision.claim_kind != "touch"
+                            or active_device_id == decision.device_id
+                            else "room_busy"
+                        )
+                        raise ConversationClaimConflict(
+                            "room has an active conversation",
+                            reason=reason,
+                        )
+                handle = _identifier(self._handle_factory(), "conversation handle")
                 self._connection.execute(
                     """
                     INSERT INTO conversation_claims (
@@ -163,10 +198,15 @@ class ConversationGrantStore:
                     ),
                 )
                 self._connection.commit()
+                if superseded_handle is not None:
+                    self._cancel_timer_locked(superseded_handle)
+                    self._watch_connected_at.pop(superseded_handle, None)
+                    self._revocation_handlers.pop(superseded_handle, None)
             except sqlite3.IntegrityError as error:
                 self._connection.rollback()
                 raise ConversationClaimConflict(
-                    "wake claim was already used"
+                    "claim was already used",
+                    reason="duplicate_claim",
                 ) from error
             except sqlite3.Error as error:
                 self._connection.rollback()

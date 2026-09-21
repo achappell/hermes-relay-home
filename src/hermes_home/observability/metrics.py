@@ -86,6 +86,14 @@ _METRIC_DEFINITIONS = {
         "counter",
         "Final wake arbitration decisions by decision.",
     ),
+    "hermes_home_touch_claims_total": (
+        "counter",
+        "Touch claims handled by outcome.",
+    ),
+    "hermes_home_touch_decisions_total": (
+        "counter",
+        "Final touch admission decisions by decision.",
+    ),
 }
 
 

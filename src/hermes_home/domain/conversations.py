@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import secrets
 from collections.abc import Callable, Iterable
+from math import isfinite
 from threading import RLock
 from typing import Protocol
 
@@ -18,6 +19,10 @@ from hermes_home.domain.watch import (
 
 class ConversationClaimConflict(RuntimeError):
     """Raised when a Room is active or a wake claim has already been consumed."""
+
+    def __init__(self, message: str, *, reason: str = "conversation_active") -> None:
+        self.reason = reason
+        super().__init__(message)
 
 
 class ConversationClaimStore(Protocol):
@@ -81,11 +86,20 @@ class InMemoryConversationClaimStore:
         *,
         clock: Callable[[], float] = monotonic_clock,
         route_id: str = "local",
+        idle_timeout_seconds: float = 8.0,
     ) -> None:
         if type(route_id) is not str or not 1 <= len(route_id) <= 128:
             raise ValueError("watch route ID must be a non-empty bounded string")
+        if (
+            type(idle_timeout_seconds) not in (int, float)
+            or isinstance(idle_timeout_seconds, bool)
+            or not isfinite(float(idle_timeout_seconds))
+            or idle_timeout_seconds <= 0
+        ):
+            raise ValueError("conversation idle timeout must be positive")
         self._handle_factory = handle_factory or (lambda: secrets.token_urlsafe(32))
         self._clock = clock
+        self._idle_timeout = float(idle_timeout_seconds)
         self._watch_route = {"class": "home", "id": route_id}
         self._lock = RLock()
         self._claims: dict[str, dict[str, object]] = {}
@@ -100,17 +114,51 @@ class InMemoryConversationClaimStore:
     ) -> str:
         if decision.decision != "granted":
             raise ValueError("only a granted wake can create a conversation claim")
-        handle = self._handle_factory()
-        if type(handle) is not str or not 1 <= len(handle) <= 128:
-            raise ValueError("conversation handle is invalid")
+        now = float(self._clock())
         with self._lock:
+            self._expire_due_locked(now)
             if decision.claim_id in self._used_claim_ids:
-                raise ConversationClaimConflict("wake claim was already used")
-            if any(
-                claim["room_id"] == decision.room_id and claim["status"] == "active"
-                for claim in self._claims.values()
-            ):
-                raise ConversationClaimConflict("Room has an active conversation")
+                raise ConversationClaimConflict(
+                    "wake claim was already used",
+                    reason="duplicate_claim",
+                )
+            active = [
+                (candidate_handle, claim)
+                for candidate_handle, claim in self._claims.items()
+                if claim["room_id"] == decision.room_id and claim["status"] == "active"
+            ]
+            if active:
+                if decision.claim_kind == "touch" and len(active) == 1:
+                    existing_handle, existing = active[0]
+                    deadline = existing.get("idle_deadline")
+                    if (
+                        existing.get("activity") in {"idle", "playback_complete"}
+                        and type(deadline) in (int, float)
+                        and float(deadline) > now
+                    ):
+                        self._close_claim_locked(
+                            existing_handle,
+                            existing,
+                            "superseded_by_touch",
+                        )
+                    else:
+                        reason = (
+                            "conversation_active"
+                            if existing["device_id"] == decision.device_id
+                            else "room_busy"
+                        )
+                        raise ConversationClaimConflict(
+                            "Room has an active conversation",
+                            reason=reason,
+                        )
+                else:
+                    raise ConversationClaimConflict(
+                        "Room has an active conversation",
+                        reason="conversation_active",
+                    )
+            handle = self._handle_factory()
+            if type(handle) is not str or not 1 <= len(handle) <= 128:
+                raise ValueError("conversation handle is invalid")
             self._used_claim_ids.add(decision.claim_id)
             self._claims[handle] = {
                 "claim_id": decision.claim_id,
@@ -122,6 +170,7 @@ class InMemoryConversationClaimStore:
                 "credential_generation": credential_generation,
                 "status": "active",
                 "activity": "ready",
+                "idle_deadline": None,
                 "session_id": None,
                 "close_reason": None,
             }
@@ -159,9 +208,7 @@ class InMemoryConversationClaimStore:
             ):
                 return False
             if claim["status"] == "active":
-                claim["status"] = "closed"
-                self._watch_connected_at.pop(handle, None)
-                claim["close_reason"] = reason
+                self._close_claim_locked(handle, claim, reason)
             return True
 
     def close_profile_claims(self, profile_ids: Iterable[str], *, reason: str) -> int:
@@ -191,15 +238,35 @@ class InMemoryConversationClaimStore:
                 if claim["status"] == "active" and predicate(claim)
             ]
             for claim in active:
-                claim["status"] = "closed"
-                claim["close_reason"] = reason
                 handle = next(
                     candidate
                     for candidate, value in self._claims.items()
                     if value is claim
                 )
-                self._watch_connected_at.pop(handle, None)
+                self._close_claim_locked(handle, claim, reason)
             return len(active)
+
+    def _close_claim_locked(
+        self,
+        handle: str,
+        claim: dict[str, object],
+        reason: str,
+    ) -> None:
+        claim["status"] = "closed"
+        claim["activity"] = "closed"
+        claim["idle_deadline"] = None
+        claim["close_reason"] = reason
+        self._watch_connected_at.pop(handle, None)
+
+    def _expire_due_locked(self, now: float) -> None:
+        for handle, claim in self._claims.items():
+            deadline = claim.get("idle_deadline")
+            if (
+                claim["status"] == "active"
+                and type(deadline) in (int, float)
+                and float(deadline) <= now
+            ):
+                self._close_claim_locked(handle, claim, "idle_expired")
 
     def mark_open(self, handle: str, device_id: str) -> None:
         with self._lock:
@@ -211,12 +278,14 @@ class InMemoryConversationClaimStore:
             ):
                 raise ValueError("conversation claim is no longer active")
             claim["activity"] = "open"
+            claim["idle_deadline"] = None
             self._watch_connected_at[handle] = float(self._clock())
 
     def record_activity(self, handle: str, device_id: str, state: str) -> None:
         if state not in WATCH_ACTIVITY_STATES:
             raise ValueError("conversation activity state is invalid")
         with self._lock:
+            self._expire_due_locked(float(self._clock()))
             claim = self._claims.get(handle)
             if (
                 claim is None
@@ -225,6 +294,10 @@ class InMemoryConversationClaimStore:
             ):
                 raise ValueError("conversation claim is no longer active")
             claim["activity"] = state
+            if state in {"playback_complete", "idle"}:
+                claim["idle_deadline"] = float(self._clock()) + self._idle_timeout
+            else:
+                claim["idle_deadline"] = None
             if handle in self._watch_connected_at:
                 self._watch_connected_at[handle] = float(self._clock())
 
@@ -241,6 +314,7 @@ class InMemoryConversationClaimStore:
         configuration_revision: int,
     ) -> WatchSnapshot | None:
         with self._lock:
+            self._expire_due_locked(float(self._clock()))
             matches = [
                 (handle, claim)
                 for handle, claim in self._claims.items()
@@ -270,6 +344,7 @@ class InMemoryConversationClaimStore:
     def delivery_state(self, device_id: str) -> HealthDeliveryState:
         """Read current delivery state without touching the claim."""
         with self._lock:
+            self._expire_due_locked(float(self._clock()))
             matches = [
                 claim
                 for claim in self._claims.values()

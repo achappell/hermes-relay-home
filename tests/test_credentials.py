@@ -7,6 +7,7 @@ from hermes_home.domain.credentials import (
     CredentialService,
     CredentialStateError,
     CredentialValidationError,
+    TouchBinding,
 )
 from hermes_home.storage.credentials import (
     InMemoryCredentialStore,
@@ -40,6 +41,57 @@ def test_credential_scope_accepts_protected_capabilities() -> None:
     )
 
     assert scope.capabilities == ("sensitive_entry", "consequence_confirm")
+
+
+def test_touch_binding_is_approved_only_for_a_capable_available_profile(
+    tmp_path,
+) -> None:
+    store = SQLiteCredentialStore(tmp_path / "home.sqlite3")
+    service = CredentialService(
+        store=store,
+        root_secret=b"r" * 32,
+        clock=lambda: 1_000.0,
+        id_factory=iter(["offer-1", "request-1"]).__next__,
+        token_factory=lambda: "enrollment-secret",
+        confirmation_factory=lambda: "ABCD2345",
+    )
+
+    try:
+        offer = service.create_offer()
+        request = service.submit_request(
+            enrollment_code=offer.enrollment_code,
+            endpoint_id="endpoint-1",
+            label="Kitchen Touch",
+            endpoint_type="touch",
+            requested_rooms=["kitchen"],
+            requested_capabilities=["touch_claim"],
+            secure_storage="platform_secure_store",
+        )
+        scope = CredentialScope.from_values(
+            rooms=["kitchen"],
+            capabilities=["touch_claim"],
+            touch_binding=TouchBinding("kitchen", "family"),
+        )
+
+        with pytest.raises(
+            CredentialValidationError, match="unavailable touch profile"
+        ):
+            service.approve_request(
+                request.request_id,
+                scope,
+                configured_rooms=["kitchen"],
+                configured_profiles=["missing"],
+            )
+        approved = service.approve_request(
+            request.request_id,
+            scope,
+            configured_rooms=["kitchen"],
+            configured_profiles=["family"],
+        )
+
+        assert approved.approved_scope == scope
+    finally:
+        store.close()
 
 
 def test_current_scope_requires_the_active_current_generation(tmp_path) -> None:
