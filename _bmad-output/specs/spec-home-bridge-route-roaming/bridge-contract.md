@@ -257,7 +257,17 @@ The structured prompt event types and response keys are fixed at this boundary:
 For existing prompt types, sensitivity, options, values, expiry, turn
 ownership, and correlation IDs remain visible to the endpoint adapter. A
 prompt response is not ordinary model input and must not be converted into a
-new `prompt.submit`.
+new `prompt.submit`. On the Home NW-10 boundary, `secret.request` and
+`sudo.request` are Sensitive Entry prompts and `approval.request` is always
+consequence-bearing. Home forwards only an allowlisted, non-secret projection
+of those prompt events; the response is one-shot, capped at 4096 UTF-8 bytes
+for Sensitive Entry values, and returns a fixed safe result envelope. The
+current Device capability and current credential scope must intersect for the
+matching action, and a capability/configuration revision change makes the
+protected prompt unavailable without closing the active conversation. The
+upstream Standard `secret.respond` and `sudo.respond` operations must keep
+values out of transcript/history storage; Home cannot enforce that Hermes
+storage policy from this boundary.
 
 Typed choices use this normalized event payload:
 

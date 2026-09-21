@@ -6,6 +6,7 @@ import pytest
 from websockets.sync.client import connect
 
 from hermes_home.bridge.production import StandardHealthProbeProvider
+from hermes_home.domain.arbitration import WakeDecision
 from hermes_home.domain.credentials import CredentialService
 from hermes_home.observability.diagnostics import DiagnosticEvent
 from hermes_home.runtime import (
@@ -522,6 +523,193 @@ def test_create_runtime_recovers_paired_credentials_after_restart(tmp_path) -> N
         assert authenticated.device_id == device_id
     finally:
         restarted.close()
+
+
+def test_create_runtime_resolves_protected_authority_from_live_credential_scope(
+    tmp_path, monkeypatch
+) -> None:
+    token_file = tmp_path / "admin-token"
+    standard_token_file = tmp_path / "standard-token"
+    root_file = tmp_path / "credential-root"
+    token_file.write_text("admin-secret", encoding="utf-8")
+    standard_token_file.write_text("standard-secret", encoding="utf-8")
+    root_file.write_text("ab" * 32, encoding="utf-8")
+    settings = load_settings(
+        {
+            "HERMES_HOME_DATA_DIR": str(tmp_path / "data"),
+            "HERMES_HOME_ADMIN_TOKEN_FILE": str(token_file),
+            "HERMES_HOME_CREDENTIAL_ROOT_SECRET_FILE": str(root_file),
+            "HERMES_HOME_STANDARD_GATEWAY_URL": "wss://media-server.example/api/ws",
+            "HERMES_HOME_STANDARD_TOKEN_FILE": str(standard_token_file),
+            "HERMES_HOME_PORT": "0",
+            "HERMES_HOME_BRIDGE_PORT": "0",
+        }
+    )
+
+    class FakeBridgeServer:
+        def serve_forever(self) -> None:
+            return None
+
+        def shutdown(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "hermes_home.bridge.production.create_standard_bridge_factory",
+        lambda **kwargs: lambda: object(),
+    )
+    runtime = create_runtime(
+        settings,
+        bridge_server_factory=lambda **kwargs: FakeBridgeServer(),
+    )
+    application = runtime.server.RequestHandlerClass.application
+    snapshot = {
+        "rooms": [{"id": "kitchen", "name": "Kitchen"}],
+        "profiles": [{"id": "family", "name": "Family", "available": True}],
+        "wake_mappings": [
+            {
+                "id": "hey-hermes",
+                "phrase": "Hey Hermes",
+                "profile_id": "family",
+                "active": True,
+            }
+        ],
+        "devices": [],
+    }
+
+    try:
+        published = application.handle(
+            "PUT",
+            "/api/v1/configuration",
+            {
+                "Authorization": "Bearer admin-secret",
+                "Content-Type": "application/json",
+            },
+            json.dumps(
+                {"schema": 1, "expected_revision": 0, "snapshot": snapshot}
+            ).encode(),
+        )
+        offer = application.handle(
+            "POST",
+            "/api/v1/enrollment/offers",
+            {
+                "Authorization": "Bearer admin-secret",
+                "Content-Type": "application/json",
+            },
+            b'{"schema": 1}',
+        )
+        request = application.handle(
+            "POST",
+            "/api/v1/enrollment/requests",
+            {"Content-Type": "application/json"},
+            json.dumps(
+                {
+                    "schema": 1,
+                    "enrollment_code": offer.body["enrollment_code"],
+                    "endpoint_id": "endpoint-1",
+                    "label": "Kitchen Puck",
+                    "type": "puck",
+                    "requested_rooms": ["kitchen"],
+                    "requested_capabilities": [
+                        "wake_claim",
+                        "sensitive_entry",
+                        "consequence_confirm",
+                    ],
+                    "requested_profile_mappings": [],
+                    "secure_storage": "platform_secure_store",
+                }
+            ).encode(),
+        )
+        approved = application.handle(
+            "POST",
+            f"/api/v1/enrollment/requests/{request.body['request_id']}/approve",
+            {
+                "Authorization": "Bearer admin-secret",
+                "Content-Type": "application/json",
+            },
+            json.dumps(
+                {
+                    "schema": 1,
+                    "scope": {
+                        "rooms": ["kitchen"],
+                        "capabilities": [
+                            "wake_claim",
+                            "sensitive_entry",
+                            "consequence_confirm",
+                        ],
+                        "wake_mapping_grant": {
+                            "mode": "selected",
+                            "ids": ["hey-hermes"],
+                        },
+                    },
+                }
+            ).encode(),
+        )
+        consumed = application.handle(
+            "POST",
+            f"/api/v1/enrollment/requests/{request.body['request_id']}/consume",
+            {"Content-Type": "application/json"},
+            json.dumps(
+                {
+                    "schema": 1,
+                    "enrollment_code": offer.body["enrollment_code"],
+                    "secure_storage": "platform_secure_store",
+                }
+            ).encode(),
+        )
+
+        assert published.status == 200
+        assert approved.status == 200
+        assert consumed.status == 200
+        device_id = consumed.body["device_id"]
+        generation = consumed.body["generation"]
+        snapshot["devices"] = [
+            {
+                "id": device_id,
+                "name": "Kitchen Puck",
+                "room_id": "kitchen",
+                "priority": 1,
+                "capabilities": {
+                    "wake_claim": True,
+                    "sensitive_entry": True,
+                    "consequence_confirm": True,
+                },
+            }
+        ]
+        republished = application.handle(
+            "PUT",
+            "/api/v1/configuration",
+            {
+                "Authorization": "Bearer admin-secret",
+                "Content-Type": "application/json",
+            },
+            json.dumps(
+                {"schema": 1, "expected_revision": 1, "snapshot": snapshot}
+            ).encode(),
+        )
+        assert republished.status == 200
+        assert runtime.conversation_store is not None
+        handle = runtime.conversation_store.create_from_decision(
+            WakeDecision(
+                claim_id="runtime-protected-claim",
+                decision="granted",
+                arbitration_id="runtime-protected-arbitration",
+                configuration_revision=2,
+                device_id=device_id,
+                room_id="kitchen",
+                wake_mapping_id="hey-hermes",
+                profile_id="family",
+            ),
+            credential_generation=generation,
+        )
+        grant = runtime.conversation_store.resolve(handle, device_id)
+
+        assert grant is not None
+        assert grant.protected_capabilities == frozenset(
+            {"sensitive_entry", "consequence_confirm"}
+        )
+        assert grant.capability_revision == 2
+    finally:
+        runtime.close()
 
 
 def test_create_runtime_serves_the_authenticated_metrics_endpoint(tmp_path) -> None:

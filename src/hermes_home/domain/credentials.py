@@ -20,7 +20,13 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 LOGGER = logging.getLogger(__name__)
 
 SUPPORTED_CREDENTIAL_CAPABILITIES = frozenset(
-    {"health_view", "wake_claim", "watch_view"}
+    {
+        "consequence_confirm",
+        "health_view",
+        "sensitive_entry",
+        "wake_claim",
+        "watch_view",
+    }
 )
 ENROLLMENT_TTL_SECONDS = 300.0
 CREDENTIAL_TTL_SECONDS = 90 * 24 * 60 * 60
@@ -426,6 +432,24 @@ class CredentialService:
             return found
 
         return self._store.mutate(clean_state)
+
+    def current_scope(self, device_id: str, generation: int) -> CredentialScope | None:
+        """Return the current non-secret scope for one active generation."""
+        device_id = _identifier(device_id, "device_id")
+        if type(generation) is not int or generation < 1:
+            raise CredentialValidationError("generation must be a positive integer")
+        now = self._now()
+        for record in _records(self._store.read_state(), "credentials"):
+            if (
+                record.get("device_id") != device_id
+                or record.get("generation") != generation
+                or record.get("status") != "active"
+            ):
+                continue
+            if now >= _timestamp(record.get("expires_at")):
+                return None
+            return _scope_from_record(record.get("scope"))
+        return None
 
     def list_requests(self) -> tuple[EnrollmentRequest, ...]:
         """Return redacted enrollment request metadata for the admin surface."""

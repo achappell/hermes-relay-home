@@ -30,7 +30,7 @@ from hermes_home.bridge.standard import (
 )
 from hermes_home.domain.arbitration import WakeDecision
 from hermes_home.domain.conversations import ConversationClaimConflict
-from hermes_home.domain.credentials import RevocationEvent
+from hermes_home.domain.credentials import CredentialScope, RevocationEvent
 from hermes_home.domain.health import (
     HealthDeliveryState,
     HealthProbeResult,
@@ -63,8 +63,11 @@ class ConversationGrantStore:
         first_open_timeout_seconds: float = DEFAULT_FIRST_OPEN_TIMEOUT_SECONDS,
         route_id: str = "local",
         handle_factory: Callable[[], str] | None = None,
+        credential_scope_resolver: Callable[[str, int], CredentialScope | None]
+        | None = None,
     ) -> None:
         self._configuration = configuration
+        self._credential_scope_resolver = credential_scope_resolver
         self._clock = clock
         self._idle_timeout = _positive_timeout(idle_timeout_seconds)
         self._first_open_timeout = _positive_timeout(first_open_timeout_seconds)
@@ -201,6 +204,30 @@ class ConversationGrantStore:
                     device["id"]: device for device in snapshot.get("devices", [])
                 }
                 device = devices.get(device_id)
+                protected_capabilities = frozenset()
+                capability_revision = None
+                if self._credential_scope_resolver is not None and type(row[7]) is int:
+                    credential_scope = self._credential_scope_resolver(
+                        device_id, row[7]
+                    )
+                    if isinstance(credential_scope, CredentialScope):
+                        configured_capabilities = (
+                            device.get("capabilities", {})
+                            if isinstance(device, Mapping)
+                            else {}
+                        )
+                        protected_capabilities = frozenset(
+                            capability
+                            for capability in (
+                                "sensitive_entry",
+                                "consequence_confirm",
+                            )
+                            if (
+                                configured_capabilities.get(capability) is True
+                                and capability in credential_scope.capabilities
+                            )
+                        )
+                        capability_revision = snapshot.get("revision")
                 interactive_choice = (
                     snapshot.get("revision") == row[9]
                     and device is not None
@@ -229,6 +256,8 @@ class ConversationGrantStore:
                 credential_generation=row[7],
                 configuration_revision=row[9],
                 interactive_choice=interactive_choice,
+                protected_capabilities=protected_capabilities,
+                capability_revision=capability_revision,
             )
 
     def persist_session(self, grant: ConversationGrant, session_id: str) -> None:

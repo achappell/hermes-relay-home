@@ -90,6 +90,46 @@ def test_interactive_choice_capability_must_be_a_boolean() -> None:
         validate_candidate(candidate)
 
 
+def test_protected_device_capabilities_are_explicit_and_normalized() -> None:
+    device = _device("puck-screen", "kitchen", 1)
+    device["capabilities"] = {
+        "wake_claim": True,
+        "sensitive_entry": True,
+        "consequence_confirm": True,
+    }
+
+    normalized = validate_candidate(
+        {
+            "rooms": [{"id": "kitchen", "name": "Kitchen"}],
+            "profiles": [],
+            "wake_mappings": [],
+            "devices": [device],
+        }
+    )
+
+    assert normalized["devices"][0]["capabilities"] == {
+        "wake_claim": True,
+        "sensitive_entry": True,
+        "consequence_confirm": True,
+    }
+
+
+@pytest.mark.parametrize("capability", ["sensitive_entry", "consequence_confirm"])
+def test_protected_device_capabilities_must_be_boolean(capability: str) -> None:
+    device = _device("puck-screen", "kitchen", 1)
+    device["capabilities"] = {"wake_claim": True, capability: "yes"}
+
+    with pytest.raises(ConfigurationValidationError, match=capability):
+        validate_candidate(
+            {
+                "rooms": [{"id": "kitchen", "name": "Kitchen"}],
+                "profiles": [],
+                "wake_mappings": [],
+                "devices": [device],
+            }
+        )
+
+
 def test_unknown_fields_are_rejected_from_the_candidate() -> None:
     candidate = {
         "rooms": [],

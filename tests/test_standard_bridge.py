@@ -267,6 +267,10 @@ def _make_bridge(
             handle=handle,
             device_id=device_id,
             profile_id="family",
+            protected_capabilities=frozenset(
+                {"sensitive_entry", "consequence_confirm"}
+            ),
+            capability_revision=1,
         )
     return HomeBridge(
         gateway_url=gateway_url,
@@ -1571,6 +1575,8 @@ def test_bridge_preserves_structured_prompt_identity_and_sensitivity():
                         "sensitivity": "high",
                         "question": "Allow the requested action?",
                         "options": [{"id": "allow", "label": "Allow"}],
+                        "value": "must-not-reach-the-endpoint",
+                        "password": "must-not-reach-the-endpoint",
                     },
                 },
             },
@@ -1587,6 +1593,8 @@ def test_bridge_preserves_structured_prompt_identity_and_sensitivity():
             handle=handle,
             device_id=device_id,
             profile_id="family",
+            protected_capabilities=frozenset({"consequence_confirm"}),
+            capability_revision=1,
         ),
         gateway_socket_factory=FakeSocketFactory(gateway_socket),
     )
@@ -1615,6 +1623,55 @@ def test_bridge_preserves_structured_prompt_identity_and_sensitivity():
                 "options": [{"id": "allow", "label": "Allow"}],
             },
         },
+    }
+
+
+def test_bridge_drops_wrong_typed_protected_prompt_metadata():
+    gateway_socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {"capabilities": {}}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {"session_id": "runtime-hermes-1"},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "home-2",
+                "result": {"accepted": True},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "event",
+                "params": {
+                    "type": "secret.request",
+                    "session_id": "runtime-hermes-1",
+                    "payload": {
+                        "request_id": "secret-1",
+                        "question": "Enter the token",
+                        "sensitivity": "high",
+                        "title": 42,
+                        "timeout_s": "soon",
+                        "options": {"id": "not-a-list"},
+                        "value": "must-not-reach-the-endpoint",
+                    },
+                },
+            },
+        ]
+    )
+    bridge = _make_bridge(FakeSocketFactory(gateway_socket))
+    bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle="opaque-conversation-1",
+    )
+    bridge.submit_prompt("Enter the token")
+
+    prompt = bridge.next_event()
+
+    assert prompt.to_endpoint()["event"]["payload"] == {
+        "request_id": "secret-1",
+        "question": "Enter the token",
+        "sensitivity": "high",
     }
 
 
@@ -1663,6 +1720,8 @@ def test_bridge_resolves_a_structured_prompt_with_its_correlation_id():
             handle=handle,
             device_id=device_id,
             profile_id="family",
+            protected_capabilities=frozenset({"consequence_confirm"}),
+            capability_revision=1,
         ),
         gateway_socket_factory=FakeSocketFactory(gateway_socket),
     )
@@ -4212,6 +4271,400 @@ def test_bridge_maps_structured_prompt_responses_and_rejects_stale_ones(
     }
     with pytest.raises(BridgeRequestRejected, match="no longer pending"):
         bridge.respond_prompt(prompt, response)
+
+
+def test_protected_prompt_requires_the_matching_consequence_capability() -> None:
+    gateway_socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {"capabilities": {}}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {"session_id": "runtime-hermes-1"},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "home-2",
+                "result": {"accepted": True},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "event",
+                "params": {
+                    "type": "approval.request",
+                    "session_id": "runtime-hermes-1",
+                    "payload": {"request_id": "approval-1"},
+                },
+            },
+        ]
+    )
+    bridge = _make_bridge(
+        FakeSocketFactory(gateway_socket),
+        resolver=lambda handle, device_id: ConversationGrant(
+            handle=handle,
+            device_id=device_id,
+            profile_id="family",
+            protected_capabilities=frozenset({"sensitive_entry"}),
+            capability_revision=1,
+        ),
+    )
+    bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle="opaque-conversation-1",
+    )
+    bridge.submit_prompt("Approve the action")
+    prompt = bridge.next_event()
+
+    with pytest.raises(BridgeCapabilityUnavailable):
+        bridge.respond_prompt(prompt, {"choice": "allow"})
+
+    assert bridge.active_turn_id == "home-turn-1"
+    assert all(frame["method"] != "approval.respond" for frame in gateway_socket.sent)
+
+
+@pytest.mark.parametrize(
+    ("event_type", "response", "operation", "expected"),
+    [
+        (
+            "secret.request",
+            {"value": "current-secret"},
+            "secret.respond",
+            {"value": "current-secret"},
+        ),
+        (
+            "sudo.request",
+            {"password": "current-password"},
+            "sudo.respond",
+            {"password": "current-password"},
+        ),
+    ],
+)
+def test_secret_and_sudo_use_sensitive_entry_authority_only(
+    event_type: str,
+    response: dict[str, object],
+    operation: str,
+    expected: dict[str, object],
+) -> None:
+    gateway_socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {"capabilities": {}}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {"session_id": "runtime-hermes-1"},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "home-2",
+                "result": {"accepted": True},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "event",
+                "params": {
+                    "type": event_type,
+                    "session_id": "runtime-hermes-1",
+                    "payload": {"request_id": "protected-1"},
+                },
+            },
+            {"jsonrpc": "2.0", "id": "home-3", "result": {"status": "ok"}},
+        ]
+    )
+    bridge = _make_bridge(
+        FakeSocketFactory(gateway_socket),
+        resolver=lambda handle, device_id: ConversationGrant(
+            handle=handle,
+            device_id=device_id,
+            profile_id="family",
+            protected_capabilities=frozenset({"sensitive_entry"}),
+            capability_revision=1,
+        ),
+    )
+    bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle="opaque-conversation-1",
+    )
+    bridge.submit_prompt("Enter the protected value")
+    prompt = bridge.next_event()
+
+    assert bridge.respond_prompt(prompt, response) == {"status": "ok"}
+    assert gateway_socket.sent[-1] == {
+        "jsonrpc": "2.0",
+        "id": "home-4",
+        "method": operation,
+        "params": {
+            "session_id": "runtime-hermes-1",
+            "request_id": "protected-1",
+            **expected,
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("event_type", "response"),
+    [
+        ("secret.request", {"value": "current-secret"}),
+        ("sudo.request", {"password": "current-password"}),
+    ],
+)
+def test_secret_and_sudo_do_not_use_consequence_authority_for_entry(
+    event_type: str,
+    response: dict[str, object],
+) -> None:
+    gateway_socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {"capabilities": {}}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {"session_id": "runtime-hermes-1"},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "home-2",
+                "result": {"accepted": True},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "event",
+                "params": {
+                    "type": event_type,
+                    "session_id": "runtime-hermes-1",
+                    "payload": {"request_id": "protected-1"},
+                },
+            },
+        ]
+    )
+    bridge = _make_bridge(
+        FakeSocketFactory(gateway_socket),
+        resolver=lambda handle, device_id: ConversationGrant(
+            handle=handle,
+            device_id=device_id,
+            profile_id="family",
+            protected_capabilities=frozenset({"consequence_confirm"}),
+            capability_revision=1,
+        ),
+    )
+    bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle="opaque-conversation-1",
+    )
+    bridge.submit_prompt("Enter the protected value")
+    prompt = bridge.next_event()
+
+    with pytest.raises(BridgeCapabilityUnavailable):
+        bridge.respond_prompt(prompt, response)
+    assert all(
+        frame["method"] not in {"secret.respond", "sudo.respond"}
+        for frame in gateway_socket.sent
+    )
+
+
+def test_protected_prompt_becomes_stale_without_closing_the_active_turn() -> None:
+    current_revision = [1]
+    gateway_socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {"capabilities": {}}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {"session_id": "runtime-hermes-1"},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "home-2",
+                "result": {"accepted": True},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "event",
+                "params": {
+                    "type": "secret.request",
+                    "session_id": "runtime-hermes-1",
+                    "payload": {"request_id": "secret-1"},
+                },
+            },
+        ]
+    )
+
+    def resolver(handle: str, device_id: str) -> ConversationGrant:
+        return ConversationGrant(
+            handle=handle,
+            device_id=device_id,
+            profile_id="family",
+            protected_capabilities=frozenset({"sensitive_entry"}),
+            capability_revision=current_revision[0],
+        )
+
+    bridge = _make_bridge(FakeSocketFactory(gateway_socket), resolver=resolver)
+    bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle="opaque-conversation-1",
+    )
+    bridge.submit_prompt("Enter the secret")
+    prompt = bridge.next_event()
+    current_revision[0] = 2
+
+    with pytest.raises(BridgeCapabilityUnavailable):
+        bridge.respond_prompt(prompt, {"value": "do-not-send"})
+
+    assert bridge.active_turn_id == "home-turn-1"
+    assert all(frame["method"] != "secret.respond" for frame in gateway_socket.sent)
+
+
+@pytest.mark.parametrize(
+    ("event_type", "response_key"),
+    [("secret.request", "value"), ("sudo.request", "password")],
+)
+def test_sensitive_entry_is_bounded_and_one_shot_after_known_rejection(
+    event_type: str,
+    response_key: str,
+) -> None:
+    gateway_socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {"capabilities": {}}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {"session_id": "runtime-hermes-1"},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "home-2",
+                "result": {"accepted": True},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "event",
+                "params": {
+                    "type": event_type,
+                    "session_id": "runtime-hermes-1",
+                    "payload": {"request_id": "secret-1"},
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "home-3",
+                "error": {"code": -32000, "message": "peer-secret-error"},
+            },
+        ]
+    )
+    bridge = _make_bridge(FakeSocketFactory(gateway_socket))
+    bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle="opaque-conversation-1",
+    )
+    bridge.submit_prompt("Enter the secret")
+    prompt = bridge.next_event()
+
+    with pytest.raises(BridgeProtocolError):
+        bridge.respond_prompt(prompt, {response_key: "🙂" * 1025})
+
+    with pytest.raises(BridgeRequestRejected) as rejection:
+        bridge.respond_prompt(prompt, {response_key: "🙂" * 1024})
+    assert "peer-secret-error" not in str(rejection.value)
+    with pytest.raises(BridgeRequestRejected, match="no longer pending"):
+        bridge.respond_prompt(prompt, {response_key: "retry-is-forbidden"})
+
+    assert gateway_socket.sent[-1]["method"] == (
+        f"{event_type.removesuffix('.request')}.respond"
+    )
+
+
+def test_sensitive_entry_is_one_shot_after_uncertain_delivery() -> None:
+    gateway_socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {"capabilities": {}}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {"session_id": "runtime-hermes-1"},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "home-2",
+                "result": {"accepted": True},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "event",
+                "params": {
+                    "type": "secret.request",
+                    "session_id": "runtime-hermes-1",
+                    "payload": {"request_id": "secret-1"},
+                },
+            },
+        ]
+    )
+    bridge = _make_bridge(FakeSocketFactory(gateway_socket))
+    bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle="opaque-conversation-1",
+    )
+    bridge.submit_prompt("Enter the secret")
+    prompt = bridge.next_event()
+
+    with pytest.raises(BridgeTransportError):
+        bridge.respond_prompt(prompt, {"value": "one-shot-secret"})
+
+    assert bridge.state == "turn_uncertain"
+    with pytest.raises(RuntimeError, match="not ready"):
+        bridge.respond_prompt(prompt, {"value": "retry-is-forbidden"})
+    assert [frame["method"] for frame in gateway_socket.sent].count(
+        "secret.respond"
+    ) == 1
+
+
+def test_replaced_protected_prompt_cannot_resolve_the_old_correlation() -> None:
+    gateway_socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {"capabilities": {}}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {"session_id": "runtime-hermes-1"},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "home-2",
+                "result": {"accepted": True},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "event",
+                "params": {
+                    "type": "secret.request",
+                    "session_id": "runtime-hermes-1",
+                    "correlation_id": "secret-old",
+                    "payload": {"request_id": "secret-old"},
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "event",
+                "params": {
+                    "type": "secret.request",
+                    "session_id": "runtime-hermes-1",
+                    "correlation_id": "secret-new",
+                    "payload": {"request_id": "secret-new"},
+                },
+            },
+            _event("gateway.notice", {"status": "ignored"}),
+        ]
+    )
+    bridge = _make_bridge(FakeSocketFactory(gateway_socket))
+    bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle="opaque-conversation-1",
+    )
+    bridge.submit_prompt("Enter the secret")
+    prompt = bridge.next_event()
+    assert prompt.correlation_id == "secret-old"
+    assert bridge.next_event().type == "gateway.notice"
+
+    with pytest.raises(BridgeRequestRejected, match="no longer pending"):
+        bridge.respond_prompt(prompt, {"value": "must-not-send"})
+    assert all(frame["method"] != "secret.respond" for frame in gateway_socket.sent)
 
 
 def test_bridge_applies_the_pinned_approval_all_default():
