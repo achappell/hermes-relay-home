@@ -141,6 +141,25 @@ revision and only its authorized active mappings, with no Profile IDs. Devices
 fetch on pairing/startup/reconnect, poll every 30 seconds while active, and
 refresh after `stale_configuration` or `stale_mapping`.
 
+A Touch-capable approval may also include one Home-selected Room/Profile pair:
+
+```json
+{
+  "schema": 1,
+  "scope": {
+    "rooms": ["kitchen"],
+    "capabilities": ["touch_claim"],
+    "wake_mapping_grant": {"mode": "selected", "ids": []},
+    "touch_binding": {"room_id": "kitchen", "profile_id": "family"}
+  }
+}
+```
+
+The binding is valid only when its Room is in the approved Room scope and its
+Profile is currently available. An absent binding means the endpoint has no
+Touch grant. Home does not include the binding or Profile ID in endpoint
+configuration; it remains Home-side authorization state.
+
 The independent `watch_view` credential capability permits one bounded read-only observation of an endpoint in an authorized Room. It does not grant wake claims, prompts, choices, interruption, configuration changes, microphone access, audio, or transcript replay. The capability is checked against the observer's current credential generation and Room scope on every request.
 
 The independent `health_view` credential capability permits one bounded,
@@ -296,6 +315,45 @@ The exact acoustic evidence encoding, calibration, normalization, and tie band
 remain a hardware-contract decision. The field is intentionally isolated so
 that decision does not leak into the mobile configuration API.
 
+## Touch admission
+
+`POST /api/v1/touch-claims` admits a physical tap from an authenticated Touch
+endpoint. The request is deliberately smaller than a wake claim:
+
+```json
+{
+  "schema": 1,
+  "claim_id": "touch-01J...",
+  "device_id": "touch-kitchen",
+  "configuration_revision": 13,
+  "initiation": {"kind": "tap", "observed_at_ms": 1720000000000}
+}
+```
+
+The endpoint sends no Profile ID, Session ID, wake mapping, mapping phrase, or
+acoustic evidence. Home checks the current configuration, the endpoint's
+`touch_claim` capability, and its bound Room/Profile pair before granting.
+Admission is synchronous; there is no arbitration window or `arbitration_id`.
+
+A successful response contains the opaque handle used by the existing bridge:
+
+```json
+{
+  "schema": 1,
+  "claim_id": "touch-01J...",
+  "decision": "granted",
+  "configuration_revision": 13,
+  "conversation_handle": "opaque-home-claim-01J..."
+}
+```
+
+The Room is live while capture, turn processing, playback, response-ready, or
+an unopened granted claim is active; a Touch claim is denied with
+`room_busy` (or `conversation_active` for a repeat from the same endpoint).
+After `playback_complete`, Home keeps an eight-second idle tail. A valid Touch
+claim during that tail closes the old claim as `superseded_by_touch` and opens
+the new one. Once the tail expires, it no longer blocks admission.
+
 ## Errors
 
 All error documents use the versioned envelope and a stable `error.code`.
@@ -312,6 +370,10 @@ Initial codes are:
   submitting another claim;
 - `stale_mapping` — the wake mapping exists but is inactive; refresh the
   authorized Device snapshot before submitting another claim;
+- `touch_claim_unavailable` — this endpoint has no approved Touch capability
+  and Room/Profile binding;
+- `room_busy` — the Room has a live conversation or an unexpired idle tail;
+- `profile_unavailable` — the approved Touch Profile is no longer available;
 - `conversation_active` — this Room already has an active conversation; stop or
   wait for that conversation to close before waking again;
 - `claim_denied` — a valid claim lost arbitration or failed eligibility;

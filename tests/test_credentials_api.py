@@ -513,6 +513,116 @@ def test_approval_and_consumption_issue_a_credential_with_enforced_scope(
         credential_store.close()
 
 
+def test_touch_approval_keeps_binding_in_home_and_admits_the_paired_device(
+    tmp_path,
+) -> None:
+    application, configuration_store, credential_store = _paired_application(tmp_path)
+    configuration_store.replace(expected_revision=0, candidate=CONFIGURATION)
+
+    try:
+        offer = application.handle(
+            "POST",
+            "/api/v1/enrollment/offers",
+            {
+                "Authorization": "Bearer admin-secret",
+                "Content-Type": "application/json",
+            },
+            b'{"schema": 1}',
+        )
+        request = application.handle(
+            "POST",
+            "/api/v1/enrollment/requests",
+            {"Content-Type": "application/json"},
+            json.dumps(
+                {
+                    "schema": 1,
+                    "enrollment_code": offer.body["enrollment_code"],
+                    "endpoint_id": "endpoint-1",
+                    "label": "Kitchen Touch",
+                    "type": "touch",
+                    "requested_rooms": ["kitchen"],
+                    "requested_capabilities": ["touch_claim"],
+                    "secure_storage": "platform_secure_store",
+                }
+            ).encode(),
+        )
+        approved = application.handle(
+            "POST",
+            f"/api/v1/enrollment/requests/{request.body['request_id']}/approve",
+            {
+                "Authorization": "Bearer admin-secret",
+                "Content-Type": "application/json",
+            },
+            json.dumps(
+                {
+                    "schema": 1,
+                    "scope": {
+                        "rooms": ["kitchen"],
+                        "capabilities": ["touch_claim"],
+                        "wake_mapping_grant": {"mode": "selected", "ids": []},
+                        "touch_binding": {
+                            "room_id": "kitchen",
+                            "profile_id": "family",
+                        },
+                    },
+                }
+            ).encode(),
+        )
+        consumed = application.handle(
+            "POST",
+            f"/api/v1/enrollment/requests/{request.body['request_id']}/consume",
+            {"Content-Type": "application/json"},
+            json.dumps(
+                {
+                    "schema": 1,
+                    "enrollment_code": offer.body["enrollment_code"],
+                    "secure_storage": "platform_secure_store",
+                }
+            ).encode(),
+        )
+
+        assert approved.status == 200
+        assert consumed.status == 200
+        assert consumed.body["scope"] == {
+            "rooms": ["kitchen"],
+            "capabilities": ["touch_claim"],
+            "wake_mappings": [],
+        }
+        assert "profile_id" not in json.dumps(consumed.body)
+        configuration = application.handle(
+            "GET",
+            "/api/v1/devices/device-1/configuration",
+            {"Authorization": f"Device {consumed.body['credential']}"},
+            b"",
+        )
+        assert configuration.body == {
+            "schema": 1,
+            "snapshot": {"revision": 1, "wake_mappings": []},
+        }
+        claim = application.handle(
+            "POST",
+            "/api/v1/touch-claims",
+            {
+                "Authorization": f"Device {consumed.body['credential']}",
+                "Content-Type": "application/json",
+            },
+            json.dumps(
+                {
+                    "schema": 1,
+                    "claim_id": "touch-paired-1",
+                    "device_id": "device-1",
+                    "configuration_revision": 1,
+                    "initiation": {"kind": "tap", "observed_at_ms": 1},
+                }
+            ).encode(),
+        )
+        assert claim.status == 200
+        assert "profile_id" not in json.dumps(claim.body)
+    finally:
+        configuration_store.close()
+        credential_store.close()
+
+
 def test_all_current_profile_mapping_approval_is_a_finite_device_snapshot(
     tmp_path,
 ) -> None:

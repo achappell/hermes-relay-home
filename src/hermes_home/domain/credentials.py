@@ -24,6 +24,7 @@ SUPPORTED_CREDENTIAL_CAPABILITIES = frozenset(
         "consequence_confirm",
         "health_view",
         "sensitive_entry",
+        "touch_claim",
         "wake_claim",
         "watch_view",
     }
@@ -64,12 +65,21 @@ class CredentialStateError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class TouchBinding:
+    """The one Home-approved Room/Profile pair for a Touch endpoint."""
+
+    room_id: str
+    profile_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class CredentialScope:
     """The exact Home-owned authority granted to one endpoint."""
 
     rooms: tuple[str, ...]
     capabilities: tuple[str, ...]
     wake_mappings: tuple[str, ...] = ()
+    touch_binding: TouchBinding | None = None
 
     @classmethod
     def from_values(
@@ -78,10 +88,12 @@ class CredentialScope:
         rooms: Iterable[object],
         capabilities: Iterable[object],
         wake_mappings: Iterable[object] = (),
+        touch_binding: object = None,
     ) -> CredentialScope:
         normalized_rooms = _bounded_values(rooms, "rooms")
         normalized_capabilities = _bounded_values(capabilities, "capabilities")
         normalized_mappings = _bounded_values(wake_mappings, "wake_mappings")
+        normalized_touch_binding = _touch_binding(touch_binding)
         unknown = set(normalized_capabilities) - SUPPORTED_CREDENTIAL_CAPABILITIES
         if unknown:
             raise CredentialValidationError("scope contains an unsupported capability")
@@ -89,6 +101,7 @@ class CredentialScope:
             rooms=normalized_rooms,
             capabilities=normalized_capabilities,
             wake_mappings=normalized_mappings,
+            touch_binding=normalized_touch_binding,
         )
 
     def assert_subset_of(self, requested: CredentialScope) -> None:
@@ -470,6 +483,7 @@ class CredentialService:
         *,
         configured_rooms: Iterable[object],
         configured_wake_mappings: Iterable[object] = (),
+        configured_profiles: Iterable[object] = (),
     ) -> EnrollmentRequest:
         """Approve only a pending request and only within Home's room policy."""
         request_id = _identifier(request_id, "request_id")
@@ -478,6 +492,9 @@ class CredentialService:
         available_rooms = set(_bounded_values(configured_rooms, "configured_rooms"))
         available_mappings = set(
             _bounded_values(configured_wake_mappings, "configured_wake_mappings")
+        )
+        available_profiles = set(
+            _bounded_values(configured_profiles, "configured_profiles")
         )
 
         def approve(state: dict[str, object]) -> EnrollmentRequest:
@@ -502,6 +519,19 @@ class CredentialService:
                 raise CredentialValidationError(
                     "approved scope references an unavailable wake mapping"
                 )
+            if scope.touch_binding is not None:
+                if "touch_claim" not in scope.capabilities:
+                    raise CredentialValidationError(
+                        "touch binding requires touch_claim capability"
+                    )
+                if scope.touch_binding.room_id not in scope.rooms:
+                    raise CredentialValidationError(
+                        "touch binding room must be in the approved rooms"
+                    )
+                if scope.touch_binding.profile_id not in available_profiles:
+                    raise CredentialValidationError(
+                        "approved scope references an unavailable touch profile"
+                    )
             record["approved_scope"] = _scope_record(scope)
             record["status"] = "approved"
             return _request_from_record(record)
@@ -954,12 +984,36 @@ def _find_replacement(
     return None
 
 
-def _scope_record(scope: CredentialScope) -> dict[str, list[str]]:
-    return {
+def _touch_binding(value: object) -> TouchBinding | None:
+    if value is None:
+        return None
+    if isinstance(value, TouchBinding):
+        room_id, profile_id = _bounded_values(
+            (value.room_id, value.profile_id),
+            "touch_binding",
+        )
+        return TouchBinding(room_id=room_id, profile_id=profile_id)
+    if not isinstance(value, Mapping) or set(value) != {"room_id", "profile_id"}:
+        raise CredentialValidationError("scope.touch_binding is invalid")
+    room_id, profile_id = _bounded_values(
+        (value["room_id"], value["profile_id"]),
+        "touch_binding",
+    )
+    return TouchBinding(room_id=room_id, profile_id=profile_id)
+
+
+def _scope_record(scope: CredentialScope) -> dict[str, object]:
+    record: dict[str, object] = {
         "rooms": list(scope.rooms),
         "capabilities": list(scope.capabilities),
         "wake_mappings": list(scope.wake_mappings),
     }
+    if scope.touch_binding is not None:
+        record["touch_binding"] = {
+            "room_id": scope.touch_binding.room_id,
+            "profile_id": scope.touch_binding.profile_id,
+        }
+    return record
 
 
 def _scope_from_record(value: object) -> CredentialScope:
@@ -969,6 +1023,7 @@ def _scope_from_record(value: object) -> CredentialScope:
         rooms=value.get("rooms", ()),
         capabilities=value.get("capabilities", ()),
         wake_mappings=value.get("wake_mappings", ()),
+        touch_binding=value.get("touch_binding"),
     )
 
 

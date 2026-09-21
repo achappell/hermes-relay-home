@@ -30,3 +30,18 @@ class ContractFixtureTests(unittest.TestCase):
             {"profile_id", "wake_phrase", "prompt", "transcript", "audio"}
             & claim.keys()
         )
+
+    def test_touch_claim_fixture_has_only_device_observed_initiation(self) -> None:
+        claim = load("touch-claim.json")
+
+        assert claim == {
+            "schema": 1,
+            "claim_id": "touch-claim-example",
+            "device_id": "touch-kitchen",
+            "configuration_revision": 12,
+            "initiation": {
+                "kind": "tap",
+                "observed_at_ms": 1720000000000,
+            },
+        }
+        assert not {"profile_id", "session_id", "wake_mapping_id"} & claim.keys()

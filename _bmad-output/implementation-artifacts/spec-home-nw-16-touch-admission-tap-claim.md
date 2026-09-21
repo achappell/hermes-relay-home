@@ -2,7 +2,7 @@
 title: 'HOME-NW-16 — Admit Touch panels and grant bound tap-to-talk claims'
 type: 'feature'
 created: '2026-09-21'
-status: 'draft'
+status: 'review'
 baseline_commit: 'ebbbe01'
 route: 'dispatch'
 review_loop_iteration: 0
@@ -123,12 +123,12 @@ Response, granted:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] Add the `touch_claim` capability and the `touch_binding` Room/Profile scope field, with approval-time validation against available Profiles and an empty-grant default.
-- [ ] Add `POST /api/v1/touch-claims` with synchronous decision, full credential/generation/revision/availability validation, and the denial-reason set above.
-- [ ] Share the conversation-claim grant path so a tap-granted handle carries the same expiry, activity, idle, close, and revocation behavior as a wake-granted one.
-- [ ] Enforce the per-Room single-active-claim rule: deny into a live Room; close an idle-tail claim `superseded_by_touch` and grant. No queueing and no loser promotion in either case.
-- [ ] Add the contract schema and README section; update `story-index.yaml` and `sprint-status.yaml`.
-- [ ] Verify with deterministic tests; record results in `validation-home-nw-16.md`.
+- [x] Add the `touch_claim` capability and the `touch_binding` Room/Profile scope field, with approval-time validation against available Profiles and an empty-grant default.
+- [x] Add `POST /api/v1/touch-claims` with synchronous decision, full credential/generation/revision/availability validation, and the denial-reason set above.
+- [x] Share the conversation-claim grant path so a tap-granted handle carries the same expiry, activity, idle, close, and revocation behavior as a wake-granted one.
+- [x] Enforce the per-Room single-active-claim rule: deny into a live Room; close an idle-tail claim `superseded_by_touch` and grant. No queueing and no loser promotion in either case.
+- [x] Add the contract schema and README section; update `story-index.yaml` and `sprint-status.yaml`.
+- [x] Verify with deterministic tests; record results in `validation-home-nw-16.md`.
 
 **Acceptance Criteria:**
 - An admitted Touch device receives a ready opaque handle bound to its approved Room and Profile, with no Profile or Session identifier exposed.
