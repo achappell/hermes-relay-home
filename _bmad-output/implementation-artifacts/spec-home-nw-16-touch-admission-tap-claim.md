@@ -35,7 +35,15 @@ context:
 
 - **No arbitration window.** A tap claim is decided synchronously. There is no competitor to rank — a tap is one deliberate act by one person at one panel — so the 250 ms window would add latency to a user-visible interaction and buy nothing.
 
-- **Room contention: deny, do not preempt, do not wait.** If the claim's Room already has an active claim, the tap claim is denied with reason `room_busy`. It does not wait for the Room to free, and it does not preempt. Rationale: the panel would otherwise be able to seize a Room mid-turn from a voice conversation already in progress — someone talking to the kitchen Puck could be cut off by a passing tap on the kitchen display. Denial is immediately visible to the person tapping, who can retry; silent preemption of someone else's turn is not recoverable. **This is the decision most worth re-reading before implementation** — see Open Decisions.
+- **Room contention: deny while live, take over the idle tail.** "Busy" is two states, and they deserve different answers.
+
+  A claim is **live** while capture, an in-flight turn, or playback is outstanding. A tap into a live Room is denied `room_busy`. It does not wait and it does not preempt: the panel would otherwise seize a Room mid-turn from a conversation already in progress, and someone talking to the kitchen Puck could be cut off by a passing tap on the kitchen display. Denial is immediately visible to the person tapping, who can retry; cutting off speech is not recoverable.
+
+  A claim is in its **idle tail** once it has reported `playback_complete` and its configurable 8-second idle deadline has not yet expired. Nobody is speaking; the claim is held open only in case a follow-up arrives. A tap into an idle-tail Room closes that claim with reason `superseded_by_touch` and grants the tap. Denying here would fail for a reason no person in the room can perceive — the conversation sounded finished because it was — and would force a second tap that succeeds only because the clock ran out.
+
+  The tradeoff accepted: the previous speaker loses their follow-up window to a tap. That is a deliberate exchange of a speculative continuation for a deliberate, present request.
+
+  Home can already distinguish these without new state. The idle timer starts on the content-free `playback_complete` activity event, so the idle tail is exactly *last activity was `playback_complete` and the idle deadline has not expired*. Never treat a claim with no recorded activity as idle — a granted-but-unopened claim is not an idle tail, and is covered by the separate 90-second first-open expiry.
 
 - **Binding lives in credential scope, not configuration.** The Room/Profile pair is fixed when the device is approved, alongside the existing exact wake-mapping grants. The panel has no Profile picker and never learns a Profile ID. Later configuration edits affect only future approvals, matching the HOME-NW-05 rule that active conversations retain their original binding.
 
@@ -81,7 +89,7 @@ Response, granted:
 | `unauthorized` | Unauthenticated, unknown device, or changed credential generation |
 | `touch_claim_unavailable` | Scope lacks the `touch_claim` capability or carries no `touch_binding` |
 | `stale_configuration` | Claim names a revision older than current; device must refresh |
-| `room_busy` | The bound Room already has an active claim |
+| `room_busy` | The bound Room holds a live claim — capture, turn, or playback outstanding |
 | `profile_unavailable` | Bound Profile is unavailable or revoked at grant time |
 | `conversation_active` | This device already holds an active claim |
 | `configuration_migration_required` | Legacy snapshot shape, as on the wake route |
@@ -91,7 +99,10 @@ Response, granted:
 | Scenario | Expected behavior | Failure handling |
 |----------|--------------------|------------------|
 | Valid tap, free Room | Grant immediately; return opaque handle bound to the scope's Room/Profile | — |
-| Room holds an active wake claim | Deny `room_busy`; the active conversation is untouched | No preemption, no queueing, no loser promotion |
+| Room holds a live claim (capture, turn, or playback) | Deny `room_busy`; the active conversation is untouched | No preemption, no queueing, no loser promotion |
+| Room holds a claim in its idle tail | Close it `superseded_by_touch` and grant the tap | Closure follows the ordinary close path; no replay, no Session reuse |
+| `playback_complete` arrives after the idle deadline passed | Treat the claim as expired, not idle | Post-deadline activity must not revive an expired deadline (HOME-NW-05 precedent) |
+| Room holds a granted-but-unopened claim | Deny `room_busy`; this is not an idle tail | The 90-second first-open expiry releases it on its own |
 | Device taps twice | Second tap denied `conversation_active` while the first claim lives | Terminal turn event frees the binding for the next tap |
 | Scope has capability but no binding | Deny `touch_claim_unavailable` | Empty grant is the fail-closed result, not an error |
 | Profile revoked between approval and tap | Deny `profile_unavailable`; no Session created | Re-check availability at grant, not only at approval |
@@ -115,20 +126,21 @@ Response, granted:
 - [ ] Add the `touch_claim` capability and the `touch_binding` Room/Profile scope field, with approval-time validation against available Profiles and an empty-grant default.
 - [ ] Add `POST /api/v1/touch-claims` with synchronous decision, full credential/generation/revision/availability validation, and the denial-reason set above.
 - [ ] Share the conversation-claim grant path so a tap-granted handle carries the same expiry, activity, idle, close, and revocation behavior as a wake-granted one.
-- [ ] Enforce the per-Room single-active-claim rule without preemption, queueing, or loser promotion.
+- [ ] Enforce the per-Room single-active-claim rule: deny into a live Room; close an idle-tail claim `superseded_by_touch` and grant. No queueing and no loser promotion in either case.
 - [ ] Add the contract schema and README section; update `story-index.yaml` and `sprint-status.yaml`.
 - [ ] Verify with deterministic tests; record results in `validation-home-nw-16.md`.
 
 **Acceptance Criteria:**
 - An admitted Touch device receives a ready opaque handle bound to its approved Room and Profile, with no Profile or Session identifier exposed.
 - A device without the capability, without a binding, with a stale revision, or with an unavailable Profile is denied and creates no Session.
-- A tap into an occupied Room is denied and leaves the active conversation entirely undisturbed.
+- A tap into a live Room is denied and leaves the active conversation entirely undisturbed; capture, turn, and playback are each proven to deny.
+- A tap into a Room whose only claim is in its idle tail is granted, and the superseded claim is closed without replay or Session reuse.
+- A granted-but-unopened claim and an expired-deadline claim are both distinguished from an idle tail.
 - Tap-granted and wake-granted handles are indistinguishable to the bridge, including expiry, idle, close, and revocation paths.
 - No acoustic evidence, wake mapping, phrase, prompt, transcript, or audio appears anywhere on this route.
 
 ## Open Decisions
 
-- **Room contention policy.** Drafted as deny-with-`room_busy`. The alternatives are (a) queue the tap until the Room frees, or (b) let a tap preempt an idle-but-unclosed claim. This spec chooses denial because preemption can cut off a live voice turn and queueing gives the person tapping no honest immediate feedback. Worth an explicit confirmation before implementation, because it is the one rule a real household will notice.
 - **`create_from_decision` shape.** Widening the existing signature versus adding a sibling constructor is an implementation-time call; both preserve the shared close/revocation surface.
 
 ## Design Notes
@@ -140,6 +152,7 @@ Per `AGENTS.md`, this is a Home-only ticket: it changes Home's local records and
 ## Spec Change Log
 
 - 2026-09-21 — Drafted as the Home-owned Touch admission predecessor named in TUI `STD-7`, reusing the HOME-NW-05 conversation-claim machinery through a separate non-acoustic route.
+- 2026-09-21 — Room contention decided: deny into a live Room, supersede an idle-tail claim. Replaces the drafted deny-always rule; removes the corresponding open decision.
 
 ## Verification
 
