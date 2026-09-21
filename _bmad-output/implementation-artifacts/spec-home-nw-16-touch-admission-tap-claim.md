@@ -2,7 +2,7 @@
 title: 'HOME-NW-16 — Admit Touch panels and grant bound tap-to-talk claims'
 type: 'feature'
 created: '2026-09-21'
-status: 'review'
+status: 'done'
 baseline_commit: 'ebbbe01'
 route: 'dispatch'
 review_loop_iteration: 0
