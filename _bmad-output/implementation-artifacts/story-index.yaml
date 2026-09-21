@@ -105,3 +105,9 @@ stories:
     spec: _bmad-output/implementation-artifacts/spec-next-wave-planned.md
     github_issue: https://github.com/achappell/hermes-relay-home/issues/40
     horizon: later
+  - id: HOME-NW-16
+    title: Admit Touch panels and grant bound tap-to-talk claims
+    kind: next-wave
+    spec: _bmad-output/implementation-artifacts/spec-home-nw-16-touch-admission-tap-claim.md
+    horizon: now
+    unblocks: TUI STD-7
