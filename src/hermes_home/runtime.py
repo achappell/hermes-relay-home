@@ -237,6 +237,7 @@ def create_runtime(
     diagnostics_store: SQLiteDiagnosticsStore | None = None
     credential_store = None
     conversation_store = None
+    credential_service: CredentialService | None = None
     server: ThreadingHTTPServer | None = None
     bridge_server = None
     bridge_thread = None
@@ -280,6 +281,12 @@ def create_runtime(
             store=diagnostics_store,
             metrics=metrics,
         )
+
+        def resolve_credential_scope(device_id: str, generation: int):
+            if credential_service is None:
+                return None
+            return credential_service.current_scope(device_id, generation)
+
         if settings.standard_gateway_url is not None or bridge_factory is not None:
             from hermes_home.bridge.production import ConversationGrantStore
 
@@ -288,8 +295,8 @@ def create_runtime(
                 configuration=store.read,
                 idle_timeout_seconds=settings.conversation_idle_timeout_seconds,
                 route_id=settings.bridge_route_id,
+                credential_scope_resolver=resolve_credential_scope,
             )
-        credential_service = None
         if settings.credential_root_secret is not None:
             credential_store = SQLiteCredentialStore(settings.database_path)
             credential_service = CredentialService(

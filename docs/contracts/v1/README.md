@@ -66,6 +66,19 @@ Set it to `true` only for a Device with an active user interface that can
 present and confirm choices. Passive Room Displays and audio-only Pucks remain
 read-only for typed choices unless their role changes deliberately.
 
+The optional Device capabilities `sensitive_entry` and
+`consequence_confirm` also default to `false`. A protected prompt is authorized
+only when the current Device configuration and the current credential scope
+both contain the matching capability; omission from either side denies it.
+`secret.request` and `sudo.request` accept one current value of at most 4096
+UTF-8 bytes through the existing structured response operation, while
+`approval.request` requires `consequence_confirm` even when it contains no
+secret value. Home exposes only an allowlisted prompt projection and a fixed
+safe response envelope. Protected values are not written to ordinary
+transcripts, history, Watch output, or diagnostics, and the upstream Standard
+operation must provide the same privacy boundary; Home does not replace that
+storage guarantee.
+
 `PUT /api/v1/configuration` replaces the complete configuration atomically:
 
 ```json

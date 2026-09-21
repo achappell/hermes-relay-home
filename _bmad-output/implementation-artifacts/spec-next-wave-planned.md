@@ -112,19 +112,22 @@ boundary is unavailable without opening or changing a conversation.
 
 ### Outcome
 
-Home can grant each endpoint a bounded capability set and show protected
-configuration fields without leaking their values.
+Home can grant each endpoint a bounded capability set and route protected
+structured prompts without leaking their values.
 
 ### Acceptance criteria
 
 - Permissions are explicit per endpoint and capability; discovery never grants
   access.
-- Read, propose, and apply operations are distinct and checked by Home.
-- Sensitive Entry values are masked at rest, in responses, logs, diagnostics,
-  previews, and notifications.
+- `sensitive_entry` and `consequence_confirm` are explicit per-device
+  capabilities, intersected with the current credential scope.
+- Protected prompt values are memory-only, bounded, and excluded from ordinary
+  responses, logs, diagnostics, previews, and notifications.
 - Revocation and expiry remove access on the next authorized request and do
   not mutate an active conversation.
 - Unauthorized, stale, and malformed requests fail closed with safe reasons.
+- Configuration read/propose/apply and shared-artifact mutation belong to
+  HOME-NW-12 and are not part of this story.
 
 ### Dependencies
 

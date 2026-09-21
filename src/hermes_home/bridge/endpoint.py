@@ -22,6 +22,9 @@ from hermes_home.bridge.choice_authority import (
 )
 from hermes_home.bridge.routes import HOME_BRIDGE_PATH
 from hermes_home.bridge.standard import (
+    MAX_PROTECTED_INPUT_BYTES,
+    PROTECTED_PROMPT_EXPIRY_TYPES,
+    PROTECTED_PROMPT_TYPES,
     AudioFrame,
     BridgeAuthorizationError,
     BridgeCapabilityUnavailable,
@@ -33,6 +36,7 @@ from hermes_home.bridge.standard import (
     BridgeTransportError,
     BridgeTurn,
     GatewayRPCError,
+    endpoint_safe_payload,
 )
 from hermes_home.observability.diagnostics import DiagnosticEvent, DiagnosticsRecorder
 
@@ -785,10 +789,25 @@ class BridgeEndpoint:
         _validate_prompt_response(event, response)
         if bridge is None:  # pragma: no cover - _require_ready proves this
             raise _RequestError("hermes_unavailable")
+        protected_prompt = event.type in PROTECTED_PROMPT_TYPES
+        prompt_key = (handle, turn_id, correlation_id, event_type)
+        if protected_prompt:
+            # A protected response is one-shot. Remove the pending entry before
+            # crossing the transport boundary so neither known rejection nor
+            # delivery uncertainty creates a secret retry path.
+            with self._state_lock:
+                self._pending_prompts.pop(prompt_key, None)
         try:
             result = bridge.respond_prompt(event, dict(response))
         except Exception as error:  # noqa: BLE001 - injected bridge is untrusted
             self._raise_bridge_error(error)
+        if protected_prompt:
+            return _protected_response_result_payload(
+                result,
+                handle=handle,
+                turn_id=turn_id,
+                event_type=event_type,
+            )
         try:
             safe_result = _result_payload(
                 result,
@@ -800,9 +819,7 @@ class BridgeEndpoint:
             raise
         if not _has_remaining_questions(safe_result):
             with self._state_lock:
-                self._pending_prompts.pop(
-                    (handle, turn_id, correlation_id, event_type), None
-                )
+                self._pending_prompts.pop(prompt_key, None)
         return safe_result
 
     def _choice_respond(
@@ -1241,6 +1258,8 @@ class BridgeEndpoint:
                         "choice_revision_limit", delivery="known"
                     ) from error
                 raise _RequestError("protocol_error", delivery="uncertain") from error
+        elif event.type in PROTECTED_PROMPT_TYPES | PROTECTED_PROMPT_EXPIRY_TYPES:
+            safe_payload = endpoint_safe_payload(event.type, event.payload)
         else:
             safe_payload = _safe_public_mapping(event.payload)
         if event.type in _STRUCTURED_PROMPT_FIELDS:
@@ -1253,6 +1272,15 @@ class BridgeEndpoint:
                 event.type,
             )
             with self._state_lock:
+                if event.type in PROTECTED_PROMPT_TYPES:
+                    for pending_key in tuple(self._pending_prompts):
+                        if (
+                            pending_key[0] == handle
+                            and pending_key[1] == event.turn_id
+                            and pending_key[3] in PROTECTED_PROMPT_TYPES
+                            and pending_key != key
+                        ):
+                            self._pending_prompts.pop(pending_key, None)
                 self._pending_prompts[key] = event
         elif event.type in _PROMPT_EXPIRY_TYPES:
             if event.turn_id is not None and event.correlation_id is not None:
@@ -2132,6 +2160,64 @@ def _result_payload(
     return result
 
 
+def _protected_response_result_payload(
+    value: object,
+    *,
+    handle: str,
+    turn_id: str,
+    event_type: str,
+) -> dict[str, object]:
+    operations = {
+        "approval.request": "approval.respond",
+        "secret.request": "secret.respond",
+        "sudo.request": "sudo.respond",
+    }
+    operation = operations.get(event_type)
+    if operation is None:
+        raise _RequestError("protocol_error", delivery="uncertain")
+    if not isinstance(value, Mapping):
+        raise _RequestError("protocol_error", delivery="uncertain")
+    for key in ("accepted", "resolved"):
+        if key in value and type(value[key]) is not bool:
+            raise _RequestError("protocol_error", delivery="uncertain")
+    status = value.get("status")
+    if status is not None and type(status) is not str:
+        raise _RequestError("protocol_error", delivery="uncertain")
+    if value.get("accepted") is False or value.get("resolved") is False:
+        raise _RequestError("request_rejected")
+    if isinstance(status, str) and status.casefold() in {
+        "rejected",
+        "denied",
+        "expired",
+        "failed",
+        "error",
+    }:
+        raise _RequestError("request_rejected")
+    if not (
+        value.get("accepted") is True
+        or value.get("resolved") is True
+        or (
+            isinstance(status, str)
+            and status.casefold()
+            in {
+                "ok",
+                "accepted",
+                "resolved",
+                "complete",
+                "completed",
+            }
+        )
+    ):
+        raise _RequestError("protocol_error", delivery="uncertain")
+    return {
+        "schema": HOME_BRIDGE_SCHEMA,
+        "conversation_handle": handle,
+        "turn_id": turn_id,
+        "status": "accepted",
+        "operation": operation,
+    }
+
+
 def _choice_unavailable_result(
     *,
     handle: str,
@@ -2244,6 +2330,13 @@ def _validate_prompt_response(
                 raise _RequestError("invalid_request", rpc_code=-32602)
     elif type(value) is not str or not value:
         raise _RequestError("invalid_request", rpc_code=-32602)
+    elif event_type in {"secret.request", "sudo.request"}:
+        try:
+            byte_count = len(value.encode("utf-8"))
+        except UnicodeEncodeError as error:
+            raise _RequestError("invalid_request", rpc_code=-32602) from error
+        if byte_count > MAX_PROTECTED_INPUT_BYTES:
+            raise _RequestError("invalid_request", rpc_code=-32602)
 
 
 def _has_remaining_questions(result: Mapping[str, object]) -> bool:

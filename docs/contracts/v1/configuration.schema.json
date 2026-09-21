@@ -75,6 +75,16 @@
               "type": "boolean",
               "default": false,
               "description": "Explicitly permits this Device to answer typed choice prompts. Omission denies choice actions."
+            },
+            "sensitive_entry": {
+              "type": "boolean",
+              "default": false,
+              "description": "Explicitly permits this Device to submit one current Sensitive Entry value. Omission denies secret and sudo entry."
+            },
+            "consequence_confirm": {
+              "type": "boolean",
+              "default": false,
+              "description": "Explicitly permits this Device to confirm a current consequence-bearing approval. Omission denies approval actions."
             }
           }
         }
