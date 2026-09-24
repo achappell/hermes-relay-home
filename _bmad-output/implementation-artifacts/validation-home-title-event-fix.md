@@ -75,3 +75,9 @@ After repair: focused bridge/endpoint/server suites **238 passed in 3.07s**; ful
 - Verification-gap review layer: no gaps found; no change required.
 
 After this correction, only the edited Standard bridge test file was run: **131 passed**. Ruff checks for the edited Python files passed. Full verification is delegated to the main agent.
+
+## Concurrent-client deployment and actual TUI verification
+
+Final Home suite after review correction: **698 passed in 7.46s**. Deployed runtime revision `e2a8521aa100cd5c6ea58be2b5ce263f8a34eda7`, wheel SHA-256 `9227cfd1bdb4c687ff0fbdd14214a33e9de78937e71632e24de233a46198bcc2`. All 32 installed Python sources match and the target repair record was updated. The original two-client reproduction now completes a text/audio turn with both connections open and both claims close successfully.
+
+A separate live `HermesStreamingApp.run_test()` check used the real paired Home transport and normal app event path, held a second connection open, waited 30 seconds, then submitted a fresh synthetic message. At 10, 20 and 30 seconds the app remained connected/ready. The turn returned true with connection connected, voice ready and prompt completed; both claims closed successfully. This covers the actual app/concurrent-connection condition missed by the earlier isolated adapter probe. Amanda was asked to retry her terminal after the Home restart; human confirmation remains pending. Standard Hermes was not modified.
