@@ -397,7 +397,8 @@ The client shows the returned confirmation code and polls
 ```
 
 Clients must store the credential in the platform secure store and keep it per
-Home. Profile IDs never reach a client; `grant_id` and `label` do.
+Home. A Device credential is always 32 random bytes encoded as 43 unpadded
+base64url characters; clients may validate that shape. Profile IDs never reach a client; `grant_id` and `label` do.
 
 **Staying paired.** Credentials last 90 days. A client renews itself with
 `POST /api/v1/devices/{device_id}/credentials/renew` during the last 14 days,

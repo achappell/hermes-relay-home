@@ -74,6 +74,9 @@ uppercase `confirmation_code` from an unambiguous display alphabet; it is
 display-only and never authorizes anything. Home stores only a keyed digest of
 the enrollment code. Scanning creates a pending request and cannot grant
 access. Approval and initial credential issuance/consumption are atomic.
+Consumed Device credentials and their replacements use a separate 32-byte
+token factory (`secrets.token_urlsafe(32)`, 43 unpadded base64url characters),
+matching the Home wire representation that clients validate.
 
 An issued credential is valid for 90 days. Endpoint renewal is available only
 in the final 14 days; an expired credential must re-enroll. A successful
