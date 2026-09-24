@@ -5,6 +5,8 @@ updated: 2026-09-13
 source_commit: 2237be355906fbe6065ce1815711eee52b2d646e
 ---
 
+> **Approved correction (2026-09-23):** The [delivery contract](../../implementation-artifacts/course-correction-2026-09-23.md) supersedes conflicting mode, authentication, rollback, timing and session clauses below. Both modes require unmodified Standard. Home mode uses Home credentials; direct personal mode uses supported Standard authentication. The old fork path is retired under HOME-MIG-09; direct Standard remains supported.
+
 # Pinned Standard Hermes Baseline
 
 This is the immutable Story 1 baseline for the Standard Hermes migration. Test

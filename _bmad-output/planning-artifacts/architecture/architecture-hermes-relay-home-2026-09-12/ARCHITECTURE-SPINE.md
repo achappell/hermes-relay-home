@@ -48,6 +48,8 @@ companions:
   - ../../../specs/spec-standard-hermes-compatibility-migration/compatibility-and-rollout.md
 ---
 
+> **Approved architecture amendment (2026-09-23):** Home pairing starts on an authenticated Home page; AD-7 first-approver assumptions are superseded. Personal clients use Profile grants without Room/acoustic admission. Both modes use unmodified Standard, and direct personal clients authenticate separately. See [delivery contract](../../../implementation-artifacts/course-correction-2026-09-23.md) for session recovery and retirement rules.
+
 # Architecture Spine — Hermes Relay Home
 
 ## Design Paradigm

@@ -1,27 +1,40 @@
+# Active epic parents are in story-index.yaml; numeric story prefixes remain historical.
 schema_version: 1
 generated: 2026-09-12
-last_updated: 2026-09-21
+last_updated: '2026-09-23'
 project: hermes-relay-home
 tracking_system: file-system
 status_authority: local
 story_location: _bmad-output/implementation-artifacts
 development_status:
+  epic-1: in-progress
   spec-home-service-foundation: done
-  next-wave: in-progress
   home-nw-01-standard-compatibility-boundary: done
   home-nw-02-pairing-limited-credentials: done
   home-nw-03-approved-local-bridge-route: done
   home-nw-04-route-roaming-identity-proof: done
+  home-nw-17-client-pairing-and-direct-admission: backlog
+  epic-3: in-progress
   home-nw-05-profile-mappings-conversation-claims: done
+  home-nw-13-custom-wake-phrases: backlog
+  home-nw-16-touch-admission-tap-claim: done
+  epic-4: backlog
+  home-nw-15-linux-macos-safe-deployment: backlog
+  home-mig-09-pilot-cutover-and-retirement: backlog
+  epic-5: backlog
+  4-c-1: backlog
+  epic-6: done
   home-nw-06-diagnostics-incident-review: done
-  home-nw-07-typed-choice-authority: done
   home-nw-08-watch-safe-preview: done
   home-nw-09-device-health-check: done
+  epic-7: in-progress
+  home-nw-07-typed-choice-authority: done
   home-nw-10-device-permissions-sensitive-entry: review
+  epic-8: backlog
   home-nw-11-endpoint-notifications-quiet-hours: backlog
+  epic-9: backlog
   home-nw-12-shared-artifacts-propose-diff-apply: backlog
-  home-nw-13-custom-wake-phrases: backlog
   home-nw-14-arbitrary-attachment-transport: backlog
-  home-nw-15-linux-macos-safe-deployment: backlog
-  home-nw-16-touch-admission-tap-claim: done
-  home-nw-17-client-pairing-and-direct-admission: backlog
+historical_epic_status:
+  next-wave: in-progress
+epic_scheme: hermes-home-2026-09-23

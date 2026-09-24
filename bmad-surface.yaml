@@ -2,8 +2,8 @@ schema_version: 1
 repository: hermes-relay-home
 planning: bmad
 surfaces:
-  - id: HOME
-    name: Hermes Home service
+- id: HOME
+  name: Hermes Home service
 status_tracker: _bmad-output/implementation-artifacts/sprint-status.yaml
 story_index: _bmad-output/implementation-artifacts/story-index.yaml
 coordination_authority: product-hub
@@ -22,3 +22,9 @@ story_aliases:
   home-nw-12-shared-artifacts-propose-diff-apply: HOME-NW-12
   home-nw-13-custom-wake-phrases: HOME-NW-13
   home-nw-14-arbitrary-attachment-transport: HOME-NW-14
+  spec-home-service-foundation: SPEC-home-service-foundation
+  home-nw-15-linux-macos-safe-deployment: HOME-NW-15
+  home-nw-16-touch-admission-tap-claim: HOME-NW-16
+  home-nw-17-client-pairing-and-direct-admission: HOME-NW-17
+  home-mig-09-pilot-cutover-and-retirement: HOME-MIG-09
+  4-c-1: 4-C-1

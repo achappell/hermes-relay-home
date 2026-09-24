@@ -7,34 +7,77 @@ stories:
     kind: local-foundation
     spec: _bmad-output/specs/spec-home-service-foundation/SPEC.md
     validation: tests
+    tracker_key: spec-home-service-foundation
+    product_epic: 1
+    owner: hermes-relay-home
+    release_scope: migration
+    depends_on: []
+    acceptance_overlay: _bmad-output/implementation-artifacts/course-correction-2026-09-23.md
   - id: HOME-NW-01
     title: Pin and prove the Standard Hermes compatibility boundary
     kind: next-wave
     spec: _bmad-output/specs/spec-standard-hermes-compatibility-migration/SPEC.md
     validation: _bmad-output/implementation-artifacts/validation-home-nw-01.md
     github_issue: https://github.com/achappell/hermes-relay-home/issues/11
-    horizon: now
+    tracker_key: home-nw-01-standard-compatibility-boundary
+    product_epic: 1
+    owner: hermes-relay-home
+    release_scope: migration
+    depends_on: []
+    acceptance_overlay: _bmad-output/implementation-artifacts/course-correction-2026-09-23.md
+    historical_horizon: now
   - id: HOME-NW-02
     title: Pair endpoints with QR enrollment and limited credentials
     kind: next-wave
     spec: _bmad-output/implementation-artifacts/spec-home-nw-02-pairing-credentials.md
     validation: _bmad-output/implementation-artifacts/validation-home-nw-02.md
     github_issue: https://github.com/achappell/hermes-relay-home/issues/12
-    horizon: now
+    tracker_key: home-nw-02-pairing-limited-credentials
+    product_epic: 1
+    owner: hermes-relay-home
+    release_scope: migration
+    depends_on: []
+    acceptance_overlay: _bmad-output/implementation-artifacts/course-correction-2026-09-23.md
+    historical_horizon: now
   - id: HOME-NW-03
     title: Serve the versioned Home bridge over one approved local route
     kind: next-wave
     spec: _bmad-output/implementation-artifacts/spec-home-nw-03-approved-local-bridge-route.md
     validation: _bmad-output/implementation-artifacts/validation-home-nw-03.md
     github_issue: https://github.com/achappell/hermes-relay-home/issues/13
-    horizon: now
+    tracker_key: home-nw-03-approved-local-bridge-route
+    product_epic: 1
+    owner: hermes-relay-home
+    release_scope: migration
+    depends_on: []
+    acceptance_overlay: _bmad-output/implementation-artifacts/course-correction-2026-09-23.md
+    historical_horizon: now
   - id: HOME-NW-04
     title: Add approved-route roaming and same-household identity proof
     kind: next-wave
     spec: _bmad-output/specs/spec-home-bridge-route-roaming/SPEC.md
     validation: _bmad-output/implementation-artifacts/validation-home-nw-04.md
     github_issue: https://github.com/achappell/hermes-relay-home/issues/14
-    horizon: next
+    tracker_key: home-nw-04-route-roaming-identity-proof
+    product_epic: 1
+    owner: hermes-relay-home
+    release_scope: migration
+    depends_on: []
+    acceptance_overlay: _bmad-output/implementation-artifacts/course-correction-2026-09-23.md
+    historical_horizon: next
+  - id: HOME-NW-17
+    title: Pair personal clients from a Home page and admit their direct conversations
+    kind: next-wave
+    spec: _bmad-output/implementation-artifacts/spec-home-nw-17-client-pairing-and-direct-admission.md
+    github_issue: https://github.com/achappell/hermes-relay-home/issues/52
+    unblocks: TUI Home migration, iOS and Android client claims
+    tracker_key: home-nw-17-client-pairing-and-direct-admission
+    product_epic: 1
+    owner: hermes-relay-home
+    release_scope: migration
+    depends_on: []
+    acceptance_overlay: _bmad-output/implementation-artifacts/course-correction-2026-09-23.md
+    historical_horizon: now
   - id: HOME-NW-05
     title: Add household Profile mappings and conversation claims
     kind: next-wave
@@ -42,13 +85,113 @@ stories:
     implementation_spec: _bmad-output/implementation-artifacts/spec-home-nw-05-profile-mappings-conversation-claims.md
     validation: _bmad-output/implementation-artifacts/validation-home-nw-05.md
     github_issue: https://github.com/achappell/hermes-relay-home/issues/15
-    horizon: next
+    tracker_key: home-nw-05-profile-mappings-conversation-claims
+    product_epic: 3
+    owner: hermes-relay-home
+    release_scope: migration
+    depends_on: []
+    acceptance_overlay: _bmad-output/implementation-artifacts/course-correction-2026-09-23.md
+    historical_horizon: next
+  - id: HOME-NW-16
+    title: Admit Touch panels and grant bound tap-to-talk claims
+    kind: next-wave
+    spec: _bmad-output/implementation-artifacts/spec-home-nw-16-touch-admission-tap-claim.md
+    validation: _bmad-output/implementation-artifacts/validation-home-nw-16.md
+    github_issue: https://github.com/achappell/hermes-relay-home/issues/48
+    unblocks: TUI STD-7
+    tracker_key: home-nw-16-touch-admission-tap-claim
+    product_epic: 3
+    owner: hermes-relay-home
+    release_scope: migration
+    depends_on: []
+    acceptance_overlay: _bmad-output/implementation-artifacts/course-correction-2026-09-23.md
+    historical_horizon: now
+  - id: HOME-NW-13
+    title: Add custom wake phrases after built-in mappings
+    kind: next-wave
+    spec: _bmad-output/implementation-artifacts/spec-next-wave-planned.md
+    github_issue: https://github.com/achappell/hermes-relay-home/issues/23
+    tracker_key: home-nw-13-custom-wake-phrases
+    product_epic: 3
+    owner: hermes-relay-home
+    release_scope: scope-decision
+    scope_note: Custom wake phrase migration inclusion still requires explicit decision; built-in wake admission remains required.
+    depends_on: []
+    acceptance_overlay: _bmad-output/implementation-artifacts/course-correction-2026-09-23.md
+    historical_horizon: later
+  - id: HOME-MIG-09
+    title: Run the household pilot and retire legacy dependencies
+    kind: course-correction
+    product_epic: 4
+    owner: hermes-relay-home
+    tracker_key: home-mig-09-pilot-cutover-and-retirement
+    release_scope: migration
+    spec: _bmad-output/implementation-artifacts/spec-home-mig-09-pilot-cutover-and-retirement.md
+    depends_on:
+      - epic:1
+      - epic:2
+      - epic:3
+    source_story: _bmad-output/specs/spec-standard-hermes-compatibility-migration/stories.yaml#9
+    github_issue: https://github.com/achappell/hermes-relay-home/issues/55
+  - id: HOME-NW-15
+    title: Add safe Linux and macOS deployment for other homes
+    kind: next-wave
+    spec: _bmad-output/implementation-artifacts/spec-next-wave-planned.md
+    github_issue: https://github.com/achappell/hermes-relay-home/issues/40
+    tracker_key: home-nw-15-linux-macos-safe-deployment
+    product_epic: 4
+    owner: hermes-relay-home
+    release_scope: later
+    scope_note: Broader distribution/updater scope; actual-household deployment is HOME-MIG-09.
+    depends_on: []
+    acceptance_overlay: _bmad-output/implementation-artifacts/course-correction-2026-09-23.md
+    historical_horizon: later
+  - id: 4-C-1
+    title: Evaluate shared departure reminders
+    kind: course-correction
+    product_epic: 5
+    owner: hermes-relay-home
+    tracker_key: 4-c-1
+    release_scope: later
+    spec: _bmad-output/implementation-artifacts/spec-4-c-1.md
+    depends_on: []
+    github_issue: https://github.com/achappell/hermes-relay-home/issues/56
   - id: HOME-NW-06
     title: Add content-safe diagnostics and incident review
     kind: next-wave
     spec: _bmad-output/specs/spec-household-diagnostics-incident-review/SPEC.md
     github_issue: https://github.com/achappell/hermes-relay-home/issues/16
-    horizon: now
+    tracker_key: home-nw-06-diagnostics-incident-review
+    product_epic: 6
+    owner: hermes-relay-home
+    release_scope: later
+    depends_on: []
+    acceptance_overlay: _bmad-output/implementation-artifacts/course-correction-2026-09-23.md
+    historical_horizon: now
+  - id: HOME-NW-08
+    title: Provide one read-only Watch Safe Preview
+    kind: next-wave
+    spec: _bmad-output/implementation-artifacts/spec-next-wave-planned.md
+    github_issue: https://github.com/achappell/hermes-relay-home/issues/18
+    tracker_key: home-nw-08-watch-safe-preview
+    product_epic: 6
+    owner: hermes-relay-home
+    release_scope: later
+    depends_on: []
+    acceptance_overlay: _bmad-output/implementation-artifacts/course-correction-2026-09-23.md
+    historical_horizon: later
+  - id: HOME-NW-09
+    title: Add a bounded single-device health check
+    kind: next-wave
+    spec: _bmad-output/implementation-artifacts/spec-next-wave-planned.md
+    github_issue: https://github.com/achappell/hermes-relay-home/issues/19
+    tracker_key: home-nw-09-device-health-check
+    product_epic: 6
+    owner: hermes-relay-home
+    release_scope: later
+    depends_on: []
+    acceptance_overlay: _bmad-output/implementation-artifacts/course-correction-2026-09-23.md
+    historical_horizon: later
   - id: HOME-NW-07
     title: Add freshness-bound typed-choice authority
     kind: next-wave
@@ -56,67 +199,70 @@ stories:
     implementation_spec: _bmad-output/implementation-artifacts/spec-home-nw-07-freshness-bound-typed-choice-authority.md
     validation: _bmad-output/implementation-artifacts/validation-home-nw-07.md
     github_issue: https://github.com/achappell/hermes-relay-home/issues/17
-    horizon: next
-  - id: HOME-NW-08
-    title: Provide one read-only Watch Safe Preview
-    kind: next-wave
-    spec: _bmad-output/implementation-artifacts/spec-next-wave-planned.md
-    github_issue: https://github.com/achappell/hermes-relay-home/issues/18
-    horizon: later
-  - id: HOME-NW-09
-    title: Add a bounded single-device health check
-    kind: next-wave
-    spec: _bmad-output/implementation-artifacts/spec-next-wave-planned.md
-    github_issue: https://github.com/achappell/hermes-relay-home/issues/19
-    horizon: later
+    tracker_key: home-nw-07-typed-choice-authority
+    product_epic: 7
+    owner: hermes-relay-home
+    release_scope: later
+    depends_on: []
+    acceptance_overlay: _bmad-output/implementation-artifacts/course-correction-2026-09-23.md
+    historical_horizon: next
   - id: HOME-NW-10
     title: Enforce per-device permissions and masked Sensitive Entry
     kind: next-wave
     spec: _bmad-output/implementation-artifacts/spec-next-wave-planned.md
     github_issue: https://github.com/achappell/hermes-relay-home/issues/20
-    horizon: later
+    tracker_key: home-nw-10-device-permissions-sensitive-entry
+    product_epic: 7
+    owner: hermes-relay-home
+    release_scope: later
+    depends_on: []
+    evidence_note: Tracker review conflicts with merged/spec-done evidence; reconcile closure in owner review, not by epic reparenting.
+    acceptance_overlay: _bmad-output/implementation-artifacts/course-correction-2026-09-23.md
+    historical_horizon: later
   - id: HOME-NW-11
     title: Add endpoint-scoped notifications and quiet hours
     kind: next-wave
     spec: _bmad-output/implementation-artifacts/spec-next-wave-planned.md
     github_issue: https://github.com/achappell/hermes-relay-home/issues/21
-    horizon: later
+    tracker_key: home-nw-11-endpoint-notifications-quiet-hours
+    product_epic: 8
+    owner: hermes-relay-home
+    release_scope: later
+    depends_on: []
+    acceptance_overlay: _bmad-output/implementation-artifacts/course-correction-2026-09-23.md
+    historical_horizon: later
   - id: HOME-NW-12
     title: Add shared artifacts as propose, diff, and Apply
     kind: next-wave
     spec: _bmad-output/implementation-artifacts/spec-next-wave-planned.md
     github_issue: https://github.com/achappell/hermes-relay-home/issues/22
-    horizon: later
-  - id: HOME-NW-13
-    title: Add custom wake phrases after built-in mappings
-    kind: next-wave
-    spec: _bmad-output/implementation-artifacts/spec-next-wave-planned.md
-    github_issue: https://github.com/achappell/hermes-relay-home/issues/23
-    horizon: later
+    tracker_key: home-nw-12-shared-artifacts-propose-diff-apply
+    product_epic: 9
+    owner: hermes-relay-home
+    release_scope: later
+    depends_on: []
+    acceptance_overlay: _bmad-output/implementation-artifacts/course-correction-2026-09-23.md
+    historical_horizon: later
   - id: HOME-NW-14
     title: Define a separate arbitrary-attachment transport
     kind: next-wave
     spec: _bmad-output/implementation-artifacts/spec-next-wave-planned.md
     github_issue: https://github.com/achappell/hermes-relay-home/issues/24
-    horizon: later
-  - id: HOME-NW-15
-    title: Add safe Linux and macOS deployment for other homes
-    kind: next-wave
-    spec: _bmad-output/implementation-artifacts/spec-next-wave-planned.md
-    github_issue: https://github.com/achappell/hermes-relay-home/issues/40
-    horizon: later
-  - id: HOME-NW-16
-    title: Admit Touch panels and grant bound tap-to-talk claims
-    kind: next-wave
-    spec: _bmad-output/implementation-artifacts/spec-home-nw-16-touch-admission-tap-claim.md
-    validation: _bmad-output/implementation-artifacts/validation-home-nw-16.md
-    github_issue: https://github.com/achappell/hermes-relay-home/issues/48
-    horizon: now
-    unblocks: TUI STD-7
-  - id: HOME-NW-17
-    title: Pair personal clients from a Home page and admit their direct conversations
-    kind: next-wave
-    spec: _bmad-output/implementation-artifacts/spec-home-nw-17-client-pairing-and-direct-admission.md
-    github_issue: https://github.com/achappell/hermes-relay-home/issues/52
-    horizon: now
-    unblocks: TUI Home migration, iOS and Android client claims
+    tracker_key: home-nw-14-arbitrary-attachment-transport
+    product_epic: 9
+    owner: hermes-relay-home
+    release_scope: later
+    depends_on: []
+    acceptance_overlay: _bmad-output/implementation-artifacts/course-correction-2026-09-23.md
+    historical_horizon: later
+epic_scheme: hermes-home-2026-09-23
+epics:
+  1: Connect personal clients through HomeBridge
+  2: Use personal clients with Standard Hermes alone
+  3: Set up and use room voice devices
+  4: Retire the legacy setup and deploy the replacement
+  5: See room activity and departure reminders
+  6: Observe and diagnose the household system
+  7: Make choices and provide protected input
+  8: Receive useful notifications
+  9: Work with shared artifacts and attachments
