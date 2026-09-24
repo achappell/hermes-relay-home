@@ -5856,3 +5856,102 @@ def test_real_bridge_upstream_loss_parks_endpoint_and_retains_original_uncertain
         endpoint.close()
         if runner is not None:
             runner.join(timeout=2)
+
+
+def test_explicit_close_ack_survives_concurrent_real_bridge_event_failure():
+    closing = Event()
+    idle_after_close = Event()
+    event_read_started = Event()
+
+    class QuietSocket(FakeJsonSocket):
+        def receive_json(self, timeout=None):
+            if self.incoming:
+                return self.incoming.popleft()
+            if self.closed:
+                raise ConnectionError("expected gateway close")
+            time.sleep(min(timeout or 0.01, 0.01))
+            raise TimeoutError("idle")
+
+    class ObservedBridge(HomeBridge):
+        def next_event(self):
+            event_read_started.set()
+            return super().next_event()
+
+        def close_conversation(self):
+            closing.set()
+            result = super().close_conversation()
+            # Force the event pump to process the shutdown before the close
+            # RPC can return its acknowledgment. No scheduling lottery.
+            assert idle_after_close.wait(2)
+            return result
+
+    class ObservedStop(Event):
+        def wait(self, timeout=None):
+            if closing.is_set():
+                idle_after_close.set()
+            return super().wait(timeout)
+
+    class Peer:
+        def __init__(self):
+            self.closed = False
+            self.sent = []
+
+        def send(self, message):
+            assert not self.closed, "close acknowledgment lost behind socket close"
+            self.sent.append(json.loads(message))
+
+        def close(self, **kwargs):
+            self.closed = True
+
+    socket = QuietSocket(
+        [
+            _event("gateway.ready", {"capabilities": {}}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {"session_id": "runtime-1", "stored_session_id": "stored-1"},
+            },
+        ]
+    )
+    bridge = ObservedBridge(
+        gateway_url="wss://hermes.example/api/ws",
+        hermes_token="server-secret",
+        device_authenticator=StaticCredentialAuthenticator(
+            admin_token="admin-secret",
+            device_credentials={"device-secret": "tui-device"},
+        ),
+        conversation_resolver=lambda handle, device_id: ConversationGrant(
+            handle=handle, device_id=device_id, profile_id="family"
+        ),
+        gateway_socket_factory=FakeSocketFactory(socket),
+    )
+    peer = Peer()
+    endpoint = BridgeEndpoint(
+        peer, bridge, headers={"Authorization": "Device device-secret"}
+    )
+    endpoint._stop = ObservedStop()
+    try:
+        for request_id, method in [
+            ("open", "conversation.open"),
+            ("close", "conversation.close"),
+        ]:
+            if request_id == "close":
+                assert event_read_started.wait(2)
+            response = endpoint.handle_message(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "schema": 1,
+                        "id": request_id,
+                        "method": method,
+                        "params": {"conversation_handle": "opaque-1"},
+                    }
+                )
+            )
+        assert response["result"]["status"] == "closed"
+        assert peer.sent[-1]["id"] == "close"
+        assert peer.sent[-1]["result"]["status"] == "closed"
+        assert not peer.closed
+        assert socket.closed
+    finally:
+        endpoint.close()

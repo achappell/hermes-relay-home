@@ -1,5 +1,5 @@
 ---
-status: passed-local
+status: deployed-verified-source
 validated: 2026-09-23
 baseline_commit: d2447f684a143817f7b5688b597c11aa053bb672
 ---
@@ -22,7 +22,7 @@ The personal-client live trial accepted a turn but never displayed its completed
 
 `uvx ruff check src tests`: passed. `uvx ruff format --check src tests`: 68 files already formatted. `git diff --check`: passed.
 
-No Standard Hermes changes, deployment, service restart, or commits were made. Live validation of this candidate remains pending.
+Home repair commit `2dc6ee7bde443d8fb9cd4dba7c17f8e22eb4921b` was deployed during the authorized live trial. The candidate wheel SHA-256 is `6f08944bf8b9ae38311a678083d514968c9feadfaa629ed7c3182a1d6c7ddd4a`; all 32 installed Python source files match the reviewed tree. Only the Home scheduled task was restarted, with dependencies, settings, credentials and database preserved. The pairing page passed readiness. A fresh paired TUI adapter probe received the assistant text and message completion, confirming the original title-event stall is repaired. The probe then exposed a separate TUI assumption that audio.end must precede message.complete; that client correction is tracked in TUI-HOME-01. No Standard Hermes changes were made.
 
 ## Deployment boundary
 
@@ -35,3 +35,15 @@ The Windows installer can clear omitted Standard connection settings and also up
 - Combined disconnect/parking uncertainty: tolerable verification gap, now closed. `test_real_bridge_upstream_loss_parks_endpoint_and_retains_original_uncertain_turn` runs a real HomeBridge and BridgeEndpoint with a failing synthetic gateway through `run(park_on_disconnect=True)`. It verifies close code 1011, a parked recoverable endpoint, real bridge state `turn_uncertain`, authenticated adoption exposing the original uncertain turn ID, and exactly one upstream prompt. `test_bridge_reconnects_by_resuming_without_replaying_uncertain_prompt` separately verifies upstream resume; `test_live_server_requires_reconnect_and_adopts_the_parked_turn` covers the live server's parking path.
 
 Expanded focused check after review: `uv run --python 3.14 --locked --extra dev pytest -q tests/test_standard_bridge.py tests/test_bridge_endpoint.py tests/test_bridge_server.py`: **226 passed in 2.86s**. These additions required no production-code changes.
+
+## Deployment evidence
+
+The target retains the previous wheel and installed-package backup under `C:\ProgramData\HermesHome\repairs\title-event-20260923`. Rollback wheel SHA-256: `89cf88c4422fbb8faa932123fd03499c0edca2562dcd8c88a4396dfa671cd133`. The additive `repair.json` records this verified revision. The existing signed deployment manifest predates NW-17 and was not rewritten without its signing workflow; runtime provenance consumers of that older manifest remain a separate operational limitation.
+
+## Follow-up: explicit close acknowledgment race
+
+The live trial completed text and audio, then exposed a race in the new transport-loss closure: an explicit `conversation.close` shuts down the upstream gateway while the event pump is reading, and the resulting expected error could close the client socket before the close RPC acknowledgment was sent. The endpoint now marks explicit conversation shutdown before closing the bridge and suppresses event-pump teardown of the downstream socket for that expected shutdown. A later ready binding resets the guard; genuine unexpected failures retain the 1011 close path.
+
+`test_explicit_close_ack_survives_concurrent_real_bridge_event_failure` uses a real HomeBridge and forces the event pump to process gateway shutdown before allowing the close RPC to return. It verifies the `closed` acknowledgment reaches the client while the downstream connection remains open. No Standard changes were needed.
+
+After this repair: focused Standard bridge, endpoint, and server suites **227 passed in 2.92s**; full Home suite **685 passed in 7.13s**; Ruff lint/format and whitespace checks passed. The follow-up repair has not been deployed by this agent.
