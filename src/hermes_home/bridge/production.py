@@ -1306,6 +1306,79 @@ class StandardHealthProbeProvider:
             client.close()
 
 
+class StandardSessionDirectory:
+    """List a Profile's stored Standard sessions over a short-lived connection.
+
+    Used only for personal-client session choice; the bridge itself keeps one
+    claim bound to one Session.
+    """
+
+    def __init__(
+        self,
+        *,
+        gateway_url: str,
+        hermes_token: str,
+        socket_factory: object | None = None,
+        timeout: float = 5.0,
+    ) -> None:
+        _validate_gateway_url(gateway_url)
+        if not isinstance(hermes_token, str) or not hermes_token.strip():
+            raise ValueError("Standard gateway token must be non-empty")
+        self._gateway_url = gateway_url
+        self._hermes_token = hermes_token
+        self._timeout = _positive_timeout(timeout)
+        self._socket_factory = socket_factory or WebsocketsJsonSocketFactory(
+            open_timeout=self._timeout
+        )
+
+    def list_sessions(self, profile_id: str, limit: int) -> list[dict[str, object]]:
+        result = self._request("session.list", {"profile": profile_id, "limit": limit})
+        rows = result.get("sessions")
+        if not isinstance(rows, list):
+            raise BridgeProtocolError("Standard session list is malformed")
+        sessions: list[dict[str, object]] = []
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            session_id = row.get("id")
+            if not isinstance(session_id, str) or not session_id:
+                continue
+            title = row.get("title")
+            started_at = row.get("started_at")
+            message_count = row.get("message_count")
+            sessions.append(
+                {
+                    "id": session_id,
+                    "title": title if isinstance(title, str) else "",
+                    "started_at": started_at if type(started_at) in (int, float) else 0,
+                    "message_count": message_count if type(message_count) is int else 0,
+                }
+            )
+        return sessions
+
+    def most_recent(self, profile_id: str) -> str | None:
+        result = self._request("session.most_recent", {"profile": profile_id})
+        session_id = result.get("session_id")
+        return session_id if isinstance(session_id, str) and session_id else None
+
+    def _request(
+        self, method: str, params: Mapping[str, object]
+    ) -> Mapping[str, object]:
+        client = StandardGatewayClient(
+            url=self._gateway_url,
+            token=self._hermes_token,
+            socket_factory=self._socket_factory,
+            connect_timeout=self._timeout,
+            request_timeout=self._timeout,
+            event_timeout=self._timeout,
+        )
+        try:
+            client.connect()
+            return client.request(method, dict(params))
+        finally:
+            client.close()
+
+
 def create_standard_bridge_factory(
     *,
     gateway_url: str,
