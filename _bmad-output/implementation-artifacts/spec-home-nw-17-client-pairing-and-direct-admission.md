@@ -48,7 +48,7 @@ Once paired, a client stays paired: it renews its own credential automatically i
 - **No Room, no arbitration, no preemption.** A personal client is not a household room device. Its claims are keyed by device and grant. Several terminal windows on one laptop are several clients of the same device, so a device may hold several active claims per grant, bounded by `HERMES_HOME_CLIENT_CLAIMS_PER_DEVICE` (default 8); excess claims are denied `claim_limit`.
 - **The client owns the session lifecycle, Home owns authority.** A client claim has no idle timer and no first-turn session binding. It stays active while the client holds its bridge connection, through the existing in-process reconnect path, and closes when the client sends `conversation.close`, when its connection is gone past the reconnect grace (`HERMES_HOME_CLIENT_RECONNECT_GRACE_SECONDS`, default 120), or on revocation. Home never decides that a conversation has ended because the user paused; the Room idle tail and first-open expiry remain wake/tap-claim rules only.
 - **Session operations are stock Standard operations.** After `conversation.open`, a client-claim connection may call `session.list`, `session.create`, `session.resume`, `session.most_recent`, `session.title`, and `session.history` with their stock Standard semantics. Home forwards each to the claim's Profile and nowhere else, and rewrites Standard Session IDs to opaque, Home-issued `session_ref` values that are valid only for that grant. A `session_ref` from another grant or device is `session_unavailable`. `session.delete`, `session.branch`, `session.redirect`, and control/configuration operations are not exposed.
-- **Sessions are per Profile, as in a CLI.** `session.list` returns the Profile's Standard sessions, the same view a Hermes CLI signed in to that Profile would see, so a conversation started in the TUI can be resumed on the phone paired to the same Profile. The list is bounded (default 50, newest first) and carries only `session_ref`, title, last-active time, and message count.
+- **Sessions are per Profile, as in a CLI.** `session.list` returns the Profile's Standard sessions, the same view a Hermes CLI signed in to that Profile would see, including conversations started by Room devices (Puck, Touch panel, W/K) and by other paired clients, so a conversation started anywhere can be resumed from any client paired to the same Profile. The list is bounded (default 50, newest first) and carries only `session_ref`, title, last-active time, and message count.
 - **Resume never replays.** Resuming a session restores Hermes's stored history; any turn left uncertain by a disconnect stays unresolved and is reported, never re-sent.
 - **Long-lived pairing through automatic renewal.** The 90-day credential and 14-day renewal window stay as implemented. Clients renew on connect when inside the window, and the contract documents that obligation. A client that is unused for 90 days must pair again; the page offers "pair again" for an expired device with its previous Profiles preselected.
 - **Pending approval is a typed state.** Consuming a request that is still pending returns `approval_pending` instead of the generic `conflict`, so a client can poll plainly and show "waiting for approval on the Home page".
@@ -205,7 +205,6 @@ The client opens the bridge with `conversation.open` and its handle, then manage
 ## Open Decisions
 
 - Per-device claim limit (8 proposed) and reconnect grace (120 seconds proposed).
-- Whether `session.list` should also show sessions created by household Room devices for the Profile, or only those created by personal clients. Proposed: all of the Profile's sessions, matching a Hermes CLI.
 - Whether the page also offers "approve from a paired phone" once 3-I and 3-A exist; out of scope here.
 
 ## Consuming Stories
@@ -217,6 +216,7 @@ The client opens the bridge with `conversation.open` and its handle, then manage
 
 - 2026-09-23: Drafted from the TUI Home migration investigation.
 - 2026-09-23: Replaced Home-decided continuity (client idle timeout and automatic resume) with a client-owned session lifecycle, per Amanda: the TUI manages sessions like a regular CLI.
+- 2026-09-23: Resolved per Amanda: `session.list` shows the Profile's conversations from every surface, including Room devices and other paired clients.
 
 ## Verification
 
