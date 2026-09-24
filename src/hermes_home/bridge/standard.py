@@ -1438,13 +1438,30 @@ class HomeBridge:
             raise BridgeAuthorizationError("conversation_mismatch")
 
         with self._state_lock:
+            current = self._grant
+            # Concurrent event polling and prompt admission both refresh this
+            # immutable snapshot. Equal authority is not a changed binding.
+            # First-turn persistence may also promote its empty session ID to
+            # the already validated durable ID while the resolver is reading.
+            same_authority = (
+                current is not None
+                and current == replace(grant, session_id=current.session_id)
+                and current.protected_capabilities == grant.protected_capabilities
+                and current.capability_revision == grant.capability_revision
+                and (current.session_id or None)
+                in (grant.session_id or None, expected_resume_id or None)
+            )
             if (
                 self._gateway is not gateway
                 or self._runtime_session_id != runtime_session_id
-                or self._grant is not grant
+                or not same_authority
                 or self._state != "ready"
             ):
                 raise BridgeTransportError("bridge changed during Home authorization")
+            if current.session_id and not refreshed.session_id:
+                # An older resolver snapshot must not undo accepted-turn
+                # persistence that completed while this check was in flight.
+                refreshed = replace(refreshed, session_id=current.session_id)
             self._grant = refreshed
         return gateway, runtime_session_id
 

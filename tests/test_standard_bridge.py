@@ -5993,3 +5993,126 @@ def test_reader_failure_diagnostics_exclude_private_content(
         assert "wss://" not in caplog.text
     finally:
         client.close()
+
+
+def test_concurrent_equal_claim_refreshes_do_not_invalidate_binding():
+    from threading import Barrier
+
+    barrier = Barrier(2)
+    grant = ConversationGrant("opaque-1", "puck-kitchen", "family")
+
+    def resolve(handle, device_id):
+        barrier.wait(timeout=2)
+        return ConversationGrant(handle, device_id, "family")
+
+    bridge = _make_bridge(FakeSocketFactory(FakeJsonSocket([])), resolver=resolve)
+    gateway = object()
+    with bridge._state_lock:
+        bridge._state = "ready"
+        bridge._gateway = gateway
+        bridge._runtime_session_id = "runtime-1"
+        bridge._conversation_handle = grant.handle
+        bridge._device_id = grant.device_id
+        bridge._endpoint_headers = {"Authorization": "Device device-secret"}
+        bridge._grant = grant
+    errors = []
+    results = []
+
+    def authorize():
+        try:
+            results.append(bridge._revalidate_ready_binding())
+        except BridgeTransportError as error:
+            errors.append(error)
+
+    threads = [Thread(target=authorize) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=3)
+        assert not thread.is_alive()
+    assert errors == []
+    assert results == [(gateway, "runtime-1")] * 2
+    assert bridge.state == "ready"
+
+
+@pytest.mark.parametrize(
+    "mutation, accepted",
+    [
+        ({"session_id": "stored-1"}, True),
+        ({"session_id": "different-session"}, False),
+        ({"profile_id": "other-profile"}, False),
+        ({"status": "revoked"}, False),
+        ({"credential_generation": 2}, False),
+        ({"protected_capabilities": frozenset({"sensitive_entry"})}, False),
+        ({"capability_revision": 2}, False),
+    ],
+)
+def test_refresh_preserves_persistence_but_rejects_changed_authority(
+    mutation, accepted
+):
+    from dataclasses import replace
+
+    grant = ConversationGrant("opaque-1", "puck-kitchen", "family")
+    bridge = None
+
+    def resolve(handle, device_id):
+        # Simulate an update after validation captured its snapshot but before
+        # this resolver returns that older snapshot.
+        with bridge._state_lock:
+            if accepted:
+                bridge._persist_session_after_accepted_turn()
+            else:
+                bridge._grant = replace(grant, **mutation)
+        return replace(grant)
+
+    bridge = _make_bridge(FakeSocketFactory(FakeJsonSocket([])), resolver=resolve)
+    gateway = object()
+    with bridge._state_lock:
+        bridge._state = "ready"
+        bridge._gateway = gateway
+        bridge._runtime_session_id = "runtime-1"
+        bridge._conversation_handle = grant.handle
+        bridge._device_id = grant.device_id
+        bridge._endpoint_headers = {"Authorization": "Device device-secret"}
+        bridge._grant = grant
+        bridge._resume_session_id = "stored-1"
+        bridge._unpersisted_session_id = "stored-1"
+    if accepted:
+        assert bridge._revalidate_ready_binding() == (gateway, "runtime-1")
+        assert bridge._grant.session_id == "stored-1"
+        assert bridge._unpersisted_session_id is None
+    else:
+        with pytest.raises(
+            BridgeTransportError, match="changed during Home authorization"
+        ):
+            bridge._revalidate_ready_binding()
+
+
+@pytest.mark.parametrize("original_id, refreshed_id", [(None, ""), ("", None)])
+def test_concurrent_refresh_accepts_equivalent_absent_session_ids(
+    original_id, refreshed_id
+):
+    from dataclasses import replace
+
+    grant = ConversationGrant(
+        "opaque-1", "puck-kitchen", "family", session_id=original_id
+    )
+    bridge = None
+
+    def resolve(handle, device_id):
+        with bridge._state_lock:
+            bridge._grant = replace(grant, session_id=refreshed_id)
+        return replace(grant, session_id=refreshed_id)
+
+    bridge = _make_bridge(FakeSocketFactory(FakeJsonSocket([])), resolver=resolve)
+    gateway = object()
+    with bridge._state_lock:
+        bridge._state = "ready"
+        bridge._gateway = gateway
+        bridge._runtime_session_id = "runtime-1"
+        bridge._conversation_handle = grant.handle
+        bridge._device_id = grant.device_id
+        bridge._endpoint_headers = {"Authorization": "Device device-secret"}
+        bridge._grant = grant
+    assert bridge._revalidate_ready_binding() == (gateway, "runtime-1")
+    assert bridge.state == "ready"

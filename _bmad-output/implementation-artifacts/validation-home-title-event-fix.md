@@ -57,3 +57,21 @@ Deployed revision `e4838793943b2820c62cb8f68ecfb52cabfee196` includes the close-
 Added bounded exception/cause class names and an allowlist of fixed parser failure descriptions to the Standard reader failure log and unexpected endpoint upstream-loss branches. Remote error messages, payloads, IDs, credentials, and tracebacks are not logged by these additions. Three regressions verify a recognized parser reason is recorded while arbitrary protocol messages and transport URLs containing secrets remain absent.
 
 Focused bridge/endpoint/server suites: **230 passed in 3.08s**. Ruff lint/format and whitespace checks passed. Diagnostic changes preserve connection behavior and have not been deployed by this agent.
+
+## Follow-up: concurrent authorization snapshots
+
+A deterministic barrier test proved the failure: event polling and prompt admission can both capture one grant, independently resolve fresh equal grant objects, and race to replace the cached grant. The previous object-identity check rejected the second equally authorized result with `BridgeTransportError('bridge changed during Home authorization')`. `test_concurrent_equal_claim_refreshes_do_not_invalidate_binding` failed with that exact error before the repair.
+
+The final check now compares authority values, including protected capability fields excluded from dataclass equality. It permits only a concurrent session promotion to the already validated expected durable ID, and prevents a stale resolver result from undoing accepted-turn persistence. Changed gateway/runtime/readiness or changed authority remains rejected. No broader locking or Standard modifications were introduced.
+
+The seven-case `test_refresh_preserves_persistence_but_rejects_changed_authority` exercises the real persistence helper and rejects different session, Profile, revoked status, credential generation, protected capability, and capability revision updates.
+
+After repair: focused bridge/endpoint/server suites **238 passed in 3.07s**; full Home suite **696 passed in 7.08s**; Ruff lint/format and whitespace checks passed. Live two-client and delayed-input validation remains with the main agent.
+
+## Final review outcomes
+
+- Authority comparison review: one low-severity direct correction. Normalize absent session IDs (`None` and empty string) in the session-promotion comparison, matching the preceding authorization checks. A two-direction narrow regression covers equivalent absent IDs during refresh.
+- Other review layer: no defects found; no change required.
+- Verification-gap review layer: no gaps found; no change required.
+
+After this correction, only the edited Standard bridge test file was run: **131 passed**. Ruff checks for the edited Python files passed. Full verification is delegated to the main agent.
