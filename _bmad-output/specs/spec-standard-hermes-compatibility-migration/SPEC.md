@@ -149,7 +149,7 @@ the fork.
 
 - Which capabilities are mandatory before the first default switch, and which
   may remain explicitly unavailable in the pilot?
-- Personal clients explicitly select HomeBridge or direct Standard. Both paths use unmodified Standard; room devices require HomeBridge.
+- Session-bearing surface migrations use the Home bridge first in the approved epic delivery order (Epic 1), then add explicit Standard-only personal setup (Epic 2). Personal clients select their mode deliberately. Both paths use unmodified Standard; room devices require HomeBridge.
 - Configuration conversion preserves each surface's local Profile/history
   identity and rollback credential slot while a newly issued Home credential
   is paired and verified. The exact wire and failure rules live in the Home
