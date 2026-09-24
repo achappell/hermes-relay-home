@@ -13,7 +13,7 @@ development_status:
   home-nw-02-pairing-limited-credentials: done
   home-nw-03-approved-local-bridge-route: done
   home-nw-04-route-roaming-identity-proof: done
-  home-nw-17-client-pairing-and-direct-admission: backlog
+  home-nw-17-client-pairing-and-direct-admission: review
   epic-3: in-progress
   home-nw-05-profile-mappings-conversation-claims: done
   home-nw-13-custom-wake-phrases: backlog

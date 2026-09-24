@@ -953,3 +953,54 @@ def test_paired_mode_does_not_fall_back_to_static_device_credentials(tmp_path) -
     finally:
         configuration_store.close()
         credential_store.close()
+
+
+def test_credential_state_written_before_client_grants_still_loads(tmp_path) -> None:
+    path = tmp_path / "credentials.sqlite3"
+    store = SQLiteCredentialStore(path)
+    tokens = iter(["enrollment-code", "device-secret"])
+    service = CredentialService(
+        store=store,
+        root_secret=b"r" * 32,
+        clock=lambda: 1_000.0,
+        token_factory=lambda: next(tokens),
+        confirmation_factory=lambda: "ABCD2345",
+    )
+    offer = service.create_offer()
+    request = service.submit_request(
+        enrollment_code=offer.enrollment_code,
+        endpoint_id="puck-1",
+        label="Kitchen Puck",
+        endpoint_type="puck",
+        requested_rooms=["kitchen"],
+        requested_capabilities=["wake_claim"],
+        secure_storage="platform_secure_store",
+    )
+    from hermes_home.domain.credentials import CredentialScope
+
+    service.approve_request(
+        request.request_id,
+        CredentialScope.from_values(rooms=["kitchen"], capabilities=["wake_claim"]),
+        configured_rooms=["kitchen"],
+    )
+    material = service.consume_request(
+        request.request_id,
+        enrollment_code=offer.enrollment_code,
+        secure_storage="platform_secure_store",
+    )
+    legacy = json.loads(
+        store._connection.execute(
+            "SELECT state FROM credential_state WHERE id = 1"
+        ).fetchone()[0]
+    )
+    legacy.pop("client_grants")
+    store._connection.execute(
+        "UPDATE credential_state SET state = ? WHERE id = 1", (json.dumps(legacy),)
+    )
+    store._connection.commit()
+
+    authenticated = service.authenticate_device(material.credential)
+
+    assert authenticated is not None
+    assert authenticated.device_id == material.device_id
+    assert service.client_grants(material.device_id) == ()

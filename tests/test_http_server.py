@@ -101,3 +101,55 @@ def test_loopback_server_rejects_an_oversized_request_before_reading_it(
         server.server_close()
         thread.join(timeout=2)
         store.close()
+
+
+def test_real_server_delivers_pairing_cookie_and_security_headers(tmp_path) -> None:
+    from hermes_home.domain.credentials import CredentialService
+    from hermes_home.storage.credentials import SQLiteCredentialStore
+
+    store = SQLiteConfigurationStore(tmp_path / "home.sqlite3")
+    application = HomeApplication(
+        configuration_store=store,
+        arbitration_engine=ArbitrationEngine(configuration=store.read),
+        admin_token="admin-secret",
+        device_credentials={},
+        credential_service=CredentialService(
+            store=SQLiteCredentialStore(tmp_path / "home.sqlite3"),
+            root_secret=b"r" * 32,
+        ),
+    )
+    server = create_server(application, host="127.0.0.1", port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        authority = f"{host}:{port}"
+        connection = http.client.HTTPConnection(host, port)
+        connection.request("GET", "/pair")
+        page = connection.getresponse()
+        page.read()
+        assert page.status == 200
+        assert "default-src 'none'" in page.getheader("Content-Security-Policy")
+        connection.close()
+
+        connection = http.client.HTTPConnection(host, port)
+        connection.request(
+            "POST",
+            "/pair/api/session",
+            body=json.dumps({"admin_token": "admin-secret"}),
+            headers={
+                "Content-Type": "application/json",
+                "Origin": f"http://{authority}",
+                "Host": authority,
+            },
+        )
+        signed_in = connection.getresponse()
+        signed_in.read()
+        assert signed_in.status == 200
+        cookie = signed_in.getheader("Set-Cookie")
+        assert cookie.startswith("hermes_home_pair=")
+        assert "HttpOnly" in cookie
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()

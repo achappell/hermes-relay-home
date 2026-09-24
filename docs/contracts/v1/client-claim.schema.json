@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hermes.home/contracts/v1/client-claim.schema.json",
+  "title": "Hermes Home personal-client claim",
+  "type": "object",
+  "required": ["schema", "claim_id", "device_id", "configuration_revision", "grant_id"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": 1},
+    "claim_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "device_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "configuration_revision": {"type": "integer", "minimum": 0},
+    "grant_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "session": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["mode"],
+          "additionalProperties": false,
+          "properties": {"mode": {"enum": ["new", "most_recent"]}}
+        },
+        {
+          "type": "object",
+          "required": ["mode", "session_ref"],
+          "additionalProperties": false,
+          "properties": {
+            "mode": {"const": "resume"},
+            "session_ref": {"type": "string", "minLength": 1, "maxLength": 128}
+          }
+        }
+      ]
+    }
+  }
+}

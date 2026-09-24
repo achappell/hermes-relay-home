@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Mapping
 from threading import RLock
 
+from hermes_home.api.pairing import PairingSurface
+from hermes_home.api.responses import HTTPResponse
 from hermes_home.auth.credentials import PersistentCredentialAuthenticator
 from hermes_home.auth.static import StaticCredentialAuthenticator
 from hermes_home.domain.arbitration import (
@@ -21,6 +22,7 @@ from hermes_home.domain.conversations import (
     ConversationClaimStore,
 )
 from hermes_home.domain.credentials import (
+    ClientGrant,
     CredentialMaterial,
     CredentialScope,
     CredentialService,
@@ -63,12 +65,7 @@ from hermes_home.storage.sqlite import (
 
 MAX_REQUEST_BODY_BYTES = 1_048_576
 
-
-@dataclass(frozen=True, slots=True)
-class HTTPResponse:
-    status: int
-    body: dict[str, object] | str = field(repr=False)
-    content_type: str = "application/json; charset=utf-8"
+__all__ = ["MAX_REQUEST_BODY_BYTES", "HTTPResponse", "HomeApplication"]
 
 
 class HomeApplication:
@@ -90,8 +87,10 @@ class HomeApplication:
         sleeper: Callable[[float], None] = time.sleep,
         metrics: MetricsRegistry | None = None,
         diagnostics: DiagnosticsRecorder | None = None,
+        session_directory=None,
     ) -> None:
         self._configuration_store = configuration_store
+        self._session_directory = session_directory
         self._arbitration_engine = arbitration_engine
         self._credential_service = credential_service
         self._conversation_claim_store = conversation_claim_store
@@ -114,6 +113,12 @@ class HomeApplication:
             )
         self._clock = clock
         self._sleeper = sleeper
+        self._pairing = PairingSurface(
+            authenticate_admin=self._authenticator.authenticate_admin,
+            credential_service=credential_service,
+            configuration=configuration_store.read,
+            close_grant_claims=self._close_grant_claims,
+        )
         self._metrics = metrics or MetricsRegistry()
         self._diagnostics = diagnostics or DiagnosticsRecorder(
             store=InMemoryDiagnosticsStore(),
@@ -127,6 +132,11 @@ class HomeApplication:
             pass
         else:
             self._set_revision(snapshot)
+
+    def _close_grant_claims(self, grant_id: str) -> None:
+        store = self._conversation_claim_store
+        if store is not None and hasattr(store, "close_grant_claims"):
+            store.close_grant_claims(grant_id, reason="grant_revoked")
 
     @property
     def device_authenticator(self):
@@ -181,6 +191,15 @@ class HomeApplication:
         *,
         correlation_id: str | None = None,
     ) -> HTTPResponse:
+        pairing = self._pairing.handle(method, path, headers, body)
+        if pairing is not None:
+            return pairing
+        if _is_admin_route(method, path) and _is_proxied(headers):
+            # Home binds loopback; a proxied request reached it through a
+            # published path, and admin-token routes must not be usable there.
+            # The signed-in pairing page is the only published admin surface.
+            # This only ever denies; it never grants.
+            return _error(403, "admin_local_only")
         if path == "/api/v1/configuration":
             if method == "GET":
                 return self._get_configuration(headers)
@@ -190,6 +209,14 @@ class HomeApplication:
             return self._post_wake_claim(headers, body)
         elif path == "/api/v1/touch-claims" and method == "POST":
             return self._post_touch_claim(headers, body)
+        elif path == "/api/v1/client-claims" and method == "POST":
+            return self._post_client_claim(headers, body)
+        elif path == "/api/v1/client-sessions/list" and method == "POST":
+            return self._post_client_session_list(headers, body)
+        elif path == "/api/v1/profile-grants/pending" and method == "GET":
+            return self._get_pending_profile_grants(headers)
+        elif path == "/api/v1/profile-grants/holders" and method == "GET":
+            return self._get_profile_holders(headers)
         elif path == "/api/v1/enrollment/offers" and method == "POST":
             return self._post_enrollment_offer(headers, body)
         elif path == "/api/v1/enrollment/requests" and method == "GET":
@@ -222,6 +249,15 @@ class HomeApplication:
                     return self._reject_enrollment_request(headers, body, request_id)
                 if method == "POST" and action == "consume":
                     return self._consume_enrollment_request(headers, body, request_id)
+            if (
+                len(parts) == 6
+                and parts[1:4] == ["api", "v1", "profile-grants"]
+                and method == "POST"
+                and parts[5] in {"approve", "reject", "revoke"}
+            ):
+                return self._post_profile_grant_action(
+                    headers, body, parts[4], parts[5]
+                )
             if len(parts) == 6 and parts[1:4] == ["api", "v1", "devices"]:
                 device_id = parts[4]
                 if method == "POST" and parts[5] == "revoke":
@@ -414,9 +450,11 @@ class HomeApplication:
                     "capabilities",
                     "wake_mapping_grant",
                     "touch_binding",
+                    "client_grants",
                 }
             ):
                 raise ValueError("invalid scope")
+            client_profiles = _approved_client_profiles(scope_data.get("client_grants"))
             snapshot = self._configuration_store.read()
             mapping_ids = _approved_wake_mapping_ids(
                 snapshot, scope_data["wake_mapping_grant"]
@@ -444,6 +482,7 @@ class HomeApplication:
                 configured_rooms=configured_rooms,
                 configured_wake_mappings=configured_wake_mappings,
                 configured_profiles=configured_profiles,
+                client_profiles=client_profiles,
             )
         except CredentialStateError as error:
             return _credential_error(error)
@@ -488,6 +527,7 @@ class HomeApplication:
         if not {
             "wake_claim",
             "touch_claim",
+            "client_claim",
         }.intersection(context.scope.capabilities):
             return _error(403, "forbidden")
         try:
@@ -517,16 +557,17 @@ class HomeApplication:
             and mapping["active"]
             and profile_availability.get(mapping["profile_id"], False)
         ]
-        return HTTPResponse(
-            200,
-            {
-                "schema": 1,
-                "snapshot": {
-                    "revision": snapshot["revision"],
-                    "wake_mappings": mappings,
-                },
-            },
-        )
+        configuration: dict[str, object] = {
+            "revision": snapshot["revision"],
+            "wake_mappings": mappings,
+        }
+        if "client_claim" in context.scope.capabilities and self._credential_service:
+            try:
+                grants = self._credential_service.client_grants(device_id)
+            except CredentialStoreError, CredentialValidationError:
+                return _error(503, "service_unavailable")
+            configuration["client_grants"] = _client_grant_views(grants, snapshot)
+        return HTTPResponse(200, {"schema": 1, "snapshot": configuration})
 
     def _get_watch(
         self,
@@ -780,10 +821,22 @@ class HomeApplication:
             request = self._json_request(
                 headers, body, {"schema", "enrollment_code", "secure_storage"}
             )
+        except TypeError, ValueError, json.JSONDecodeError:
+            return _error(400, "invalid_request")
+        # Only client grants need configuration; a Room device can finish
+        # enrolling while configuration is unreadable.
+        try:
+            snapshot = self._configuration_store.read()
+            shared_profiles = _shared_profile_ids(snapshot)
+        except OSError, RuntimeError, TypeError, ValueError, KeyError:
+            snapshot = None
+            shared_profiles = None
+        try:
             material = self._credential_service.consume_request(
                 request_id,
                 enrollment_code=request["enrollment_code"],
                 secure_storage=request["secure_storage"],
+                shared_profiles=shared_profiles,
             )
         except CredentialStateError as error:
             return _credential_error(error)
@@ -791,7 +844,12 @@ class HomeApplication:
             return _error(400, "invalid_request")
         except CredentialStoreError:
             return _error(503, "service_unavailable")
-        return HTTPResponse(200, _material_payload(material))
+        payload = _material_payload(material)
+        if material.client_grants and snapshot is not None:
+            payload["client_grants"] = _client_grant_views(
+                material.client_grants, snapshot
+            )
+        return HTTPResponse(200, payload)
 
     def _renew_device(
         self,
@@ -1254,6 +1312,332 @@ class HomeApplication:
             payload,
         )
 
+    def _client_context(self, headers: Mapping[str, str]):
+        """Authenticate a paired personal client, or return an error response."""
+        if self._credential_service is None:
+            return None, _error(403, "client_claim_unavailable")
+        try:
+            context = self._durable_device_context(headers)
+        except OSError, RuntimeError, TypeError, ValueError:
+            return None, _error(503, "service_unavailable")
+        if context is None:
+            return None, _error(401, "unauthorized")
+        if "client_claim" not in context.scope.capabilities:
+            return None, _error(403, "client_claim_unavailable")
+        return context, None
+
+    def _client_grant(self, device_id: str, grant_id: object):
+        """Return an active grant, or the typed denial for this grant ID."""
+        if type(grant_id) is not str or not 1 <= len(grant_id) <= 128:
+            return None, _error(400, "invalid_request")
+        try:
+            grants = self._credential_service.client_grants(device_id)
+        except CredentialStoreError, CredentialValidationError:
+            return None, _error(503, "service_unavailable")
+        grant = next((item for item in grants if item.grant_id == grant_id), None)
+        if grant is None:
+            return None, _error(403, "client_claim_unavailable")
+        if grant.status == "pending_owner":
+            return None, _error(409, "grant_pending")
+        if grant.status != "active":
+            return None, _error(403, "client_claim_unavailable")
+        return grant, None
+
+    def _post_client_claim(
+        self,
+        headers: Mapping[str, str],
+        body: bytes | str,
+    ) -> HTTPResponse:
+        context, failure = self._client_context(headers)
+        if failure is not None:
+            return failure
+        try:
+            request = self._json_request(
+                headers,
+                body,
+                {
+                    "schema",
+                    "claim_id",
+                    "device_id",
+                    "configuration_revision",
+                    "grant_id",
+                    "session",
+                },
+                optional_fields={"session"},
+            )
+            claim_id = request["claim_id"]
+            if type(claim_id) is not str or not 1 <= len(claim_id) <= 128:
+                raise ValueError("claim_id is invalid")
+            configuration_revision = request["configuration_revision"]
+            if type(configuration_revision) is not int or configuration_revision < 0:
+                raise ValueError("configuration_revision is invalid")
+            session_mode, session_ref = _client_session_choice(request.get("session"))
+        except TypeError, ValueError, json.JSONDecodeError:
+            return _error(400, "invalid_request")
+        if request["device_id"] != context.device_id:
+            return _error(401, "unauthorized")
+        grant, failure = self._client_grant(context.device_id, request["grant_id"])
+        if failure is not None:
+            return failure
+
+        try:
+            snapshot = self._configuration_store.read()
+        except ConfigurationMigrationRequired as error:
+            return HTTPResponse(
+                409,
+                {
+                    "schema": 1,
+                    "error": {
+                        "code": "configuration_migration_required",
+                        "current_revision": error.current_revision,
+                    },
+                },
+            )
+        except OSError, RuntimeError, TypeError, ValueError:
+            return _error(503, "service_unavailable")
+        if configuration_revision != snapshot["revision"]:
+            return _error(409, "stale_configuration")
+        profile = next(
+            (item for item in snapshot["profiles"] if item["id"] == grant.profile_id),
+            None,
+        )
+        if profile is None or profile["available"] is not True:
+            return _error(409, "profile_unavailable")
+        if self._conversation_claim_store is None:
+            return _error(503, "service_unavailable")
+
+        session_id: str | None = None
+        try:
+            if session_mode == "resume":
+                session_id = self._conversation_claim_store.session_for_ref(
+                    grant.grant_id, session_ref
+                )
+                if session_id is None:
+                    return _error(404, "session_unavailable")
+            elif session_mode == "most_recent":
+                if self._session_directory is None:
+                    return _error(503, "service_unavailable")
+                session_id = self._session_directory.most_recent(grant.profile_id)
+        except OSError, RuntimeError, TypeError, ValueError:
+            return _error(503, "service_unavailable")
+
+        try:
+            conversation_handle = self._conversation_claim_store.create_client_claim(
+                claim_id=claim_id,
+                device_id=context.device_id,
+                grant_id=grant.grant_id,
+                profile_id=grant.profile_id,
+                configuration_revision=configuration_revision,
+                credential_generation=context.generation,
+                session_id=session_id,
+            )
+        except ConversationClaimConflict as error:
+            reason = getattr(error, "reason", "conversation_active")
+            return _error(409, reason)
+        except OSError, RuntimeError, TypeError, ValueError:
+            return _error(503, "service_unavailable")
+
+        try:
+            refreshed = self._durable_device_context(headers)
+        except OSError, RuntimeError, TypeError, ValueError:
+            self._discard_new_claim(conversation_handle, context.device_id)
+            return _error(503, "service_unavailable")
+        if (
+            refreshed is None
+            or refreshed.device_id != context.device_id
+            or refreshed.generation != context.generation
+        ):
+            if not self._discard_new_claim(conversation_handle, context.device_id):
+                return _error(503, "service_unavailable")
+            return _error(401, "unauthorized")
+        try:
+            still_granted = self._credential_service.active_client_grant(
+                context.device_id, grant.grant_id
+            )
+        except CredentialStoreError, CredentialValidationError:
+            still_granted = None
+        if still_granted is None:
+            # The grant was revoked while the claim was being created; its
+            # claim sweep may already have run, so discard this one here.
+            self._discard_new_claim(conversation_handle, context.device_id)
+            return _error(403, "client_claim_unavailable")
+
+        session: dict[str, object] = {"mode": "new"}
+        if session_id is not None:
+            try:
+                session = {
+                    "mode": "resumed",
+                    "session_ref": self._conversation_claim_store.session_ref(
+                        grant.grant_id, session_id
+                    ),
+                }
+            except OSError, RuntimeError, TypeError, ValueError:
+                self._discard_new_claim(conversation_handle, context.device_id)
+                return _error(503, "service_unavailable")
+        return HTTPResponse(
+            200,
+            {
+                "schema": 1,
+                "claim_id": claim_id,
+                "decision": "granted",
+                "configuration_revision": configuration_revision,
+                "conversation_handle": conversation_handle,
+                "session": session,
+            },
+        )
+
+    def _post_client_session_list(
+        self,
+        headers: Mapping[str, str],
+        body: bytes | str,
+    ) -> HTTPResponse:
+        context, failure = self._client_context(headers)
+        if failure is not None:
+            return failure
+        try:
+            request = self._json_request(
+                headers,
+                body,
+                {"schema", "grant_id", "limit"},
+                optional_fields={"limit"},
+            )
+            limit = request.get("limit", 50)
+            if type(limit) is not int or not 1 <= limit <= 50:
+                raise ValueError("limit must be between 1 and 50")
+        except TypeError, ValueError, json.JSONDecodeError:
+            return _error(400, "invalid_request")
+        grant, failure = self._client_grant(context.device_id, request["grant_id"])
+        if failure is not None:
+            return failure
+        if self._session_directory is None or self._conversation_claim_store is None:
+            return _error(503, "service_unavailable")
+        try:
+            snapshot = self._configuration_store.read()
+        except OSError, RuntimeError, TypeError, ValueError:
+            return _error(503, "service_unavailable")
+        profile = next(
+            (item for item in snapshot["profiles"] if item["id"] == grant.profile_id),
+            None,
+        )
+        if profile is None or profile["available"] is not True:
+            return _error(409, "profile_unavailable")
+        try:
+            rows = self._session_directory.list_sessions(grant.profile_id, limit)
+            active = self._conversation_claim_store.active_session_ids()
+            sessions = [
+                {
+                    "session_ref": self._conversation_claim_store.session_ref(
+                        grant.grant_id, row["id"]
+                    ),
+                    "title": row["title"],
+                    "started_at": row["started_at"],
+                    "message_count": row["message_count"],
+                    "active": row["id"] in active,
+                }
+                for row in rows[:limit]
+            ]
+        except KeyError, OSError, RuntimeError, TypeError, ValueError:
+            return _error(503, "service_unavailable")
+        return HTTPResponse(200, {"schema": 1, "sessions": sessions})
+
+    def _get_pending_profile_grants(self, headers: Mapping[str, str]) -> HTTPResponse:
+        context, failure = self._client_context(headers)
+        if failure is not None:
+            return failure
+        try:
+            snapshot = self._configuration_store.read()
+            grants = self._credential_service.pending_owner_grants(context.device_id)
+        except (
+            ConfigurationMigrationRequired,
+            CredentialStoreError,
+            CredentialValidationError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ):
+            return _error(503, "service_unavailable")
+        return HTTPResponse(
+            200,
+            {
+                "schema": 1,
+                "pending": _holder_views(grants, snapshot, context.device_id),
+            },
+        )
+
+    def _get_profile_holders(self, headers: Mapping[str, str]) -> HTTPResponse:
+        context, failure = self._client_context(headers)
+        if failure is not None:
+            return failure
+        try:
+            snapshot = self._configuration_store.read()
+            grants = self._credential_service.profile_holders(context.device_id)
+        except (
+            ConfigurationMigrationRequired,
+            CredentialStoreError,
+            CredentialValidationError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ):
+            return _error(503, "service_unavailable")
+        return HTTPResponse(
+            200,
+            {
+                "schema": 1,
+                "holders": _holder_views(grants, snapshot, context.device_id),
+            },
+        )
+
+    def _post_profile_grant_action(
+        self,
+        headers: Mapping[str, str],
+        body: bytes | str,
+        grant_id: str,
+        action: str,
+    ) -> HTTPResponse:
+        context, failure = self._client_context(headers)
+        if failure is not None:
+            return failure
+        try:
+            self._json_request(headers, body, {"schema"})
+        except TypeError, ValueError, json.JSONDecodeError:
+            return _error(400, "invalid_request")
+        try:
+            if action == "revoke":
+                grant = self._credential_service.revoke_client_grant(
+                    grant_id,
+                    requester_device_id=context.device_id,
+                    shared_profiles=_shared_profile_ids(
+                        self._configuration_store.read()
+                    ),
+                )
+            else:
+                grant = self._credential_service.decide_owner_grant(
+                    context.device_id, grant_id, approve=action == "approve"
+                )
+        except CredentialStateError as error:
+            return _credential_error(error)
+        except CredentialValidationError:
+            return _error(400, "invalid_request")
+        except CredentialStoreError, OSError, RuntimeError, TypeError, ValueError:
+            return _error(503, "service_unavailable")
+        if action == "revoke" and self._conversation_claim_store is not None:
+            try:
+                self._conversation_claim_store.close_grant_claims(
+                    grant.grant_id, reason="grant_revoked"
+                )
+            except OSError, RuntimeError, TypeError, ValueError:
+                return _error(503, "service_unavailable")
+        return HTTPResponse(
+            200,
+            {
+                "schema": 1,
+                "grant": {"grant_id": grant.grant_id, "status": grant.status},
+            },
+        )
+
     def _post_touch_claim(
         self,
         headers: Mapping[str, str],
@@ -1617,10 +2001,125 @@ def _credential_error(error: CredentialStateError) -> HTTPResponse:
         "forbidden": 403,
         "not_found": 404,
         "conflict": 409,
+        "approval_pending": 409,
+        "rejected": 403,
         "expired_or_consumed": 410,
         "service_unavailable": 503,
     }
     return _error(status_by_code.get(error.code, 400), error.code)
+
+
+def _is_proxied(headers: Mapping[str, str]) -> bool:
+    return any(
+        isinstance(key, str) and key.lower() in {"x-forwarded-for", "forwarded"}
+        for key in headers
+    )
+
+
+def _is_admin_route(method: str, path: str) -> bool:
+    if path in {"/api/v1/configuration", "/metrics"} or path.startswith(
+        "/api/v1/diagnostics/"
+    ):
+        return True
+    if path == "/api/v1/enrollment/offers":
+        return True
+    if path == "/api/v1/enrollment/requests":
+        return method == "GET"
+    parts = path.split("/")
+    if len(parts) == 7 and parts[1:5] == ["api", "v1", "enrollment", "requests"]:
+        return parts[6] in {"approve", "reject"}
+    if len(parts) == 6 and parts[1:4] == ["api", "v1", "devices"]:
+        return parts[5] == "revoke"
+    if len(parts) == 7 and parts[1:4] == ["api", "v1", "devices"]:
+        return parts[5] == "credentials" and parts[6] == "rotate"
+    return False
+
+
+def _approved_client_profiles(selection: object) -> tuple[str, ...]:
+    if selection is None:
+        return ()
+    if not isinstance(selection, list):
+        raise TypeError("client_grants must be an array")
+    profiles: list[str] = []
+    for item in selection:
+        if not isinstance(item, Mapping) or set(item) != {"profile_id"}:
+            raise ValueError("invalid client grant")
+        profiles.append(item["profile_id"])
+    return tuple(profiles)
+
+
+def _shared_profile_ids(snapshot: Mapping[str, object]) -> tuple[str, ...]:
+    return tuple(
+        profile["id"]
+        for profile in snapshot["profiles"]
+        if profile.get("shared") is True
+    )
+
+
+def _profile_labels(snapshot: Mapping[str, object]) -> dict[str, tuple[str, bool]]:
+    return {
+        profile["id"]: (profile["name"], profile["available"] is True)
+        for profile in snapshot["profiles"]
+    }
+
+
+def _client_grant_views(
+    grants: Iterable[ClientGrant],
+    snapshot: Mapping[str, object],
+) -> list[dict[str, object]]:
+    labels = _profile_labels(snapshot)
+    views: list[dict[str, object]] = []
+    for grant in grants:
+        label, available = labels.get(grant.profile_id, (None, False))
+        if label is None:
+            continue
+        views.append(
+            {
+                "grant_id": grant.grant_id,
+                "label": label,
+                "status": grant.status,
+                "available": available,
+            }
+        )
+    return views
+
+
+def _holder_views(
+    grants: Iterable[ClientGrant],
+    snapshot: Mapping[str, object],
+    caller_device_id: str,
+) -> list[dict[str, object]]:
+    # Other devices appear by label and type only; device IDs stay on Home.
+    labels = _profile_labels(snapshot)
+    return [
+        {
+            "grant_id": grant.grant_id,
+            "device_label": grant.device_label,
+            "device_type": grant.device_type,
+            "profile_label": labels.get(grant.profile_id, ("Unknown", False))[0],
+            "status": grant.status,
+            "bootstrap": grant.bootstrap,
+            "this_device": grant.device_id == caller_device_id,
+            "created_at": grant.created_at,
+        }
+        for grant in grants
+    ]
+
+
+def _client_session_choice(value: object) -> tuple[str, str | None]:
+    if value is None:
+        return "new", None
+    if not isinstance(value, Mapping):
+        raise TypeError("session must be an object")
+    mode = value.get("mode")
+    if mode in {"new", "most_recent"} and set(value) == {"mode"}:
+        return mode, None
+    if mode == "resume" and set(value) == {"mode", "session_ref"}:
+        ref = value["session_ref"]
+        if type(ref) is not str or not 1 <= len(ref) <= 128:
+            raise ValueError("session_ref is invalid")
+        return mode, ref
+    raise ValueError("session choice is invalid")
 
 
 def _material_payload(material: CredentialMaterial) -> dict[str, object]:
@@ -1915,6 +2414,10 @@ def _health_diagnostic_code(reason: str | None) -> str | None:
 
 
 def _metric_route(path: str) -> str:
+    if path == "/pair" or path.startswith("/pair/"):
+        return "pairing"
+    if path.startswith("/api/v1/profile-grants/"):
+        return "profile_grants"
     if path.startswith("/api/v1/diagnostics/timeline/"):
         return "diagnostics_timeline"
     if path.startswith("/api/v1/devices/") and path.endswith("/watch"):
@@ -1927,6 +2430,8 @@ def _metric_route(path: str) -> str:
         "/api/v1/configuration": "configuration",
         "/api/v1/wake-claims": "wake_claims",
         "/api/v1/touch-claims": "touch_claims",
+        "/api/v1/client-claims": "client_claims",
+        "/api/v1/client-sessions/list": "client_sessions",
         "/api/v1/devices": "device_configuration",
         "/metrics": "metrics",
         "/api/v1/diagnostics/status": "diagnostics_status",

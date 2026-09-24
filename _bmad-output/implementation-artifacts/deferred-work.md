@@ -57,3 +57,8 @@
 
 - Confirm whether Standard guarantees correlation IDs are globally unique across all structured prompt types. Home currently routes a response to the choice path when any retained choice correlation matches, but the local contract does not promise global uniqueness; if Standard can reuse an ID for a different prompt type, that prompt's valid response is diverted. Evidence to settle it: the pinned Standard protocol contract or a producer implementation guarantee.
 - Audit how endpoint clients render bidirectional and formatting controls in choice text and labels. Home accepts bounded Unicode strings containing these controls; they may visually reorder or spoof options if the client does not neutralize them. Evidence to settle it: a client rendering audit that preserves legitimate right-to-left text.
+
+## Deferred from: code review of spec-home-nw-17-client-pairing-and-direct-admission (2026-09-24)
+
+- Confirm Tailscale Serve passes the browser's `Host` header through to Home. The pairing page's Origin check compares the browser Origin with `Host`; if Serve rewrites `Host` to the loopback backend, every page POST (including sign-in) fails `origin_rejected`. Evidence to settle it: a live sign-in at `https://<home>/pair` through Serve after deployment.
+- Confirm Tailscale Serve adds `X-Forwarded-For` (or `Forwarded`) to proxied requests. Home refuses admin-token routes only when one of those headers is present; without them, admin routes under the published `/api/v1/enrollment/requests` and `/api/v1/devices` prefixes would be reachable with the admin token. Evidence to settle it: a live admin call through Serve that must return `403 admin_local_only`.

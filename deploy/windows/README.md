@@ -105,3 +105,36 @@ The resulting process is managed by the `Hermes Home` scheduled task. Its data,
 logs, virtual environment, and secret live beneath
 `C:\ProgramData\HermesHome`. The installer waits for both `/metrics` and an
 `up{job="hermes-home"}` Prometheus result before returning success.
+
+## Personal-client pairing (HOME-NW-17)
+
+TUI, iOS, macOS, and Android clients pair from the Home pairing page and then reach
+Home over the tailnet. Publish only the pairing page and the device-facing
+routes; admin routes (offers, request listing, approval, rotation,
+configuration, metrics, diagnostics) stay loopback-only and are reached only
+through the signed-in page. Each path repeats in the target because Tailscale
+strips the `--set-path` prefix:
+
+```powershell
+foreach ($path in '/pair', '/api/v1/enrollment/requests', '/api/v1/client-claims',
+                  '/api/v1/client-sessions', '/api/v1/profile-grants', '/api/v1/devices') {
+  tailscale serve --bg --https=443 --set-path=$path "http://127.0.0.1:8780$path"
+}
+```
+
+`/api/v1/enrollment/requests` also serves the admin-only request listing and
+approval. Home refuses every admin-token route on a proxied request
+(`admin_local_only`), so through Serve only the signed-in pairing page can
+approve; the admin API stays usable on loopback.
+`/api/v1/devices` carries device configuration and self-renewal, which require
+the device's own credential. The bridge route stays as configured above.
+
+Open `https://<home tailnet name>/pair`, sign in with the admin token, and
+choose **Create pairing code**. Profiles marked `shared` in configuration can
+be granted to any device; another Profile's second and later devices wait for
+approval from a client already paired to that Profile.
+
+`-ClientClaimsPerDevice` (default 8) caps concurrent client conversations per
+device, and `-ClientReconnectGraceSeconds` (default 120) is how long a
+disconnected client keeps its conversation before Home closes it. Both are
+written with the Standard settings and cleared with them.

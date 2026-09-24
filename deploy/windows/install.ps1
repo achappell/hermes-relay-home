@@ -22,7 +22,11 @@ param(
     [string] $StandardGatewayUrl = '',
     [string] $StandardTokenFile = '',
     [ValidateRange(1, 600)]
-    [double] $ConversationIdleTimeoutSeconds = 8
+    [double] $ConversationIdleTimeoutSeconds = 8,
+    [ValidateRange(1, 64)]
+    [int] $ClientClaimsPerDevice = 8,
+    [ValidateRange(1, 600)]
+    [double] $ClientReconnectGraceSeconds = 120
 )
 
 $ErrorActionPreference = 'Stop'
@@ -348,11 +352,15 @@ try {
         [Environment]::SetEnvironmentVariable('HERMES_HOME_STANDARD_GATEWAY_URL', $StandardGatewayUrl.Trim(), 'Machine')
         [Environment]::SetEnvironmentVariable('HERMES_HOME_STANDARD_TOKEN_FILE', $standardTokenPath, 'Machine')
         [Environment]::SetEnvironmentVariable('HERMES_HOME_CONVERSATION_IDLE_TIMEOUT_SECONDS', $ConversationIdleTimeoutSeconds.ToString([System.Globalization.CultureInfo]::InvariantCulture), 'Machine')
+        [Environment]::SetEnvironmentVariable('HERMES_HOME_CLIENT_CLAIMS_PER_DEVICE', $ClientClaimsPerDevice.ToString([System.Globalization.CultureInfo]::InvariantCulture), 'Machine')
+        [Environment]::SetEnvironmentVariable('HERMES_HOME_CLIENT_RECONNECT_GRACE_SECONDS', $ClientReconnectGraceSeconds.ToString([System.Globalization.CultureInfo]::InvariantCulture), 'Machine')
     }
     else {
         [Environment]::SetEnvironmentVariable('HERMES_HOME_STANDARD_GATEWAY_URL', $null, 'Machine')
         [Environment]::SetEnvironmentVariable('HERMES_HOME_STANDARD_TOKEN_FILE', $null, 'Machine')
         [Environment]::SetEnvironmentVariable('HERMES_HOME_CONVERSATION_IDLE_TIMEOUT_SECONDS', $null, 'Machine')
+        [Environment]::SetEnvironmentVariable('HERMES_HOME_CLIENT_CLAIMS_PER_DEVICE', $null, 'Machine')
+        [Environment]::SetEnvironmentVariable('HERMES_HOME_CLIENT_RECONNECT_GRACE_SECONDS', $null, 'Machine')
     }
 
     $backup = Update-PrometheusConfig -ConfigPath $PrometheusConfigPath -PrometheusTokenPath $tokenPath -TargetHost $BindHost -TargetPort $Port
@@ -369,6 +377,8 @@ try {
     if ($standardConfigured) {
         Write-Output "Standard pilot target: $($StandardGatewayUrl.Trim())"
         Write-Output "Conversation idle timeout: $ConversationIdleTimeoutSeconds seconds"
+        Write-Output "Client claims per device: $ClientClaimsPerDevice"
+        Write-Output "Client reconnect grace: $ClientReconnectGraceSeconds seconds"
     }
 }
 catch {

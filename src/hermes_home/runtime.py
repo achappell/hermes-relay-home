@@ -52,6 +52,8 @@ class RuntimeSettings:
     standard_token_file: Path | None = None
     standard_token: str | None = field(default=None, repr=False)
     conversation_idle_timeout_seconds: float = 8.0
+    client_claims_per_device: int = 8
+    client_reconnect_grace_seconds: float = 120.0
 
     @property
     def auth_mode(self) -> str:
@@ -169,6 +171,15 @@ def load_settings(
     conversation_idle_timeout_seconds = _positive_seconds_value(
         values.get("HERMES_HOME_CONVERSATION_IDLE_TIMEOUT_SECONDS", "8")
     )
+    client_claims_per_device = _bounded_int_value(
+        values.get("HERMES_HOME_CLIENT_CLAIMS_PER_DEVICE", "8"),
+        name="client claims per device",
+        minimum=1,
+        maximum=64,
+    )
+    client_reconnect_grace_seconds = _positive_seconds_value(
+        values.get("HERMES_HOME_CLIENT_RECONNECT_GRACE_SECONDS", "120")
+    )
     if standard_configured:
         if device_credentials_file is None and credential_root_secret is None:
             raise RuntimeConfigurationError(
@@ -210,6 +221,8 @@ def load_settings(
         standard_token_file=standard_token_file,
         standard_token=standard_token,
         conversation_idle_timeout_seconds=conversation_idle_timeout_seconds,
+        client_claims_per_device=client_claims_per_device,
+        client_reconnect_grace_seconds=client_reconnect_grace_seconds,
     )
 
 
@@ -296,6 +309,10 @@ def create_runtime(
                 idle_timeout_seconds=settings.conversation_idle_timeout_seconds,
                 route_id=settings.bridge_route_id,
                 credential_scope_resolver=resolve_credential_scope,
+                client_claims_per_device=settings.client_claims_per_device,
+                client_reconnect_grace_seconds=(
+                    settings.client_reconnect_grace_seconds
+                ),
             )
         if settings.credential_root_secret is not None:
             credential_store = SQLiteCredentialStore(settings.database_path)
@@ -304,6 +321,13 @@ def create_runtime(
                 root_secret=settings.credential_root_secret,
                 revocation_observer=conversation_store,
             )
+            if conversation_store is not None:
+                service = credential_service
+                conversation_store.set_client_grant_checker(
+                    lambda device_id, grant_id: (
+                        service.active_client_grant(device_id, grant_id) is not None
+                    )
+                )
         if health_probe_provider is None and settings.standard_gateway_url is not None:
             if settings.standard_token is None:
                 raise RuntimeConfigurationError(
@@ -317,6 +341,14 @@ def create_runtime(
                 bridge_probe=probe_bridge,
                 bridge_configured=True,
             )
+        session_directory = None
+        if settings.standard_gateway_url is not None and settings.standard_token:
+            from hermes_home.bridge.production import StandardSessionDirectory
+
+            session_directory = StandardSessionDirectory(
+                gateway_url=settings.standard_gateway_url,
+                hermes_token=settings.standard_token,
+            )
         engine = ArbitrationEngine(configuration=store.read)
         application = HomeApplication(
             configuration_store=store,
@@ -328,6 +360,7 @@ def create_runtime(
             health_probe_provider=health_probe_provider,
             metrics=metrics,
             diagnostics=diagnostics,
+            session_directory=session_directory,
         )
         if bridge_factory is None and settings.standard_gateway_url is not None:
             if settings.standard_token is None or conversation_store is None:
@@ -434,6 +467,18 @@ def _port_value(value: str) -> int:
     if not 0 <= port <= 65535:
         raise RuntimeConfigurationError("port must be between 0 and 65535")
     return port
+
+
+def _bounded_int_value(value: str, *, name: str, minimum: int, maximum: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as error:
+        raise RuntimeConfigurationError(f"{name} must be an integer") from error
+    if not minimum <= number <= maximum:
+        raise RuntimeConfigurationError(
+            f"{name} must be between {minimum} and {maximum}"
+        )
+    return number
 
 
 def _positive_seconds_value(value: str) -> float:

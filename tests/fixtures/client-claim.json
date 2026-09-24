@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "claim_id": "client-claim-example",
+  "device_id": "tui-amanda-macbook",
+  "configuration_revision": 12,
+  "grant_id": "grant-example",
+  "session": {"mode": "resume", "session_ref": "sref-example"}
+}
