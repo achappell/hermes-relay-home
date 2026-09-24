@@ -62,7 +62,9 @@ class Page:
         return self.app.handle(method, path, headers, payload)
 
     def sign_in(self):
-        response = self.call("POST", "/pair/api/session", {"admin_token": "admin-secret"})
+        response = self.call(
+            "POST", "/pair/api/session", {"admin_token": "admin-secret"}
+        )
         assert response.status == 200
         cookie = dict(response.headers)["Set-Cookie"]
         self.cookie = cookie.split(";", 1)[0]
@@ -222,7 +224,9 @@ def test_page_can_reject_unpair_and_remove_a_profile(page) -> None:
     (device,) = page.call("GET", "/pair/api/state").body["devices"]
     assert [g["profile"] for g in device["grants"]] == ["Amanda"]
 
-    unpaired = page.call("POST", f"/pair/api/devices/{material['device_id']}/revoke", {})
+    unpaired = page.call(
+        "POST", f"/pair/api/devices/{material['device_id']}/revoke", {}
+    )
     assert unpaired.status == 200
     assert page.call("GET", "/pair/api/state").body["devices"] == []
 
