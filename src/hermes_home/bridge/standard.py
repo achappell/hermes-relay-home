@@ -3032,8 +3032,17 @@ def _event_from_frame(frame: Mapping[str, object]) -> dict[str, object] | None:
         raise BridgeProtocolError("standard event session identity is not a string")
     if payload_session_id not in (None, "") and not isinstance(payload_session_id, str):
         raise BridgeProtocolError("standard event session identity is not a string")
+    # Standard session.title carries its durable storage ID in the payload;
+    # only the envelope identifies the runtime that emitted the event. Do not
+    # weaken identity checks for turn events or infer a title's runtime from
+    # its durable ID.
+    if event_type == "session.title" and not envelope_session_id:
+        raise BridgeProtocolError(
+            "standard title event has no runtime session identity"
+        )
     if (
-        isinstance(envelope_session_id, str)
+        event_type != "session.title"
+        and isinstance(envelope_session_id, str)
         and envelope_session_id
         and isinstance(payload_session_id, str)
         and payload_session_id

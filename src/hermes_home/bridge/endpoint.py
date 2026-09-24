@@ -1172,17 +1172,24 @@ class BridgeEndpoint:
                 self._mark_unavailable("protocol_error")
                 self.close()
                 return
-            except BridgeTimeoutError:
+            except BridgeTimeoutError, TimeoutError:
+                # The Standard adapter consumes healthy idle polls itself.
+                # A timeout escaping that adapter is an unavailable transport.
                 self._mark_unavailable("transport_timeout")
-                continue
-            except TimeoutError:
-                self._mark_unavailable("transport_timeout")
+                self._close_connection(code=1011, reason="upstream transport timeout")
                 continue
             except BridgeTransportError, ConnectionError, EOFError, OSError:
                 self._mark_unavailable("transport_unavailable")
+                # Wake the endpoint's receive loop rather than leaving the UI
+                # waiting forever. Keep the bridge's uncertain turn for the
+                # authenticated reconnect response; close() would erase it.
+                self._close_connection(
+                    code=1011, reason="upstream transport unavailable"
+                )
                 continue
             except RuntimeError:
                 self._mark_unavailable("hermes_unavailable")
+                self._close_connection(code=1011, reason="upstream unavailable")
                 continue
             except Exception as error:  # noqa: BLE001 - fail closed on bridge defects
                 LOGGER.warning(
