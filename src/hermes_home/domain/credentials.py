@@ -35,7 +35,7 @@ CREDENTIAL_TTL_SECONDS = 90 * 24 * 60 * 60
 RENEWAL_WINDOW_SECONDS = 14 * 24 * 60 * 60
 ROTATION_OVERLAP_SECONDS = 600
 SECURE_STORAGE_PLATFORM = "platform_secure_store"
-CLIENT_ENDPOINT_TYPES = frozenset({"tui", "ios", "android"})
+CLIENT_ENDPOINT_TYPES = frozenset({"tui", "ios", "macos", "android"})
 PENDING_OWNER_GRANT_TTL_SECONDS = 24 * 60 * 60
 MAX_CLIENT_GRANTS = 16
 

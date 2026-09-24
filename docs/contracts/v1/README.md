@@ -356,7 +356,7 @@ the new one. Once the tail expires, it no longer blocks admission.
 
 ## Personal clients (HOME-NW-17)
 
-TUI, iOS, and Android clients are paired personal clients. They hold the
+TUI, iOS, macOS, and Android clients are paired personal clients. They hold the
 `client_claim` capability and one grant per approved Profile. They belong to no
 Room, never take part in arbitration, and never block, preempt, or supersede a
 Room conversation.
@@ -371,7 +371,7 @@ hermes-home://pair?home=https%3A%2F%2Fhome.example.ts.net&code=K7Q4MX2PNV
 ```
 
 The client submits the existing `POST /api/v1/enrollment/requests` body with
-`type` of `tui`, `ios`, or `android` and `requested_capabilities` containing
+`type` of `tui`, `ios`, `macos`, or `android` and `requested_capabilities` containing
 `client_claim`. Short codes are accepted in any case, with or without the dash.
 The client shows the returned confirmation code and polls
 `POST /api/v1/enrollment/requests/{request_id}/consume`:

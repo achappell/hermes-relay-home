@@ -9,7 +9,7 @@ baseline_commit: ce5f1a6a864a4750a143e30737a27a1e9e446000
 
 ## Verification boundary
 
-Home now pairs personal clients (TUI, iOS, Android) from a signed-in pairing page and admits their conversations through `POST /api/v1/client-claims`. Deterministic tests cover:
+Home now pairs personal clients (TUI, iOS, macOS, Android) from a signed-in pairing page and admits their conversations through `POST /api/v1/client-claims`. Deterministic tests cover:
 
 - client grants: shared Profiles, first-device bootstrap, owner approval and rejection from a paired client, the 24-hour pending expiry, holder listing, grants surviving renewal and ending on revocation or re-enrollment, and the personal-client type restriction;
 - the typed pairing states `approval_pending` and `rejected`, and typed short codes in any case with or without a dash;
@@ -32,7 +32,7 @@ Not validated here: deployment to CaticornQueen, the live Tailscale Serve paths 
 | --- | --- | --- |
 | Python runtime | `uv run --python 3.14 --locked --extra dev python --version` | `Python 3.14.7` |
 | Focused HOME-NW-17, credential, configuration, runtime, and server suite | `uv run --python 3.14 --locked --extra dev pytest -q tests/test_client_grants.py tests/test_client_claim_store.py tests/test_client_claims_api.py tests/test_pairing_page.py tests/test_session_directory.py tests/test_client_claim_schema.py tests/test_credentials.py tests/test_credentials_api.py tests/test_configuration_validation.py tests/test_runtime.py tests/test_http_server.py` | `170 passed in 3.94s` |
-| Full Home test suite | `uv run --python 3.14 --locked --extra dev pytest -q` | `676 passed in 7.22s` |
+| Full Home test suite | `uv run --python 3.14 --locked --extra dev pytest -q` | `677 passed in 7.45s` |
 | Ruff lint | `uvx ruff check src tests` | `All checks passed!` |
 | Ruff format | `uvx ruff format --check src tests` | `68 files already formatted` |
 | Lockfile check | `uv lock --check` | Passed |

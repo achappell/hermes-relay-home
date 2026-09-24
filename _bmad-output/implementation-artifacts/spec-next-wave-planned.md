@@ -20,18 +20,7 @@ clients own presentation and device-specific evidence.
 
 ## Delivery order
 
-1. Finish the Standard compatibility gate and Home enrollment/bridge boundary.
-2. Prove route, Profile, and session continuity.
-3. Add typed choices and the read-only client surfaces.
-4. Add permissions, notifications, shared artifacts, custom wake phrases, and
-   arbitrary attachments only behind explicit capability and privacy contracts.
-
-The first two sprint milestones are:
-
-- Sprint 1 — Foundation, due 2026-09-25: compatibility, pairing, the approved
-  local bridge route, and safe diagnostics.
-- Sprint 2 — Multi-surface proving, due 2026-10-09: route roaming, Profile
-  claims, typed choices, and the first client adapters.
+Use the active nine-epic parents in `story-index.yaml` and the [approved delivery contract](course-correction-2026-09-23.md). NW is historical provenance, not a separate active epic. September 25 and October 9 targets are unscheduled pending estimation. HOME-NW-15 is broader later distribution; actual-household deployment is HOME-MIG-09.
 
 ## HOME-NW-07 — Freshness-bound typed-choice authority
 

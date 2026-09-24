@@ -1,3 +1,5 @@
+> **Approved correction (2026-09-23):** The [delivery contract](../../implementation-artifacts/course-correction-2026-09-23.md) supersedes conflicting mode, authentication, rollback, timing and session clauses below. Both modes require unmodified Standard. Home mode uses Home credentials; direct personal mode uses supported Standard authentication. The old fork path is retired under HOME-MIG-09; direct Standard remains supported.
+
 # Surface Migration Matrix
 
 This matrix is part of `SPEC.md`. It assigns migration work without claiming

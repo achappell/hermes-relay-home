@@ -75,7 +75,7 @@ fieldset.profiles { border: 0; padding: 8px 0; margin: 0; }
 <body>
 <main>
   <h1>Hermes Home pairing</h1>
-  <p class="lede">Pair a TUI, iPhone, or Android client with this Home. It stays paired and renews itself.</p>
+  <p class="lede">Pair a TUI, iPhone, Mac, or Android client with this Home. It stays paired and renews itself.</p>
 
   <section id="signin">
     <h2>Sign in</h2>

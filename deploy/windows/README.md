@@ -108,7 +108,7 @@ logs, virtual environment, and secret live beneath
 
 ## Personal-client pairing (HOME-NW-17)
 
-TUI, iOS, and Android clients pair from the Home pairing page and then reach
+TUI, iOS, macOS, and Android clients pair from the Home pairing page and then reach
 Home over the tailnet. Publish only the pairing page and the device-facing
 routes; admin routes (offers, request listing, approval, rotation,
 configuration, metrics, diagnostics) stay loopback-only and are reached only

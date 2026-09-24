@@ -461,3 +461,13 @@ def test_room_device_enrolls_without_configuration() -> None:
     )
 
     assert material.client_grants == ()
+
+
+def test_macos_is_a_personal_client_type() -> None:
+    service = _service()
+
+    material = _pair(
+        service, endpoint_id="mac", profiles=["amanda"], endpoint_type="macos"
+    )
+
+    assert material.client_grants[0].status == "active"
