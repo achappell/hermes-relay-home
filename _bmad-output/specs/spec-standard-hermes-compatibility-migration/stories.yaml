@@ -120,3 +120,6 @@
     No default switch while a required surface is unverified. Keep rollback
     and fresh-user-action recovery until the pilot is accepted; do not silently
     change transport or resend uncertain turns.
+
+# Approved course correction: Story 9 is tracked as HOME-MIG-09 under Epic 4.
+# The local story index and spec-home-mig-09-pilot-cutover-and-retirement.md define current acceptance.

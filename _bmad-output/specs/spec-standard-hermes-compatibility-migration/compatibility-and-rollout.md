@@ -1,3 +1,5 @@
+> **Approved correction (2026-09-23):** The [delivery contract](../../implementation-artifacts/course-correction-2026-09-23.md) supersedes conflicting mode, authentication, rollback, timing and session clauses below. Both modes require unmodified Standard. Home mode uses Home credentials; direct personal mode uses supported Standard authentication. The old fork path is retired under HOME-MIG-09; direct Standard remains supported.
+
 # Compatibility and Rollout Gates
 
 ## Baseline used by these gates
@@ -23,34 +25,12 @@ for the observed wire contract and the rollback-only fork ledger.
 
 ## Rollout order
 
-1. **Inventory and freeze the boundary.** Pin the Standard Hermes release,
-   record current fork-only behavior, and list every surface capability.
-2. **Build conformance fixtures.** Prove the Home bridge and normalized event
-   contract with fake Standard Hermes and fake endpoints before changing a
-   surface default.
-3. **Migrate the server boundary.** Run Home against the Standard Hermes path,
-   with endpoint credentials and opaque conversation handles, while retaining
-   the old direct path for rollback.
-4. **Migrate surfaces independently.** Complete and validate TUI, iOS,
-   Android, Puck, ESP32 Touch, and W/K in their owning repositories. A surface
-   may move to the target path only after its local gate passes.
-5. **Run the household pilot.** Exercise one text turn, one spoken turn,
-   interruption, route loss, reconnect, prompt behavior, and timing behavior
-   across the actual pilot surfaces.
-6. **Switch the default deliberately.** Record the evidence and make the
-   Standard path the default only after every required surface is green. Keep
-   an explicit rollback setting until the pilot is accepted.
-7. **Retire fork dependence.** Remove fork-only defaults and documentation only
-   after rollback is no longer required and no surface reports a remaining
-   fork-only dependency.
+1. Record the unmodified upstream baseline, deployed provenance and per-surface capabilities.
+2. Complete required Epics 1–3: personal Home setup, explicit direct mode, and Home room devices. Preserve existing valid evidence and close new acceptance separately.
+3. Run the required household surface pilot using the approved capability matrix. A required unsupported capability remains a blocker until scope is explicitly revised.
+4. Verify repeatable household installation, upgrades and recovery; preserve intentional history and require re-pairing where migration cannot be supported.
+5. Complete HOME-MIG-09 (existing source Story 9): remove obsolete pairing, fork adapters, configuration, services and credentials after replacement acceptance. Keep the supported direct Standard mode.
 
-## Rollback rules
+## Recovery rules
 
-- Path selection happens before a turn. A route or transport failure during a
-  turn never silently changes path and never resends the turn.
-- Rollback restores the last verified path and requires a fresh user action;
-  it does not claim that the uncertain turn succeeded.
-- Capability absence is visible in diagnostics and surface state, with the
-  same typed outcome used by the owning repository's tests.
-- Configuration migration is idempotent and preserves the legacy source until
-  the new Home-paired configuration is verified.
+Restore a verified compatible Home/client/Standard build and recoverable configuration/data. Never automatically switch mode, replay an uncertain turn, or restore fork dependence as a supported configuration. If no compatible recovery build exists, pause rollout and report the affected surface unavailable. Verify recovery before cutover. Broader other-home distribution and automatic updater scope remain later work.

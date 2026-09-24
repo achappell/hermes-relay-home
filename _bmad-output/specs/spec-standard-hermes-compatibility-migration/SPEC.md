@@ -20,13 +20,15 @@ sources:
 > fork-dependent default. The surface matrix assigns ownership; the rollout
 > companion defines the gates and rollback rules.
 
+> **Approved correction (2026-09-23):** The [delivery contract](../../implementation-artifacts/course-correction-2026-09-23.md) supersedes conflicting mode, authentication, rollback, timing and session clauses below. Both modes require unmodified Standard. Home mode uses Home credentials; direct personal mode uses supported Standard authentication. The old fork path is retired under HOME-MIG-09; direct Standard remains supported.
+
 # Standard Hermes Compatibility and Cross-Surface Migration
 
 ## Why
 
 The household currently has several surfaces that reach a fork-specific Hermes
 path, while the product direction is to use the Standard Hermes Channel and
-keep fork changes exceptional. That is not a one-line endpoint change: audio,
+eliminate required fork changes. That is not a one-line endpoint change: audio,
 timing, prompts, interruption, credentials, route selection, session recovery,
 and local configuration must remain honest on every surface. This slice makes
 the migration a deliberate, reversible program before the remaining Home
@@ -134,7 +136,7 @@ the fork.
 
 - The pinned Standard release uses the stock gateway WebSocket at `/api/ws` for
   JSON-RPC session traffic and the separate `/api/audio/speak-stream` socket
-  for response PCM. The fork's `/voice-session` route is rollback-only.
+  for response PCM. The fork's `/voice-session` route is obsolete and removed at the HOME-MIG-09 cutover.
 - The pinned Standard release has no authoritative speech-timing extension;
   timing remains explicitly absent until a surface proves a playback-clock or
   duration contract.
@@ -147,8 +149,7 @@ the fork.
 
 - Which capabilities are mandatory before the first default switch, and which
   may remain explicitly unavailable in the pilot?
-- Session-bearing surface migrations use the Home bridge first; direct Standard
-  access is a Home-owned server-side concern, not an endpoint rollout path.
+- Personal clients explicitly select HomeBridge or direct Standard. Both paths use unmodified Standard; room devices require HomeBridge.
 - Configuration conversion preserves each surface's local Profile/history
   identity and rollback credential slot while a newly issued Home credential
   is paired and verified. The exact wire and failure rules live in the Home

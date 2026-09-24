@@ -15,6 +15,8 @@ context:
   - '{project-root}/_bmad-output/implementation-artifacts/spec-pilot-session-persist-and-runner-log.md'
 ---
 
+> **Approved correction (2026-09-23):** Apply the [delivery contract](course-correction-2026-09-23.md). Home personal admission includes macOS. Preserve existing owner-approval and client-owned session decisions. The draft is not proof that each named operation exists on the selected unmodified upstream baseline. Legacy rollback is retired at the migration gate.
+
 # Implementation Spec: HOME-NW-17
 
 ## Intent
@@ -63,7 +65,7 @@ Once paired, a client stays paired: it renews its own credential automatically i
 hermes-home://pair?home=https://caticornqueen.example.ts.net&code=K7Q4MX
 ```
 
-The client submits the existing `POST /api/v1/enrollment/requests` body, with `type` one of `tui`, `ios`, or `android`, and `requested_capabilities` including `client_claim`. It shows the returned confirmation code and polls `POST /api/v1/enrollment/requests/{request_id}/consume` until it receives credential material, `approval_pending`, or a terminal error.
+The client submits the existing `POST /api/v1/enrollment/requests` body, with `type` one of `tui`, `ios`, `macos`, or `android`, and `requested_capabilities` including `client_claim`. It shows the returned confirmation code and polls `POST /api/v1/enrollment/requests/{request_id}/consume` until it receives credential material, `approval_pending`, or a terminal error.
 
 ### Approval scope
 
@@ -188,7 +190,7 @@ A pending grant expires after 24 hours. A grant never becomes active without an 
 ## Code Map
 
 - `docs/contracts/v1/configuration.schema.json` and configuration storage: add Profile `ownership` (`shared` or an owner person ID).
-- `src/hermes_home/domain/credentials.py`: grant states `active` and `pending_owner`, bootstrap rule, owner decisions, and holder listing; add `client_claim` to `SUPPORTED_CREDENTIAL_CAPABILITIES`; add `client_grants` (Profile ID and opaque grant ID) to `CredentialScope` with bounded validation, serialization, and "absent grants nothing" semantics; validate grants against available Profiles at approval; return `approval_pending` from `consume_request` for pending requests; accept endpoint types `tui`, `ios`, and `android`.
+- `src/hermes_home/domain/credentials.py`: grant states `active` and `pending_owner`, bootstrap rule, owner decisions, and holder listing; add `client_claim` to `SUPPORTED_CREDENTIAL_CAPABILITIES`; add `client_grants` (Profile ID and opaque grant ID) to `CredentialScope` with bounded validation, serialization, and "absent grants nothing" semantics; validate grants against available Profiles at approval; return `approval_pending` from `consume_request` for pending requests; accept endpoint types `tui`, `ios`, `macos`, and `android`.
 - `src/hermes_home/bridge/production.py`: migrate `conversation_claims` to allow client claims without a Room or wake mapping (nullable `room_id` and `wake_mapping_id`, plus `grant_id` and `claim_kind`); exempt client claims from the Room conflict query, idle timer, and first-open binding; enforce the per-device claim limit; close client claims on `conversation.close` or after the reconnect grace.
 - `src/hermes_home/bridge/standard.py` and `src/hermes_home/bridge/endpoint.py`: forward the allowed session operations for client-claim connections to the claim's Profile; maintain the grant-scoped `session_ref` mapping; reject other session methods with `method_unavailable`.
 - `src/hermes_home/api/application.py`: add the `/api/v1/client-claims` branch mirroring the tap-claim durable-context checks and `_discard_new_claim` recovery; add `client_grants` to device configuration; add the `/pair` page and `/pair/api/*` cookie-authenticated admin equivalents.
@@ -230,8 +232,8 @@ A pending grant expires after 24 hours. A grant never becomes active without an 
 
 ## Consuming Stories
 
-- TUI: pair from a link (`hermes-relay pair <link>`), store the credential in the platform secure store (macOS Keychain; Secret Service on Linux) and refuse to pair when none is available, keep pairings keyed per Home so one client can pair with more than one household, show and decide pending owner grants (`/approvals`) and Profile holders, choose Profiles by grant, claim on launch, and own the session lifecycle like a regular CLI: a new session by default, `--continue` for the most recent, `--resume <ref>`, and in-app `/sessions`, `/new`, `/resume`, and `/title`. Close the claim on quit, renew the credential automatically, and keep the legacy voice-session path as rollback.
-- iOS and Android: scan the QR code, store the credential in platform secure storage keyed per Home, show and decide pending owner grants and Profile holders, and replace the operator-supplied disposable handles with client claims.
+- TUI: pair from a link (`hermes-relay pair <link>`), store the credential in the platform secure store (macOS Keychain; Secret Service on Linux) and refuse to pair when none is available, keep pairings keyed per Home so one client can pair with more than one household, show and decide pending owner grants (`/approvals`) and Profile holders, choose Profiles by grant, claim on launch, and own the session lifecycle like a regular CLI: a new session by default, `--continue` for the most recent, `--resume <ref>`, and in-app `/sessions`, `/new`, `/resume`, and `/title`. Close the claim on quit, renew the credential automatically, and retain supported direct Standard as an explicit setup mode; retire the legacy voice-session path under HOME-MIG-09.
+- iOS, macOS and Android: open the pairing link or enter the code and Home address (scan QR where supported), store the credential in platform secure storage keyed per Home, show and decide pending owner grants and Profile holders, and replace the operator-supplied disposable handles with client claims.
 
 ## Spec Change Log
 
