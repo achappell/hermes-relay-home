@@ -237,3 +237,49 @@ def test_sign_out_ends_the_session(page) -> None:
     page.call("POST", "/pair/api/logout", {})
 
     assert page.call("GET", "/pair/api/state").status == 401
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("POST", "/api/v1/enrollment/offers"),
+        ("GET", "/api/v1/enrollment/requests"),
+        ("POST", "/api/v1/enrollment/requests/r-1/approve"),
+        ("POST", "/api/v1/devices/d-1/revoke"),
+        ("GET", "/api/v1/configuration"),
+        ("GET", "/metrics"),
+    ],
+)
+def test_admin_token_routes_refuse_proxied_requests(page, method, path) -> None:
+    headers = {
+        "Authorization": "Bearer admin-secret",
+        "Content-Type": "application/json",
+        "X-Forwarded-For": "100.64.0.9",
+    }
+
+    response = page.app.handle(method, path, headers, b'{"schema": 1}')
+
+    assert response.status == 403
+    assert response.body["error"]["code"] == "admin_local_only"
+
+
+def test_device_routes_still_work_through_the_proxy(page) -> None:
+    page.sign_in()
+    page.call("POST", "/pair/api/offers", {})
+    headers = {"Content-Type": "application/json", "X-Forwarded-For": "100.64.0.9"}
+    body = {
+        "schema": 1,
+        "enrollment_code": "K7Q4MX2PNV",
+        "endpoint_id": "tui-1",
+        "label": "Laptop",
+        "type": "tui",
+        "requested_rooms": [],
+        "requested_capabilities": ["client_claim"],
+        "secure_storage": "platform_secure_store",
+    }
+
+    response = page.app.handle(
+        "POST", "/api/v1/enrollment/requests", headers, json.dumps(body).encode()
+    )
+
+    assert response.status == 200

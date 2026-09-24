@@ -2,7 +2,7 @@
 title: 'HOME-NW-17 — Pair personal clients from a Home page and admit their direct conversations'
 type: 'feature'
 created: '2026-09-23'
-status: 'in-progress'
+status: 'review'
 baseline_commit: '97dc3aa'
 route: 'dispatch'
 review_loop_iteration: 0
@@ -243,8 +243,9 @@ A pending grant expires after 24 hours. A grant never becomes active without an 
 - 2026-09-23: Resolved per Amanda: per-device client claim limit 8 and reconnect grace 120 seconds, both Home settings.
 - 2026-09-23: Resolved per Amanda: owned Profiles require owner approval from a paired client (first-device bootstrap by admin); clients store credentials in the platform secure store; Tailscale is required for client reachability for now, but Home authorization never depends on Tailscale identity; clients keep pairings per Home.
 - 2026-09-23: Resolved per Amanda: `session.list` shows the Profile's conversations from every surface, including Room devices and other paired clients.
+- 2026-09-24: Admin-token routes refuse proxied requests (`admin_local_only`), because Tailscale Serve publishes by path prefix and the device enrollment prefix also carries admin approval; the header is used only to deny.
 - 2026-09-24: Implementation refinements: session choice moves to claim time (new, most_recent, resume) with an HTTP session list, keeping the bridge's one-claim-one-session invariant; `/title` uses Hermes's advertised command; client grants live in their own device-keyed record; Profile ownership is an optional `shared` flag.
 
 ## Verification
 
-Pending implementation.
+See [`validation-home-nw-17.md`](validation-home-nw-17.md). Local implementation and tests pass; deployment and live Standard checks are pending.

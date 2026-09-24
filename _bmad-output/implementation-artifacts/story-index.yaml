@@ -117,6 +117,7 @@ stories:
     title: Pair personal clients from a Home page and admit their direct conversations
     kind: next-wave
     spec: _bmad-output/implementation-artifacts/spec-home-nw-17-client-pairing-and-direct-admission.md
+    validation: _bmad-output/implementation-artifacts/validation-home-nw-17.md
     github_issue: https://github.com/achappell/hermes-relay-home/issues/52
     horizon: now
     unblocks: TUI Home migration, iOS and Android client claims

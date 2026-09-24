@@ -194,6 +194,10 @@ class HomeApplication:
         pairing = self._pairing.handle(method, path, headers, body)
         if pairing is not None:
             return pairing
+        if _is_admin_route(method, path) and _is_proxied(headers):
+            # Admin-token routes stay loopback-only; the signed-in pairing page
+            # is the only published admin surface. This only ever denies.
+            return _error(403, "admin_local_only")
         if path == "/api/v1/configuration":
             if method == "GET":
                 return self._get_configuration(headers)
@@ -1974,6 +1978,32 @@ def _credential_error(error: CredentialStateError) -> HTTPResponse:
         "service_unavailable": 503,
     }
     return _error(status_by_code.get(error.code, 400), error.code)
+
+
+def _is_proxied(headers: Mapping[str, str]) -> bool:
+    return any(
+        isinstance(key, str) and key.lower() in {"x-forwarded-for", "forwarded"}
+        for key in headers
+    )
+
+
+def _is_admin_route(method: str, path: str) -> bool:
+    if path in {"/api/v1/configuration", "/metrics"} or path.startswith(
+        "/api/v1/diagnostics/"
+    ):
+        return True
+    if path == "/api/v1/enrollment/offers":
+        return True
+    if path == "/api/v1/enrollment/requests":
+        return method == "GET"
+    parts = path.split("/")
+    if len(parts) == 7 and parts[1:5] == ["api", "v1", "enrollment", "requests"]:
+        return parts[6] in {"approve", "reject"}
+    if len(parts) == 6 and parts[1:4] == ["api", "v1", "devices"]:
+        return parts[5] == "revoke"
+    if len(parts) == 7 and parts[1:4] == ["api", "v1", "devices"]:
+        return parts[5] == "credentials" and parts[6] == "rotate"
+    return False
 
 
 def _approved_client_profiles(selection: object) -> tuple[str, ...]:

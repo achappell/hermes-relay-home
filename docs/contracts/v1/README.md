@@ -354,6 +354,134 @@ After `playback_complete`, Home keeps an eight-second idle tail. A valid Touch
 claim during that tail closes the old claim as `superseded_by_touch` and opens
 the new one. Once the tail expires, it no longer blocks admission.
 
+## Personal clients (HOME-NW-17)
+
+TUI, iOS, and Android clients are paired personal clients. They hold the
+`client_claim` capability and one grant per approved Profile. They belong to no
+Room, never take part in arbitration, and never block, preempt, or supersede a
+Room conversation.
+
+### Pairing
+
+The Home pairing page (`GET /pair`) creates an offer and shows a pairing link,
+a QR code of that link, and a short code for typing:
+
+```text
+hermes-home://pair?home=https%3A%2F%2Fhome.example.ts.net&code=K7Q4MX2PNV
+```
+
+The client submits the existing `POST /api/v1/enrollment/requests` body with
+`type` of `tui`, `ios`, or `android` and `requested_capabilities` containing
+`client_claim`. Short codes are accepted in any case, with or without the dash.
+The client shows the returned confirmation code and polls
+`POST /api/v1/enrollment/requests/{request_id}/consume`:
+
+- `409 approval_pending` — keep waiting; the page has not approved yet;
+- `403 rejected` — the request was rejected; start again;
+- `410 expired_or_consumed` — the five-minute window closed; start again;
+- `200` — credential material plus `client_grants`.
+
+```json
+{
+  "schema": 1,
+  "device_id": "id-7",
+  "credential": "...",
+  "generation": 1,
+  "expires_at": 1735000000.0,
+  "scope": {"rooms": [], "capabilities": ["client_claim"], "wake_mappings": []},
+  "client_grants": [
+    {"grant_id": "grant-01J...", "label": "Amanda", "status": "active", "available": true},
+    {"grant_id": "grant-01K...", "label": "Jensen", "status": "pending_owner", "available": true}
+  ]
+}
+```
+
+Clients must store the credential in the platform secure store and keep it per
+Home. Profile IDs never reach a client; `grant_id` and `label` do.
+
+**Staying paired.** Credentials last 90 days. A client renews itself with
+`POST /api/v1/devices/{device_id}/credentials/renew` during the last 14 days,
+normally on connect. A client unused for 90 days must pair again. Revocation
+from the page, or re-enrollment, ends the pairing.
+
+**Profile ownership.** A Profile with `"shared": true` in configuration can be
+granted on the page directly. Any other Profile is owned: the first device to
+receive it is a recorded bootstrap, and every later grant is
+`pending_owner` until a device already holding that Profile approves it.
+
+`GET /api/v1/devices/{device_id}/configuration` returns the current
+`client_grants` beside the configuration `revision`.
+
+### `POST /api/v1/client-claims`
+
+```json
+{
+  "schema": 1,
+  "claim_id": "client-01J...",
+  "device_id": "id-7",
+  "configuration_revision": 13,
+  "grant_id": "grant-01J...",
+  "session": {"mode": "resume", "session_ref": "sref-01J..."}
+}
+```
+
+`session` is optional: `{"mode": "new"}` (the default), `{"mode":
+"most_recent"}`, or `{"mode": "resume", "session_ref": ...}`. The response adds
+the opaque handle and the chosen session:
+
+```json
+{
+  "schema": 1,
+  "claim_id": "client-01J...",
+  "decision": "granted",
+  "configuration_revision": 13,
+  "conversation_handle": "opaque-home-claim-01J...",
+  "session": {"mode": "resumed", "session_ref": "sref-01J..."}
+}
+```
+
+The handle opens the existing bridge with `conversation.open`. A client claim
+has no idle timer. It closes on `conversation.close`, when the client stays
+disconnected longer than the reconnect grace (default 120 s), or on
+revocation. To switch sessions, a client closes its claim and makes a new one.
+Rename the current session with Hermes's advertised `title` command through
+`command.dispatch`.
+
+Denials: `client_claim_unavailable` (403), `grant_pending` (409),
+`stale_configuration` (409), `profile_unavailable` (409), `claim_limit`
+(409, default 8 per device), `session_unavailable` (404, unknown reference for
+this grant), and `session_busy` (409, another active claim holds that session).
+
+### `POST /api/v1/client-sessions/list`
+
+```json
+{"schema": 1, "grant_id": "grant-01J...", "limit": 20}
+```
+
+```json
+{"schema": 1, "sessions": [
+  {"session_ref": "sref-01J...", "title": "Groceries", "started_at": 1727120000, "message_count": 14, "active": false}
+]}
+```
+
+The list is the Profile's conversations from every surface (Room devices and
+other clients), newest first, 1–50 entries. `session_ref` values are opaque and
+valid only for the grant that received them. `active` marks a session another
+active claim holds; resuming it returns `session_busy`.
+
+### Profile grants
+
+A device that holds an active grant for a Profile can manage that Profile's
+other grants:
+
+- `GET /api/v1/profile-grants/pending` — grants waiting for this owner;
+- `GET /api/v1/profile-grants/holders` — every device holding this device's
+  Profiles, by label and type only;
+- `POST /api/v1/profile-grants/{grant_id}/approve`, `/reject`, `/revoke` with
+  `{"schema": 1}`.
+
+A pending grant expires after 24 hours. Revoking a grant closes its claims.
+
 ## Errors
 
 All error documents use the versioned envelope and a stable `error.code`.
@@ -377,4 +505,9 @@ Initial codes are:
 - `conversation_active` — this Room already has an active conversation; stop or
   wait for that conversation to close before waking again;
 - `claim_denied` — a valid claim lost arbitration or failed eligibility;
+- `client_claim_unavailable`, `grant_pending`, `claim_limit`,
+  `session_unavailable`, `session_busy`, `approval_pending`, `rejected` —
+  personal-client pairing and claims, described above;
+- `admin_local_only` — an admin-token route was called through a proxy; use
+  the pairing page or loopback;
 - `service_unavailable` — the service cannot safely answer the request.
