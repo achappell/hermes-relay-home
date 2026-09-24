@@ -51,3 +51,9 @@ After this repair: focused Standard bridge, endpoint, and server suites **227 pa
 ## Final live repair check
 
 Deployed revision `e4838793943b2820c62cb8f68ecfb52cabfee196` includes the close-acknowledgment race fix. Wheel SHA-256: `ffb8d4dc99c3a6559a7ca293979355c176ce64f3ac3238d7bed211d99b56d9b0`. All 32 installed Python sources match. A fresh synthetic paired-client turn observed audio start at 0.64s, text completion at 1.58s, audio end at 2.21s, 25,856 PCM bytes and a confirmed claim close. The original user prompt was never replayed. The previous wheel/package backup remains available; existing pairing and configuration were preserved.
+
+## Content-free reader diagnostics
+
+Added bounded exception/cause class names and an allowlist of fixed parser failure descriptions to the Standard reader failure log and unexpected endpoint upstream-loss branches. Remote error messages, payloads, IDs, credentials, and tracebacks are not logged by these additions. Three regressions verify a recognized parser reason is recorded while arbitrary protocol messages and transport URLs containing secrets remain absent.
+
+Focused bridge/endpoint/server suites: **230 passed in 3.08s**. Ruff lint/format and whitespace checks passed. Diagnostic changes preserve connection behavior and have not been deployed by this agent.

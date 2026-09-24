@@ -5955,3 +5955,41 @@ def test_explicit_close_ack_survives_concurrent_real_bridge_event_failure():
         assert socket.closed
     finally:
         endpoint.close()
+
+
+@pytest.mark.parametrize(
+    "cause, expected_detail",
+    [
+        (
+            BridgeProtocolError("standard event has conflicting session identity"),
+            "standard event has conflicting session identity",
+        ),
+        (BridgeProtocolError("private-payload-secret"), "unclassified"),
+        (
+            ConnectionError("wss://server/api/ws?token=private-token-secret"),
+            "unclassified",
+        ),
+    ],
+)
+def test_reader_failure_diagnostics_exclude_private_content(
+    caplog, cause, expected_detail
+):
+    socket = FakeJsonSocket([])
+    client = StandardGatewayClient(
+        url="wss://example/api/ws",
+        token="private-token-secret",
+        socket_factory=FakeSocketFactory(socket),
+    )
+    error = BridgeTransportError("private-exception-secret")
+    error.__cause__ = cause
+    client._socket = socket
+    client._closed = False
+    try:
+        client._set_reader_error(error, socket)
+        assert "error=BridgeTransportError" in caplog.text
+        assert "cause=" + type(cause).__name__ in caplog.text
+        assert "detail=" + expected_detail in caplog.text
+        assert "private-" not in caplog.text
+        assert "wss://" not in caplog.text
+    finally:
+        client.close()

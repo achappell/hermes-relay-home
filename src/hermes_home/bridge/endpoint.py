@@ -37,6 +37,7 @@ from hermes_home.bridge.standard import (
     BridgeTurn,
     GatewayRPCError,
     endpoint_safe_payload,
+    safe_failure_diagnostic,
 )
 from hermes_home.observability.diagnostics import DiagnosticEvent, DiagnosticsRecorder
 
@@ -1182,19 +1183,27 @@ class BridgeEndpoint:
                 self._mark_unavailable("protocol_error")
                 self.close()
                 return
-            except BridgeTimeoutError, TimeoutError:
+            except (BridgeTimeoutError, TimeoutError) as error:
                 with self._state_lock:
                     if self._conversation_closing:
                         continue
                 # The Standard adapter consumes healthy idle polls itself.
                 # A timeout escaping that adapter is an unavailable transport.
+                LOGGER.warning(
+                    "Home upstream unavailable: error=%s cause=%s detail=%s",
+                    *safe_failure_diagnostic(error),
+                )
                 self._mark_unavailable("transport_timeout")
                 self._close_connection(code=1011, reason="upstream transport timeout")
                 continue
-            except BridgeTransportError, ConnectionError, EOFError, OSError:
+            except (BridgeTransportError, ConnectionError, EOFError, OSError) as error:
                 with self._state_lock:
                     if self._conversation_closing:
                         continue
+                LOGGER.warning(
+                    "Home upstream unavailable: error=%s cause=%s detail=%s",
+                    *safe_failure_diagnostic(error),
+                )
                 self._mark_unavailable("transport_unavailable")
                 # Wake the endpoint's receive loop rather than leaving the UI
                 # waiting forever. Keep the bridge's uncertain turn for the
@@ -1203,10 +1212,14 @@ class BridgeEndpoint:
                     code=1011, reason="upstream transport unavailable"
                 )
                 continue
-            except RuntimeError:
+            except RuntimeError as error:
                 with self._state_lock:
                     if self._conversation_closing:
                         continue
+                LOGGER.warning(
+                    "Home upstream unavailable: error=%s cause=%s detail=%s",
+                    *safe_failure_diagnostic(error),
+                )
                 self._mark_unavailable("hermes_unavailable")
                 self._close_connection(code=1011, reason="upstream unavailable")
                 continue

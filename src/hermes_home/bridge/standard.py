@@ -638,6 +638,10 @@ class StandardGatewayClient:
             if self._closed or self._socket is not socket:
                 return
             self._reader_error = error
+            LOGGER.warning(
+                "Standard reader unavailable: error=%s cause=%s detail=%s",
+                *safe_failure_diagnostic(error),
+            )
             self._condition.notify_all()
 
     def _receive_frame(
@@ -658,6 +662,42 @@ class StandardGatewayClient:
             if self._socket is None or self._closed:
                 raise RuntimeError("standard gateway is not connected")
             return self._socket
+
+
+def safe_failure_diagnostic(error: BaseException) -> tuple[str, str, str]:
+    """Content-free failure metadata; never log remote exception messages."""
+    cause = error.__cause__
+    protocol = cause if isinstance(cause, BridgeProtocolError) else error
+    allowed = {
+        "standard gateway JSON-RPC frame is not an object",
+        "standard gateway JSON-RPC version is not 2.0",
+        "standard gateway response has no valid ID",
+        "standard event params are not an object",
+        "standard event has no type",
+        "standard event payload is not an object",
+        "standard event session identity is not a string",
+        "standard title event has no runtime session identity",
+        "standard event has conflicting session identity",
+        "standard event correlation ID is not a string",
+        "standard event has conflicting correlation ID",
+        "standard event sequence must be a positive integer",
+        "standard gateway sent duplicate gateway.ready",
+    }
+    detail = "unclassified"
+    if isinstance(protocol, BridgeProtocolError) and str(protocol) in allowed:
+        detail = str(protocol)
+
+    def class_name(value: BaseException | None) -> str:
+        if value is None:
+            return "none"
+        name = type(value).__name__
+        return (
+            name
+            if len(name) <= 64 and name.isascii() and name.isidentifier()
+            else "unknown"
+        )
+
+    return class_name(error), class_name(cause), detail
 
 
 def _validate_timeout(value: float | None, name: str) -> float | None:
