@@ -34,6 +34,7 @@ ENROLLMENT_TTL_SECONDS = 300.0
 CREDENTIAL_TTL_SECONDS = 90 * 24 * 60 * 60
 RENEWAL_WINDOW_SECONDS = 14 * 24 * 60 * 60
 ROTATION_OVERLAP_SECONDS = 600
+DEVICE_CREDENTIAL_BYTES = 32
 SECURE_STORAGE_PLATFORM = "platform_secure_store"
 CLIENT_ENDPOINT_TYPES = frozenset({"tui", "ios", "macos", "android"})
 PENDING_OWNER_GRANT_TTL_SECONDS = 24 * 60 * 60
@@ -316,6 +317,7 @@ class CredentialService:
         clock: Callable[[], float] = time.time,
         id_factory: Callable[[], str] | None = None,
         token_factory: Callable[[], str] | None = None,
+        device_token_factory: Callable[[], str] | None = None,
         confirmation_factory: Callable[[], str] | None = None,
         revocation_observer: RevocationObserver | None = None,
         short_code_factory: Callable[[], str] | None = None,
@@ -328,6 +330,14 @@ class CredentialService:
         self._clock = clock
         self._id_factory = id_factory or (lambda: uuid.uuid4().hex)
         self._token_factory = token_factory or (lambda: secrets.token_urlsafe(24))
+        # Device credentials use the Home wire representation: 32 random bytes,
+        # 43 unpadded base64url characters. Clients (Android) validate exactly
+        # that shape, so it must not follow the shorter enrollment-code length.
+        self._device_token_factory = device_token_factory or (
+            token_factory
+            if token_factory is not None
+            else lambda: secrets.token_urlsafe(DEVICE_CREDENTIAL_BYTES)
+        )
         self._confirmation_factory = confirmation_factory or _confirmation_code
         self._short_code_factory = short_code_factory or _short_enrollment_code
         self._revocation_observer = revocation_observer
@@ -710,7 +720,7 @@ class CredentialService:
             if offer["status"] != "pending":
                 raise CredentialStateError("expired_or_consumed")
 
-            token = self._token_factory()
+            token = self._device_token_factory()
             if type(token) is not str or not token:
                 raise CredentialValidationError("credential material must not be blank")
             credentials = _records(state, "credentials")
@@ -885,7 +895,7 @@ class CredentialService:
             if renewal_only and current_expires_at - now > RENEWAL_WINDOW_SECONDS:
                 raise CredentialStateError("conflict")
 
-            token = self._token_factory()
+            token = self._device_token_factory()
             if type(token) is not str or not token:
                 raise CredentialValidationError("credential material must not be blank")
             scope = _scope_from_record(current["scope"])

@@ -941,3 +941,56 @@ def test_reopening_the_credential_store_recovers_active_and_revoked_state(
         assert recovered_again.authenticate_device(material.credential) is None
     finally:
         reopened_again.close()
+
+
+def _android_accepts(credential: str) -> bool:
+    """Mirror Android's HomeCredentialValidator: 43 base64url chars, 32 bytes."""
+    import base64
+    import re
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]{43}", credential):
+        return False
+    return len(base64.urlsafe_b64decode(credential + "=")) == 32
+
+
+def test_device_credentials_use_the_32_byte_wire_representation() -> None:
+    clock = [1_000.0]
+    service = CredentialService(
+        store=InMemoryCredentialStore(),
+        root_secret=b"r" * 32,
+        clock=lambda: clock[0],
+    )
+    offer = service.create_offer()
+    request = service.submit_request(
+        enrollment_code=offer.enrollment_code,
+        endpoint_id="pixel",
+        label="Pixel",
+        endpoint_type="android",
+        requested_rooms=[],
+        requested_capabilities=["client_claim"],
+        secure_storage="platform_secure_store",
+    )
+    service.approve_request(
+        request.request_id,
+        CredentialScope.from_values(rooms=[], capabilities=["client_claim"]),
+        configured_rooms=[],
+        configured_profiles=["amanda"],
+        client_profiles=["amanda"],
+    )
+
+    material = service.consume_request(
+        request.request_id,
+        enrollment_code=offer.enrollment_code,
+        secure_storage="platform_secure_store",
+    )
+    clock[0] = material.expires_at - 60
+    renewed = service.renew(
+        device_id=material.device_id,
+        credential=material.credential,
+        request_id="renew-1",
+        expected_generation=material.generation,
+    )
+
+    assert _android_accepts(material.credential)
+    assert _android_accepts(renewed.credential)
+    assert len(offer.enrollment_code) == 32
