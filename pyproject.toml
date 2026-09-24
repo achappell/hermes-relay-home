@@ -9,7 +9,7 @@ description = "Local Home service for canonical Hermes household state and wake 
 readme = "README.md"
 requires-python = ">=3.14,<3.15"
 authors = [{ name = "Amanda Chappell" }]
-dependencies = ["cryptography>=44", "websockets>=17,<18"]
+dependencies = ["cryptography>=44", "segno>=1.6,<2", "websockets>=17,<18"]
 
 [project.scripts]
 hermes-home = "hermes_home.runtime:main"

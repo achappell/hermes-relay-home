@@ -50,6 +50,8 @@ class _HomeRequestHandler(BaseHTTPRequestHandler):
         self.send_response(response.status)
         self.send_header("Content-Type", response.content_type)
         self.send_header("Content-Length", str(len(payload)))
+        for name, value in response.headers:
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(payload)
 

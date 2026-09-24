@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
 from threading import RLock
 
+from hermes_home.api.pairing import PairingSurface
+from hermes_home.api.responses import HTTPResponse
 from hermes_home.auth.credentials import PersistentCredentialAuthenticator
 from hermes_home.auth.static import StaticCredentialAuthenticator
 from hermes_home.domain.arbitration import (
@@ -64,12 +65,7 @@ from hermes_home.storage.sqlite import (
 
 MAX_REQUEST_BODY_BYTES = 1_048_576
 
-
-@dataclass(frozen=True, slots=True)
-class HTTPResponse:
-    status: int
-    body: dict[str, object] | str = field(repr=False)
-    content_type: str = "application/json; charset=utf-8"
+__all__ = ["MAX_REQUEST_BODY_BYTES", "HTTPResponse", "HomeApplication"]
 
 
 class HomeApplication:
@@ -117,6 +113,12 @@ class HomeApplication:
             )
         self._clock = clock
         self._sleeper = sleeper
+        self._pairing = PairingSurface(
+            authenticate_admin=self._authenticator.authenticate_admin,
+            credential_service=credential_service,
+            configuration=configuration_store.read,
+            close_grant_claims=self._close_grant_claims,
+        )
         self._metrics = metrics or MetricsRegistry()
         self._diagnostics = diagnostics or DiagnosticsRecorder(
             store=InMemoryDiagnosticsStore(),
@@ -130,6 +132,11 @@ class HomeApplication:
             pass
         else:
             self._set_revision(snapshot)
+
+    def _close_grant_claims(self, grant_id: str) -> None:
+        store = self._conversation_claim_store
+        if store is not None and hasattr(store, "close_grant_claims"):
+            store.close_grant_claims(grant_id, reason="grant_revoked")
 
     @property
     def device_authenticator(self):
@@ -184,6 +191,9 @@ class HomeApplication:
         *,
         correlation_id: str | None = None,
     ) -> HTTPResponse:
+        pairing = self._pairing.handle(method, path, headers, body)
+        if pairing is not None:
+            return pairing
         if path == "/api/v1/configuration":
             if method == "GET":
                 return self._get_configuration(headers)
@@ -2345,6 +2355,10 @@ def _health_diagnostic_code(reason: str | None) -> str | None:
 
 
 def _metric_route(path: str) -> str:
+    if path == "/pair" or path.startswith("/pair/"):
+        return "pairing"
+    if path.startswith("/api/v1/profile-grants/"):
+        return "profile_grants"
     if path.startswith("/api/v1/diagnostics/timeline/"):
         return "diagnostics_timeline"
     if path.startswith("/api/v1/devices/") and path.endswith("/watch"):
@@ -2357,6 +2371,8 @@ def _metric_route(path: str) -> str:
         "/api/v1/configuration": "configuration",
         "/api/v1/wake-claims": "wake_claims",
         "/api/v1/touch-claims": "touch_claims",
+        "/api/v1/client-claims": "client_claims",
+        "/api/v1/client-sessions/list": "client_sessions",
         "/api/v1/devices": "device_configuration",
         "/metrics": "metrics",
         "/api/v1/diagnostics/status": "diagnostics_status",

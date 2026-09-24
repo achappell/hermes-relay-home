@@ -307,3 +307,26 @@ def test_paired_devices_show_label_type_and_grants() -> None:
     assert device.device_type == "tui"
     assert device.status == "active"
     assert [grant.profile_id for grant in device.grants] == ["amanda"]
+
+
+def test_short_code_offer_accepts_typed_variants() -> None:
+    service = CredentialService(
+        store=InMemoryCredentialStore(),
+        root_secret=b"r" * 32,
+        clock=Clock(),
+        short_code_factory=lambda: "K7Q4MX2PNV",
+    )
+    offer = service.create_offer(short_code=True)
+
+    request = service.submit_request(
+        enrollment_code="k7q4m-x2pnv",
+        endpoint_id="laptop",
+        label="Laptop",
+        endpoint_type="tui",
+        requested_rooms=[],
+        requested_capabilities=["client_claim"],
+        secure_storage="platform_secure_store",
+    )
+
+    assert offer.enrollment_code == "K7Q4MX2PNV"
+    assert request.status == "pending"

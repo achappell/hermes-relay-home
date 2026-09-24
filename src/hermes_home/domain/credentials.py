@@ -318,6 +318,7 @@ class CredentialService:
         token_factory: Callable[[], str] | None = None,
         confirmation_factory: Callable[[], str] | None = None,
         revocation_observer: RevocationObserver | None = None,
+        short_code_factory: Callable[[], str] | None = None,
     ) -> None:
         if type(root_secret) is not bytes or len(root_secret) != 32:
             raise CredentialValidationError("root secret must contain 32 bytes")
@@ -328,16 +329,29 @@ class CredentialService:
         self._id_factory = id_factory or (lambda: uuid.uuid4().hex)
         self._token_factory = token_factory or (lambda: secrets.token_urlsafe(24))
         self._confirmation_factory = confirmation_factory or _confirmation_code
+        self._short_code_factory = short_code_factory or _short_enrollment_code
         self._revocation_observer = revocation_observer
 
-    def create_offer(self, *, expires_in_seconds: int = 300) -> CredentialOffer:
-        """Create a short-lived offer and return its code to the caller once."""
+    def create_offer(
+        self,
+        *,
+        expires_in_seconds: int = 300,
+        short_code: bool = False,
+    ) -> CredentialOffer:
+        """Create a short-lived offer and return its code to the caller once.
+
+        ``short_code`` issues a 10-character code a person can type from the
+        pairing page; it is still single-use, expires with the offer, and is
+        confirmed against the request's confirmation code before approval.
+        """
         if type(expires_in_seconds) is not int or not 1 <= expires_in_seconds <= 300:
             raise CredentialValidationError(
                 "offer expiry must be between 1 and 300 seconds"
             )
         offer_id = _identifier(self._id_factory(), "offer_id")
-        enrollment_code = self._token_factory()
+        enrollment_code = (
+            self._short_code_factory() if short_code else self._token_factory()
+        )
         if type(enrollment_code) is not str or not enrollment_code:
             raise CredentialValidationError("enrollment code must not be blank")
         digest = self._digest(enrollment_code)
@@ -376,6 +390,7 @@ class CredentialService:
         """Turn possession of an offer code into a pending request only."""
         if type(enrollment_code) is not str or not enrollment_code:
             raise CredentialValidationError("enrollment code must not be blank")
+        enrollment_code = normalize_enrollment_code(enrollment_code)
         endpoint_id = _identifier(endpoint_id, "endpoint_id")
         label = _identifier(label, "label")
         endpoint_type = _identifier(endpoint_type, "type")
@@ -641,6 +656,7 @@ class CredentialService:
         request_id = _identifier(request_id, "request_id")
         if type(enrollment_code) is not str or not enrollment_code:
             raise CredentialValidationError("enrollment code must not be blank")
+        enrollment_code = normalize_enrollment_code(enrollment_code)
         if secure_storage != SECURE_STORAGE_PLATFORM:
             raise CredentialValidationError("platform secure storage is required")
         digest = self._digest(enrollment_code)
@@ -1420,6 +1436,36 @@ def _integer(value: object, field: str) -> int:
     if type(value) is not int or value < 1:
         raise CredentialValidationError(f"{field} must be a positive integer")
     return value
+
+
+_CODE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+SHORT_ENROLLMENT_CODE_LENGTH = 10
+
+
+def _short_enrollment_code() -> str:
+    return "".join(
+        secrets.choice(_CODE_ALPHABET) for _ in range(SHORT_ENROLLMENT_CODE_LENGTH)
+    )
+
+
+def normalize_enrollment_code(value: str) -> str:
+    """Accept a typed short code in any case, with dashes or spaces.
+
+    Long URL-safe codes cannot reduce to a 10-character code, so they pass
+    through unchanged.
+    """
+    compact = value.replace("-", "").replace(" ", "").upper()
+    if len(compact) == SHORT_ENROLLMENT_CODE_LENGTH and all(
+        character in _CODE_ALPHABET for character in compact
+    ):
+        return compact
+    return value
+
+
+def format_short_enrollment_code(value: str) -> str:
+    """Show a short code as two readable groups, for example ``K7Q4M-X2PNV``."""
+    half = SHORT_ENROLLMENT_CODE_LENGTH // 2
+    return f"{value[:half]}-{value[half:]}"
 
 
 def _confirmation_code() -> str:
