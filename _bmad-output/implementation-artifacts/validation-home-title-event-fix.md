@@ -47,3 +47,7 @@ The live trial completed text and audio, then exposed a race in the new transpor
 `test_explicit_close_ack_survives_concurrent_real_bridge_event_failure` uses a real HomeBridge and forces the event pump to process gateway shutdown before allowing the close RPC to return. It verifies the `closed` acknowledgment reaches the client while the downstream connection remains open. No Standard changes were needed.
 
 After this repair: focused Standard bridge, endpoint, and server suites **227 passed in 2.92s**; full Home suite **685 passed in 7.13s**; Ruff lint/format and whitespace checks passed. The follow-up repair has not been deployed by this agent.
+
+## Final live repair check
+
+Deployed revision `e4838793943b2820c62cb8f68ecfb52cabfee196` includes the close-acknowledgment race fix. Wheel SHA-256: `ffb8d4dc99c3a6559a7ca293979355c176ce64f3ac3238d7bed211d99b56d9b0`. All 32 installed Python sources match. A fresh synthetic paired-client turn observed audio start at 0.64s, text completion at 1.58s, audio end at 2.21s, 25,856 PCM bytes and a confirmed claim close. The original user prompt was never replayed. The previous wheel/package backup remains available; existing pairing and configuration were preserved.
