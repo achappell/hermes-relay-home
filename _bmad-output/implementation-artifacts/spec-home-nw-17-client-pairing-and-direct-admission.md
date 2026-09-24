@@ -2,7 +2,7 @@
 title: 'HOME-NW-17 — Pair personal clients from a Home page and admit their direct conversations'
 type: 'feature'
 created: '2026-09-23'
-status: 'draft'
+status: 'in-progress'
 baseline_commit: '97dc3aa'
 route: 'dispatch'
 review_loop_iteration: 0
@@ -38,18 +38,18 @@ Once paired, a client stays paired: it renews its own credential automatically i
 
 **Never:** Expose Profile IDs, Session IDs, Hermes tokens, prompts, transcripts, or audio to the client. Accept acoustic evidence, a wake mapping, a Room, or a raw Profile ID on the client-claim route. Let a client claim affect a Room's claim, arbitration, or idle tail. Let `touch_claim` or `wake_claim` credentials submit client claims, or the reverse. Publish admin routes (offer creation, request listing, approval, rejection, rotation, revocation, configuration writes, metrics, diagnostics) on the tailnet except through the authenticated pairing page. Store the admin token in the browser beyond the page session. Add a sibling-repository change.
 
-**Compatibility decision:** Evolve `/api/v1/*` in place. `client_claim` is a new value in `SUPPORTED_CREDENTIAL_CAPABILITIES`. A scope without `client_grants` grants no client claim, matching the empty-grant precedents of HOME-NW-05 and HOME-NW-16. Existing credentials are unaffected.
+**Compatibility decision:** Evolve `/api/v1/*` in place. `client_claim` is a new value in `SUPPORTED_CREDENTIAL_CAPABILITIES`. A device without `client_grants` records grants no client claim, matching the empty-grant precedents of HOME-NW-05 and HOME-NW-16. Existing credentials are unaffected.
 
 ## Resolved Direction
 
 - **Approval lives on a Home page for now.** The page is the first trusted surface for FR-28. It is built on public API routes, so the iOS and Android control-plane stories (3-I, 3-A) can later approve through the same calls without a second pairing model.
-- **Profile owners approve access to their own Profile.** Each Profile is configured as `shared` (for example Spark or a family Profile) or owned by one person. The admin may grant a shared Profile on the pairing page. A grant to an owned Profile becomes `pending_owner` until the owner approves it from a client already paired to that Profile; the grant appears there as an approval request showing the device label, type, and requester. Bootstrap exception: when an owned Profile has no paired client yet, the admin may approve the first grant on the page, and that approval is recorded. Every client of a Profile can list the devices currently holding it, so no grant is silent. Revocation by the owner or the admin is immediate.
+- **Profile owners approve access to their own Profile.** Each Profile carries an optional `shared` flag in configuration (for example Spark or a family Profile); a Profile without it is owned. Owner identity is proved by holding an active grant for that Profile, so Home needs no separate person record. The admin may grant a shared Profile on the pairing page. A grant to an owned Profile becomes `pending_owner` until the owner approves it from a client already paired to that Profile; the grant appears there as an approval request showing the device label, type, and requester. Bootstrap exception: when an owned Profile has no paired client yet, the admin may approve the first grant on the page, and that approval is recorded. Every client of a Profile can list the devices currently holding it, so no grant is silent. Revocation by the owner or the admin is immediate.
 - **Home authentication does not depend on the network path.** Clients currently reach Home over Tailscale, and the pairing link carries the tailnet address, so a client without Tailscale cannot pair yet; home-network routes remain HOME-NW-04 roaming work. Home never uses Tailscale identity headers for authorization. The pairing page signs in with the admin credential, and owner approval uses the owner's paired Device credential. Either works unchanged behind a different route or proxy.
 - **A pairing link carries everything the client needs.** The QR code and the copyable text encode one link, `hermes-home://pair?home=<https base URL>&code=<enrollment code>`. A client needs nothing else: no URL typing, no pasted credential, no handle. The short code (for example `K7Q-4MX`) is shown for typing when a camera is not available, with the Home base URL shown beside it.
-- **Profiles are granted per client, not per Room.** A client credential carries a list of `client_grants`, one per approved Profile, each with an opaque `grant_id` and a display label. Device configuration returns the list of `{grant_id, label}`; Profile IDs stay on Home. The TUI's Profile switcher and the mobile Profile pickers choose by `grant_id`.
+- **Profiles are granted per client, not per Room.** A client device holds `client_grants`, one per approved Profile, each with an opaque `grant_id`, a display label, and a state (`active` or `pending_owner`). Grants live in their own record keyed by device, not inside the frozen credential scope, so owner decisions, renewal, and rotation never rewrite a credential; the scope carries only the `client_claim` capability. `client_claim` may be approved only for endpoint types `tui`, `ios`, and `android`. Device configuration returns the list of `{grant_id, label}`; Profile IDs stay on Home. The TUI's Profile switcher and the mobile Profile pickers choose by `grant_id`.
 - **No Room, no arbitration, no preemption.** A personal client is not a household room device. Its claims are keyed by device and grant. Several terminal windows on one laptop are several clients of the same device, so a device may hold several active claims per grant, bounded by `HERMES_HOME_CLIENT_CLAIMS_PER_DEVICE` (default 8); excess claims are denied `claim_limit`.
-- **The client owns the session lifecycle, Home owns authority.** A client claim has no idle timer and no first-turn session binding. It stays active while the client holds its bridge connection, through the existing in-process reconnect path, and closes when the client sends `conversation.close`, when its connection is gone past the reconnect grace (`HERMES_HOME_CLIENT_RECONNECT_GRACE_SECONDS`, default 120), or on revocation. Home never decides that a conversation has ended because the user paused; the Room idle tail and first-open expiry remain wake/tap-claim rules only.
-- **Session operations are stock Standard operations.** After `conversation.open`, a client-claim connection may call `session.list`, `session.create`, `session.resume`, `session.most_recent`, `session.title`, and `session.history` with their stock Standard semantics. Home forwards each to the claim's Profile and nowhere else, and rewrites Standard Session IDs to opaque, Home-issued `session_ref` values that are valid only for that grant. A `session_ref` from another grant or device is `session_unavailable`. `session.delete`, `session.branch`, `session.redirect`, and control/configuration operations are not exposed.
+- **The client owns the session lifecycle, Home owns authority.** A client claim has no idle timer. It stays active while the client holds its bridge connection, through the existing in-process reconnect path, and closes when the client sends `conversation.close`, when its connection is gone past the reconnect grace (`HERMES_HOME_CLIENT_RECONNECT_GRACE_SECONDS`, default 120), or on revocation. Home never decides that a conversation has ended because the user paused; the Room idle tail and first-open expiry remain wake/tap-claim rules only.
+- **The client chooses the session when it claims.** The bridge keeps its invariant of one claim bound to one Standard Session. A client claim names the session it wants: `new` (default), `most_recent` (Home asks Standard `session.most_recent` for the Profile), or `resume` with a `session_ref`. Switching sessions in the client (`/new`, `/resume`) closes the current claim and makes a new one, as a CLI reconnects. Listing uses `POST /api/v1/client-sessions/list`, which asks Standard `session.list` for the grant's Profile over a short-lived gateway connection. Renaming uses Hermes's own advertised `title` command through the existing bridge command dispatch. Home rewrites Standard Session IDs to opaque `session_ref` values that are valid only for that grant; a reference from another grant is `session_unavailable`. No other Standard session operation is exposed.
 - **Sessions are per Profile, as in a CLI.** `session.list` returns the Profile's Standard sessions, the same view a Hermes CLI signed in to that Profile would see, including conversations started by Room devices (Puck, Touch panel, W/K) and by other paired clients, so a conversation started anywhere can be resumed from any client paired to the same Profile. The list is bounded (default 50, newest first) and carries only `session_ref`, title, last-active time, message count, and whether another active claim currently holds it.
 - **Resume never replays.** Resuming a session restores Hermes's stored history; any turn left uncertain by a disconnect stays unresolved and is reported, never re-sent.
 - **Long-lived pairing through automatic renewal.** The 90-day credential and 14-day renewal window stay as implemented. Clients renew on connect when inside the window, and the contract documents that obligation. A client that is unused for 90 days must pair again; the page offers "pair again" for an expired device with its previous Profiles preselected.
@@ -116,21 +116,21 @@ A success response mirrors the tap-claim envelope:
 }
 ```
 
-### Session operations on a client-claim connection
+The request may name a session: `"session": {"mode": "new"}` (the default when absent), `{"mode": "most_recent"}`, or `{"mode": "resume", "session_ref": "sref-01J..."}`. The response adds `"session": {"mode": "new"}` or `{"mode": "resumed", "session_ref": "sref-01J..."}`. `most_recent` with no stored session for the Profile falls back to `new`.
 
-The client opens the bridge with `conversation.open` and its handle, then manages sessions itself:
+### `POST /api/v1/client-sessions/list`
 
 ```json
-{"jsonrpc": "2.0", "id": 7, "method": "session.list", "params": {"limit": 20}}
+{"schema": 1, "grant_id": "grant-01J...", "limit": 20}
 ```
 
 ```json
-{"jsonrpc": "2.0", "id": 7, "result": {"sessions": [
-  {"session_ref": "sref-01J...", "title": "Grocery plan", "last_active_at": "2026-09-23T19:02:11Z", "message_count": 14}
-]}}
+{"schema": 1, "sessions": [
+  {"session_ref": "sref-01J...", "title": "Grocery plan", "started_at": 1727120000, "message_count": 14, "active": false}
+]}
 ```
 
-`session.create` returns a new `session_ref`. `session.resume` takes a `session_ref` and returns the stock resume result with the reference in place of the Standard ID. A turn may be submitted only after the connection has an active session. `conversation.close` ends the claim; the Standard session stays stored in Hermes for later resume.
+Device-authenticated and limited to an active grant held by the caller. `limit` is 1–50 (default 50), newest first. `active` is true when another active claim is bound to that session. `conversation.close` ends a claim; its Standard session stays stored in Hermes for later resume.
 
 ### Denial reasons
 
@@ -141,6 +141,9 @@ The client opens the bridge with `conversation.open` and its handle, then manage
 | `profile_unavailable` | The grant's Profile is currently unavailable |
 | `stale_configuration` | Claim names a revision older than current; refresh device configuration |
 | `claim_limit` | This device already holds the maximum number of active client claims |
+| `session_unavailable` | The `session_ref` is unknown for this grant |
+| `session_busy` | Another active claim is bound to the requested session |
+| `grant_pending` | The grant is waiting for the Profile owner's approval |
 
 ### Pairing page
 
@@ -176,10 +179,10 @@ A pending grant expires after 24 hours. A grant never becomes active without an 
 | Network drop shorter than the reconnect grace | `conversation.reconnect` restores the claim and session | Uncertain turn reported, never replayed |
 | Client quits | `conversation.close`; claim closed | Standard session remains resumable |
 | Client crashes | Claim closes after the reconnect grace | No orphaned claim |
-| `session.list` | This Profile's sessions only, bounded, opaque refs | No Standard IDs, no other Profile |
-| `session.resume` with another grant's ref | `session_unavailable` | Refs are grant-scoped |
-| `session.resume` for a session bound to another active claim (a live Puck turn, another window) | `session_busy`; the list marks it `active: true` | Never two claims driving one Standard session; retry once the other claim closes |
-| `session.delete` or `session.branch` | `method_unavailable` | Not exposed to clients |
+| Session list | This Profile's sessions only, bounded, opaque refs | No Standard IDs, no other Profile |
+| Resume claim with another grant's ref | `session_unavailable` | Refs are grant-scoped |
+| Resume claim for a session bound to another active claim (a live Puck turn, another window) | `session_busy`; the list marks it `active: true` | Never two claims driving one Standard session; retry once the other claim closes |
+| Client switches session with `/new` or `/resume` | Current claim closed, new claim made | One claim, one session; the bridge core is unchanged |
 | Profile made unavailable mid-claim | Claim closes `profile_revoked` | Same path as wake and tap claims |
 | Credential inside the renewal window | Client renews on connect | Idempotent renewal unchanged |
 | Credential expired | `unauthorized`; client asks to pair again | Page preselects previous Profiles |
@@ -187,10 +190,10 @@ A pending grant expires after 24 hours. A grant never becomes active without an 
 
 ## Code Map
 
-- `docs/contracts/v1/configuration.schema.json` and configuration storage: add Profile `ownership` (`shared` or an owner person ID).
+- `docs/contracts/v1/configuration.schema.json` and configuration validation: add the optional Profile `shared` boolean.
 - `src/hermes_home/domain/credentials.py`: grant states `active` and `pending_owner`, bootstrap rule, owner decisions, and holder listing; add `client_claim` to `SUPPORTED_CREDENTIAL_CAPABILITIES`; add `client_grants` (Profile ID and opaque grant ID) to `CredentialScope` with bounded validation, serialization, and "absent grants nothing" semantics; validate grants against available Profiles at approval; return `approval_pending` from `consume_request` for pending requests; accept endpoint types `tui`, `ios`, and `android`.
 - `src/hermes_home/bridge/production.py`: migrate `conversation_claims` to allow client claims without a Room or wake mapping (nullable `room_id` and `wake_mapping_id`, plus `grant_id` and `claim_kind`); exempt client claims from the Room conflict query, idle timer, and first-open binding; enforce the per-device claim limit; close client claims on `conversation.close` or after the reconnect grace.
-- `src/hermes_home/bridge/standard.py` and `src/hermes_home/bridge/endpoint.py`: forward the allowed session operations for client-claim connections to the claim's Profile; maintain the grant-scoped `session_ref` mapping; reject other session methods with `method_unavailable`.
+- `src/hermes_home/bridge/production.py`: a grant-scoped `session_ref` table; client claims created with a preset Session ID for `most_recent` and `resume`; a short-lived Standard client for `session.list` and `session.most_recent`. `standard.py` and `endpoint.py` need no session-operation changes.
 - `src/hermes_home/api/application.py`: add the `/api/v1/client-claims` branch mirroring the tap-claim durable-context checks and `_discard_new_claim` recovery; add `client_grants` to device configuration; add the `/pair` page and `/pair/api/*` cookie-authenticated admin equivalents.
 - `src/hermes_home/runtime.py`: read `HERMES_HOME_CLIENT_CLAIMS_PER_DEVICE` and `HERMES_HOME_CLIENT_RECONNECT_GRACE_SECONDS`.
 - `docs/contracts/v1/README.md` and `docs/contracts/v1/client-claim.schema.json`: document the pairing link, client claim, grants, client session operations, and the client renewal obligation.
@@ -202,7 +205,7 @@ A pending grant expires after 24 hours. A grant never becomes active without an 
 
 1. Credential scope, capability, endpoint types, and `approval_pending`.
 2. Claim-store migration, client claim route, claim limit, close, and reconnect grace.
-3. Client-claim session operations and grant-scoped `session_ref` mapping.
+3. Session choice at claim time, session listing, and grant-scoped `session_ref` mapping.
 4. Device configuration `client_grants`.
 5. Profile ownership, owner-approval routes, and holder listing.
 6. Pairing page with admin session, QR/code offer, pending approval with Profile selection, device list, revoke, and pair again.
@@ -214,7 +217,7 @@ A pending grant expires after 24 hours. A grant never becomes active without an 
 - The page shows the device label, type, requested capabilities, and confirmation code before approval.
 - A client credential with two grants can open independent conversations for both Profiles; it can never name a Profile ID.
 - A client claim never changes, blocks, or supersedes a Room claim, and a Room claim never blocks a client claim.
-- A client can create, list, resume, and title sessions for its Profile through the bridge, and a session started on one paired client can be resumed from another client paired to the same Profile.
+- A client can start, list, and resume sessions for its Profile, and rename the current one through Hermes's `title` command, and a session started on one paired client can be resumed from another client paired to the same Profile.
 - A client claim is never closed by inactivity; it closes on `conversation.close`, after the reconnect grace, or on revocation.
 - No Standard Session ID or Profile ID reaches a client.
 - Revoking the device or making a Profile unavailable closes active client claims.
@@ -240,6 +243,7 @@ A pending grant expires after 24 hours. A grant never becomes active without an 
 - 2026-09-23: Resolved per Amanda: per-device client claim limit 8 and reconnect grace 120 seconds, both Home settings.
 - 2026-09-23: Resolved per Amanda: owned Profiles require owner approval from a paired client (first-device bootstrap by admin); clients store credentials in the platform secure store; Tailscale is required for client reachability for now, but Home authorization never depends on Tailscale identity; clients keep pairings per Home.
 - 2026-09-23: Resolved per Amanda: `session.list` shows the Profile's conversations from every surface, including Room devices and other paired clients.
+- 2026-09-24: Implementation refinements: session choice moves to claim time (new, most_recent, resume) with an HTTP session list, keeping the bridge's one-claim-one-session invariant; `/title` uses Hermes's advertised command; client grants live in their own device-keyed record; Profile ownership is an optional `shared` flag.
 
 ## Verification
 

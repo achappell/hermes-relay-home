@@ -21,6 +21,7 @@ LOGGER = logging.getLogger(__name__)
 
 SUPPORTED_CREDENTIAL_CAPABILITIES = frozenset(
     {
+        "client_claim",
         "consequence_confirm",
         "health_view",
         "sensitive_entry",
@@ -34,6 +35,9 @@ CREDENTIAL_TTL_SECONDS = 90 * 24 * 60 * 60
 RENEWAL_WINDOW_SECONDS = 14 * 24 * 60 * 60
 ROTATION_OVERLAP_SECONDS = 600
 SECURE_STORAGE_PLATFORM = "platform_secure_store"
+CLIENT_ENDPOINT_TYPES = frozenset({"tui", "ios", "android"})
+PENDING_OWNER_GRANT_TTL_SECONDS = 24 * 60 * 60
+MAX_CLIENT_GRANTS = 16
 
 T = TypeVar("T")
 
@@ -151,6 +155,7 @@ class EnrollmentRequest:
     expires_at: float
     status: str
     approved_scope: CredentialScope | None = None
+    approved_client_profiles: tuple[str, ...] = ()
 
     def to_public(self) -> dict[str, object]:
         """Return review metadata without enrollment or endpoint credentials."""
@@ -172,6 +177,8 @@ class EnrollmentRequest:
         }
         if self.approved_scope is not None:
             payload["approved_scope"] = _scope_record(self.approved_scope)
+        if self.approved_client_profiles:
+            payload["approved_client_profiles"] = list(self.approved_client_profiles)
         return payload
 
 
@@ -186,6 +193,38 @@ class AuthenticatedDevice:
 
 
 @dataclass(frozen=True, slots=True)
+class ClientGrant:
+    """One personal client's grant to converse as one Profile.
+
+    Grants live beside, not inside, the credential scope: owner decisions,
+    renewal, and rotation must never rewrite a frozen credential record.
+    """
+
+    grant_id: str
+    device_id: str
+    profile_id: str
+    status: str
+    device_label: str
+    device_type: str
+    created_at: float
+    bootstrap: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class PairedDevice:
+    """Redacted current credential state for the admin pairing surface."""
+
+    device_id: str
+    label: str
+    device_type: str
+    generation: int
+    status: str
+    issued_at: float
+    expires_at: float
+    grants: tuple[ClientGrant, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class CredentialMaterial:
     """One-time endpoint credential material returned to a trusted caller."""
 
@@ -194,6 +233,7 @@ class CredentialMaterial:
     generation: int
     expires_at: float
     scope: CredentialScope
+    client_grants: tuple[ClientGrant, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -484,6 +524,7 @@ class CredentialService:
         configured_rooms: Iterable[object],
         configured_wake_mappings: Iterable[object] = (),
         configured_profiles: Iterable[object] = (),
+        client_profiles: Iterable[object] = (),
     ) -> EnrollmentRequest:
         """Approve only a pending request and only within Home's room policy."""
         request_id = _identifier(request_id, "request_id")
@@ -496,6 +537,9 @@ class CredentialService:
         available_profiles = set(
             _bounded_values(configured_profiles, "configured_profiles")
         )
+        approved_client_profiles = _bounded_values(client_profiles, "client_profiles")
+        if len(approved_client_profiles) > MAX_CLIENT_GRANTS:
+            raise CredentialValidationError("too many client profiles")
 
         def approve(state: dict[str, object]) -> EnrollmentRequest:
             now = self._now()
@@ -532,7 +576,25 @@ class CredentialService:
                     raise CredentialValidationError(
                         "approved scope references an unavailable touch profile"
                     )
+            if "client_claim" in scope.capabilities:
+                if record["type"] not in CLIENT_ENDPOINT_TYPES:
+                    raise CredentialValidationError(
+                        "client_claim is limited to personal client endpoints"
+                    )
+                if not approved_client_profiles:
+                    raise CredentialValidationError(
+                        "client_claim requires at least one client profile"
+                    )
+                if not set(approved_client_profiles).issubset(available_profiles):
+                    raise CredentialValidationError(
+                        "approved scope references an unavailable client profile"
+                    )
+            elif approved_client_profiles:
+                raise CredentialValidationError(
+                    "client profiles require client_claim capability"
+                )
             record["approved_scope"] = _scope_record(scope)
+            record["approved_client_profiles"] = list(approved_client_profiles)
             record["status"] = "approved"
             return _request_from_record(record)
 
@@ -573,6 +635,7 @@ class CredentialService:
         *,
         enrollment_code: str,
         secure_storage: str,
+        shared_profiles: Iterable[object] = (),
     ) -> CredentialMaterial:
         """Atomically consume approval and persist a new endpoint credential."""
         request_id = _identifier(request_id, "request_id")
@@ -581,6 +644,7 @@ class CredentialService:
         if secure_storage != SECURE_STORAGE_PLATFORM:
             raise CredentialValidationError("platform secure storage is required")
         digest = self._digest(enrollment_code)
+        shared = frozenset(_bounded_values(shared_profiles, "shared_profiles"))
 
         def consume(
             state: dict[str, object],
@@ -593,11 +657,18 @@ class CredentialService:
                 raise CredentialStateError("expired_or_consumed")
             if request["status"] == "expired":
                 raise CredentialStateError("expired_or_consumed")
-            if request["status"] != "approved":
-                raise CredentialStateError("conflict")
-            if now >= _timestamp(request["expires_at"]):
+            if now >= _timestamp(request["expires_at"]) and request["status"] in {
+                "pending",
+                "approved",
+            }:
                 request["status"] = "expired"
                 raise CredentialStateError("expired_or_consumed")
+            if request["status"] == "pending":
+                raise CredentialStateError("approval_pending")
+            if request["status"] == "rejected":
+                raise CredentialStateError("rejected")
+            if request["status"] != "approved":
+                raise CredentialStateError("conflict")
             if request["secure_storage"] != secure_storage:
                 raise CredentialValidationError("platform secure storage is required")
 
@@ -654,7 +725,16 @@ class CredentialService:
                     "expires_at": expires_at,
                     "digest": self._digest(token),
                     "scope": _scope_record(approved_scope),
+                    "label": request["label"],
+                    "type": request["type"],
                 }
+            )
+            grants = self._issue_client_grants(
+                state,
+                device_id=device_id,
+                request=request,
+                shared=shared,
+                now=now,
             )
             request["status"] = "consumed"
             offer["status"] = "consumed"
@@ -665,6 +745,7 @@ class CredentialService:
                     generation=generation,
                     expires_at=expires_at,
                     scope=approved_scope,
+                    client_grants=grants,
                 ),
                 revocation_event,
             )
@@ -799,6 +880,9 @@ class CredentialService:
                     "expires_at": new_expires_at,
                     "digest": self._digest(token),
                     "scope": _scope_record(scope),
+                    **{
+                        key: current[key] for key in ("label", "type") if key in current
+                    },
                 }
             )
             _records(state, "replacements").append(
@@ -854,6 +938,7 @@ class CredentialService:
             for replacement in _records(state, "replacements"):
                 if replacement.get("device_id") == device_id:
                     _invalidate_replacement(replacement, "revoked")
+            _end_device_grants(state, device_id, self._now())
             return RevocationEvent(
                 device_id=device_id,
                 generation=generation,
@@ -863,6 +948,210 @@ class CredentialService:
         event = self._store.mutate(mark_revoked)
         self._notify_revocation(event)
         return event
+
+    def client_grants(self, device_id: str) -> tuple[ClientGrant, ...]:
+        """Return a device's current active and pending-owner grants."""
+        device_id = _identifier(device_id, "device_id")
+        now = self._now()
+        return tuple(
+            grant
+            for grant in _current_grants(self._store.read_state(), now)
+            if grant.device_id == device_id
+        )
+
+    def active_client_grant(self, device_id: str, grant_id: str) -> ClientGrant | None:
+        """Return one active grant held by this device, or ``None``."""
+        device_id = _identifier(device_id, "device_id")
+        grant_id = _identifier(grant_id, "grant_id")
+        for grant in self.client_grants(device_id):
+            if grant.grant_id == grant_id and grant.status == "active":
+                return grant
+        return None
+
+    def pending_owner_grants(self, approver_device_id: str) -> tuple[ClientGrant, ...]:
+        """Return grants awaiting a decision from a holder of the same Profile."""
+        approver_device_id = _identifier(approver_device_id, "device_id")
+        now = self._now()
+        grants = _current_grants(self._store.read_state(), now)
+        owned = {
+            grant.profile_id
+            for grant in grants
+            if grant.device_id == approver_device_id and grant.status == "active"
+        }
+        return tuple(
+            grant
+            for grant in grants
+            if grant.status == "pending_owner"
+            and grant.profile_id in owned
+            and grant.device_id != approver_device_id
+        )
+
+    def decide_owner_grant(
+        self,
+        approver_device_id: str,
+        grant_id: str,
+        *,
+        approve: bool,
+    ) -> ClientGrant:
+        """Let a device holding an owned Profile approve or reject a pending grant."""
+        approver_device_id = _identifier(approver_device_id, "device_id")
+        grant_id = _identifier(grant_id, "grant_id")
+        if type(approve) is not bool:
+            raise CredentialValidationError("approve must be a boolean")
+
+        def decide(state: dict[str, object]) -> ClientGrant:
+            now = self._now()
+            records = _client_grant_records(state)
+            _expire_pending_grants(records, now)
+            record = _find_record_by_id(records, grant_id)
+            if record is None or record.get("status") != "pending_owner":
+                raise CredentialStateError("not_found")
+            if record.get("device_id") == approver_device_id:
+                raise CredentialStateError("unauthorized")
+            holds_profile = any(
+                item.get("device_id") == approver_device_id
+                and item.get("profile_id") == record.get("profile_id")
+                and item.get("status") == "active"
+                for item in records
+            )
+            if not holds_profile:
+                raise CredentialStateError("unauthorized")
+            record["status"] = "active" if approve else "rejected"
+            record["decided_at"] = now
+            record["decided_by"] = approver_device_id
+            return _grant_from_record(record)
+
+        return self._store.mutate(decide)
+
+    def profile_holders(self, device_id: str) -> tuple[ClientGrant, ...]:
+        """Return every current grant for the Profiles this device holds."""
+        device_id = _identifier(device_id, "device_id")
+        now = self._now()
+        grants = _current_grants(self._store.read_state(), now)
+        held = {
+            grant.profile_id
+            for grant in grants
+            if grant.device_id == device_id and grant.status == "active"
+        }
+        return tuple(grant for grant in grants if grant.profile_id in held)
+
+    def revoke_client_grant(
+        self,
+        grant_id: str,
+        *,
+        requester_device_id: str | None = None,
+    ) -> ClientGrant:
+        """End one grant; a device may revoke only grants for its own Profiles."""
+        grant_id = _identifier(grant_id, "grant_id")
+        if requester_device_id is not None:
+            requester_device_id = _identifier(requester_device_id, "device_id")
+
+        def revoke(state: dict[str, object]) -> ClientGrant:
+            now = self._now()
+            records = _client_grant_records(state)
+            _expire_pending_grants(records, now)
+            record = _find_record_by_id(records, grant_id)
+            if record is None or record.get("status") not in {
+                "active",
+                "pending_owner",
+            }:
+                raise CredentialStateError("not_found")
+            if requester_device_id is not None and not any(
+                item.get("device_id") == requester_device_id
+                and item.get("profile_id") == record.get("profile_id")
+                and item.get("status") == "active"
+                for item in records
+            ):
+                raise CredentialStateError("unauthorized")
+            record["status"] = "revoked"
+            record["decided_at"] = now
+            return _grant_from_record(record)
+
+        return self._store.mutate(revoke)
+
+    def paired_devices(self) -> tuple[PairedDevice, ...]:
+        """Return each device's newest credential and current grants."""
+        state = self._store.read_state()
+        now = self._now()
+        grants = _current_grants(state, now)
+        newest: dict[str, dict[str, object]] = {}
+        for record in _records(state, "credentials"):
+            device_id = record.get("device_id")
+            if not isinstance(device_id, str):
+                continue
+            current = newest.get(device_id)
+            if current is None or _integer(
+                record.get("generation"), "generation"
+            ) > _integer(current.get("generation"), "generation"):
+                newest[device_id] = record
+        devices: list[PairedDevice] = []
+        for device_id, record in newest.items():
+            status = str(record.get("status", "unknown"))
+            expires_at = _timestamp(record.get("expires_at"))
+            if status == "active" and now >= expires_at:
+                status = "expired"
+            devices.append(
+                PairedDevice(
+                    device_id=device_id,
+                    label=str(record.get("label") or record.get("endpoint_id")),
+                    device_type=str(record.get("type") or "unknown"),
+                    generation=_integer(record.get("generation"), "generation"),
+                    status=status,
+                    issued_at=_timestamp(record.get("issued_at")),
+                    expires_at=expires_at,
+                    grants=tuple(
+                        grant for grant in grants if grant.device_id == device_id
+                    ),
+                )
+            )
+        return tuple(sorted(devices, key=lambda device: device.label))
+
+    def _issue_client_grants(
+        self,
+        state: dict[str, object],
+        *,
+        device_id: str,
+        request: Mapping[str, object],
+        shared: frozenset[str],
+        now: float,
+    ) -> tuple[ClientGrant, ...]:
+        records = _client_grant_records(state)
+        _expire_pending_grants(records, now)
+        _end_device_grants(state, device_id, now)
+        profiles = _bounded_values(
+            request.get("approved_client_profiles") or (), "client_profiles"
+        )
+        issued: list[ClientGrant] = []
+        for profile_id in profiles:
+            held_elsewhere = any(
+                item.get("profile_id") == profile_id
+                and item.get("status") == "active"
+                and item.get("device_id") != device_id
+                for item in records
+            )
+            if profile_id in shared:
+                status, bootstrap = "active", False
+            elif held_elsewhere:
+                status, bootstrap = "pending_owner", False
+            else:
+                # First device for an owned Profile: the admin's approval stands
+                # and is recorded, so every later holder list shows it.
+                status, bootstrap = "active", True
+            record: dict[str, object] = {
+                "id": _identifier(f"grant-{self._id_factory()}", "grant_id"),
+                "device_id": device_id,
+                "profile_id": profile_id,
+                "status": status,
+                "device_label": request["label"],
+                "device_type": request["type"],
+                "created_at": now,
+                "bootstrap": bootstrap,
+            }
+            if status == "pending_owner":
+                record["pending_expires_at"] = now + PENDING_OWNER_GRANT_TTL_SECONDS
+            records.append(record)
+            issued.append(_grant_from_record(record))
+        return tuple(issued)
 
     def _notify_revocation(self, event: RevocationEvent | None) -> None:
         if event is None or self._revocation_observer is None:
@@ -946,6 +1235,63 @@ def _expire_enrollment_state(state: dict[str, object], now: float) -> None:
             request["expires_at"]
         ):
             request["status"] = "expired"
+
+
+def _client_grant_records(state: dict[str, object]) -> list[dict[str, object]]:
+    records = state.setdefault("client_grants", [])
+    if not isinstance(records, list):
+        raise CredentialValidationError(
+            "credential state.client_grants must be an array"
+        )
+    return records
+
+
+def _expire_pending_grants(records: Iterable[dict[str, object]], now: float) -> None:
+    for record in records:
+        if record.get("status") == "pending_owner" and now >= _timestamp(
+            record.get("pending_expires_at")
+        ):
+            record["status"] = "expired"
+
+
+def _end_device_grants(state: dict[str, object], device_id: str, now: float) -> None:
+    for record in _client_grant_records(state):
+        if record.get("device_id") == device_id and record.get("status") in {
+            "active",
+            "pending_owner",
+        }:
+            record["status"] = "revoked"
+            record["decided_at"] = now
+
+
+def _current_grants(state: Mapping[str, object], now: float) -> tuple[ClientGrant, ...]:
+    records = state.get("client_grants") or []
+    if not isinstance(records, list):
+        raise CredentialValidationError(
+            "credential state.client_grants must be an array"
+        )
+    current: list[ClientGrant] = []
+    for record in records:
+        status = record.get("status")
+        if status == "active" or (
+            status == "pending_owner"
+            and now < _timestamp(record.get("pending_expires_at"))
+        ):
+            current.append(_grant_from_record(record))
+    return tuple(current)
+
+
+def _grant_from_record(record: Mapping[str, object]) -> ClientGrant:
+    return ClientGrant(
+        grant_id=_identifier(record["id"], "grant_id"),
+        device_id=_identifier(record["device_id"], "device_id"),
+        profile_id=_identifier(record["profile_id"], "profile_id"),
+        status=_identifier(record["status"], "status"),
+        device_label=_identifier(record["device_label"], "label"),
+        device_type=_identifier(record["device_type"], "type"),
+        created_at=_timestamp(record["created_at"]),
+        bootstrap=record.get("bootstrap") is True,
+    )
 
 
 def _invalidate_replacement(record: dict[str, object], status: str) -> None:
@@ -1043,6 +1389,9 @@ def _request_from_record(record: Mapping[str, object]) -> EnrollmentRequest:
         expires_at=_timestamp(record["expires_at"]),
         status=_identifier(record["status"], "status"),
         approved_scope=None if approved is None else _scope_from_record(approved),
+        approved_client_profiles=_bounded_values(
+            record.get("approved_client_profiles") or (), "client_profiles"
+        ),
     )
 
 

@@ -1617,6 +1617,8 @@ def _credential_error(error: CredentialStateError) -> HTTPResponse:
         "forbidden": 403,
         "not_found": 404,
         "conflict": 409,
+        "approval_pending": 409,
+        "rejected": 403,
         "expired_or_consumed": 410,
         "service_unavailable": 503,
     }

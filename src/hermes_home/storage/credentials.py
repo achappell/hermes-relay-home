@@ -18,6 +18,7 @@ _EMPTY_STATE = {
     "requests": [],
     "credentials": [],
     "replacements": [],
+    "client_grants": [],
 }
 
 
@@ -120,7 +121,9 @@ def _decode_state(serialized: object) -> dict[str, object]:
         raise CredentialStoreError("credential state is invalid") from error
     if not isinstance(state, dict) or state.get("schema") != 1:
         raise CredentialStoreError("credential state schema is invalid")
-    for key in ("offers", "requests", "credentials", "replacements"):
+    # Client grants arrived with HOME-NW-17; older state rows gain an empty list.
+    state.setdefault("client_grants", [])
+    for key in ("offers", "requests", "credentials", "replacements", "client_grants"):
         records = state.get(key)
         if not isinstance(records, list) or any(
             not isinstance(record, dict) for record in records

@@ -229,7 +229,7 @@ def test_pending_request_cannot_be_consumed_before_admin_approval(tmp_path) -> N
             secure_storage="platform_secure_store",
         )
 
-        with pytest.raises(CredentialStateError, match="conflict"):
+        with pytest.raises(CredentialStateError, match="approval_pending"):
             service.consume_request(
                 request.request_id,
                 enrollment_code=offer.enrollment_code,
