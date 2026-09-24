@@ -5653,3 +5653,466 @@ def test_bridge_accepts_standard_free_text_batch_clarify():
     assert prompt.correlation_id == "f968a59f"
     with pytest.raises(BridgeProtocolError, match="question_id"):
         bridge.respond_prompt(prompt, {"answer": "probe-file"})
+
+
+def test_title_durable_identity_does_not_discard_remaining_turn_events():
+    gateway_socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {"capabilities": {}}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {"session_id": "runtime-hermes-1"},
+            },
+            {"jsonrpc": "2.0", "id": "home-2", "result": {"accepted": True}},
+            {
+                "jsonrpc": "2.0",
+                "method": "event",
+                "params": {
+                    "type": "session.title",
+                    "session_id": "foreign-runtime",
+                    "payload": {
+                        "session_id": "durable-stored-1",
+                        "title": "Foreign title",
+                    },
+                },
+            },
+            *[
+                {
+                    "jsonrpc": "2.0",
+                    "method": "event",
+                    "params": {
+                        "type": kind,
+                        "session_id": "runtime-hermes-1",
+                        "seq": index,
+                        "payload": payload,
+                    },
+                }
+                for index, (kind, payload) in enumerate(
+                    [
+                        ("message.start", {}),
+                        (
+                            "session.title",
+                            {"session_id": "durable-stored-1", "title": "A title"},
+                        ),
+                        ("message.delta", {"text": "Response"}),
+                        ("message.complete", {}),
+                    ],
+                    1,
+                )
+            ],
+        ]
+    )
+    bridge = HomeBridge(
+        gateway_url="wss://hermes.example/api/ws",
+        hermes_token="server-hermes-secret",
+        device_authenticator=StaticCredentialAuthenticator(
+            admin_token="admin-secret",
+            device_credentials={"device-secret": "tui-device"},
+        ),
+        conversation_resolver=lambda handle, device_id: ConversationGrant(
+            handle=handle,
+            device_id=device_id,
+            profile_id="family",
+        ),
+        gateway_socket_factory=FakeSocketFactory(gateway_socket),
+    )
+    try:
+        bridge.open(
+            headers={"Authorization": "Device device-secret"},
+            conversation_handle="opaque-1",
+        )
+        bridge.submit_prompt("Respond once")
+        events = [bridge.next_event() for _ in range(4)]
+        assert [event.type for event in events] == [
+            "message.start",
+            "session.title",
+            "message.delta",
+            "message.complete",
+        ]
+        assert events[1].to_endpoint()["event"]["payload"] == {"title": "A title"}
+        assert "durable-stored-1" not in json.dumps(events[1].to_endpoint())
+        assert events[2].payload == {"text": "Response"}
+        assert bridge.state == "ready"
+        assert (
+            sum(frame.get("method") == "prompt.submit" for frame in gateway_socket.sent)
+            == 1
+        )
+    finally:
+        bridge.close()
+
+
+def test_title_requires_runtime_envelope_identity():
+    from hermes_home.bridge.standard import _event_from_frame
+
+    with pytest.raises(BridgeProtocolError, match="runtime session identity"):
+        _event_from_frame(
+            {
+                "method": "event",
+                "params": {
+                    "type": "session.title",
+                    "payload": {"session_id": "durable-only", "title": "Title"},
+                },
+            }
+        )
+
+
+def test_real_bridge_upstream_loss_parks_endpoint_and_retains_original_uncertain_turn():
+    class FailingGatewaySocket(FakeJsonSocket):
+        def __init__(self):
+            super().__init__(
+                [
+                    _event("gateway.ready", {"capabilities": {}}),
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "home-1",
+                        "result": {
+                            "session_id": "runtime-1",
+                            "stored_session_id": "stored-1",
+                        },
+                    },
+                    {"jsonrpc": "2.0", "id": "home-2", "result": {"accepted": True}},
+                ]
+            )
+            self.fail = Event()
+
+        def receive_json(self, timeout=None):
+            if self.incoming:
+                return self.incoming.popleft()
+            if self.fail.wait(timeout or 0.01):
+                raise ConnectionError("synthetic upstream loss")
+            raise TimeoutError("quiet poll")
+
+    class Peer:
+        def __init__(self):
+            self.closed = Event()
+            self.messages = []
+            self.close_code = None
+
+        def send(self, message):
+            self.messages.append(message)
+
+        def recv(self):
+            self.closed.wait(2)
+
+        def close(self, *, code=1000, reason=""):
+            self.close_code = code
+            self.closed.set()
+
+    socket = FailingGatewaySocket()
+    bridge = _make_bridge(FakeSocketFactory(socket))
+    peer = Peer()
+    headers = {"Authorization": "Device device-secret"}
+    handle = "opaque-conversation-1"
+    endpoint = BridgeEndpoint(peer, bridge, headers=headers)
+
+    def request(method, params, request_id):
+        return endpoint.handle_message(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "schema": 1,
+                    "id": request_id,
+                    "method": method,
+                    "params": params,
+                }
+            )
+        )
+
+    runner = None
+    try:
+        assert (
+            request("conversation.open", {"conversation_handle": handle}, "open")[
+                "result"
+            ]["status"]
+            == "ready"
+        )
+        result = request(
+            "prompt.submit",
+            {"conversation_handle": handle, "text": "Only once"},
+            "prompt",
+        )["result"]
+        original_turn = result["turn_id"]
+        runner = Thread(target=endpoint.run, kwargs={"park_on_disconnect": True})
+        runner.start()
+        socket.fail.set()
+        assert peer.closed.wait(2)
+        runner.join(timeout=2)
+        assert not runner.is_alive()
+        assert peer.close_code == 1011
+        assert endpoint.has_recoverable_state
+        assert bridge.state == "turn_uncertain"
+        replacement = Peer()
+        endpoint.adopt(replacement, headers=headers)
+        recovered = request(
+            "conversation.reconnect", {"conversation_handle": handle}, "reconnect"
+        )["result"]
+        assert recovered["unresolved_turn"]["turn_id"] == original_turn
+        assert recovered["unresolved_turn"]["status"] == "uncertain"
+        assert sum(frame.get("method") == "prompt.submit" for frame in socket.sent) == 1
+    finally:
+        socket.fail.set()
+        peer.closed.set()
+        endpoint.close()
+        if runner is not None:
+            runner.join(timeout=2)
+
+
+def test_explicit_close_ack_survives_concurrent_real_bridge_event_failure():
+    closing = Event()
+    idle_after_close = Event()
+    event_read_started = Event()
+
+    class QuietSocket(FakeJsonSocket):
+        def receive_json(self, timeout=None):
+            if self.incoming:
+                return self.incoming.popleft()
+            if self.closed:
+                raise ConnectionError("expected gateway close")
+            time.sleep(min(timeout or 0.01, 0.01))
+            raise TimeoutError("idle")
+
+    class ObservedBridge(HomeBridge):
+        def next_event(self):
+            event_read_started.set()
+            return super().next_event()
+
+        def close_conversation(self):
+            closing.set()
+            result = super().close_conversation()
+            # Force the event pump to process the shutdown before the close
+            # RPC can return its acknowledgment. No scheduling lottery.
+            assert idle_after_close.wait(2)
+            return result
+
+    class ObservedStop(Event):
+        def wait(self, timeout=None):
+            if closing.is_set():
+                idle_after_close.set()
+            return super().wait(timeout)
+
+    class Peer:
+        def __init__(self):
+            self.closed = False
+            self.sent = []
+
+        def send(self, message):
+            assert not self.closed, "close acknowledgment lost behind socket close"
+            self.sent.append(json.loads(message))
+
+        def close(self, **kwargs):
+            self.closed = True
+
+    socket = QuietSocket(
+        [
+            _event("gateway.ready", {"capabilities": {}}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {"session_id": "runtime-1", "stored_session_id": "stored-1"},
+            },
+        ]
+    )
+    bridge = ObservedBridge(
+        gateway_url="wss://hermes.example/api/ws",
+        hermes_token="server-secret",
+        device_authenticator=StaticCredentialAuthenticator(
+            admin_token="admin-secret",
+            device_credentials={"device-secret": "tui-device"},
+        ),
+        conversation_resolver=lambda handle, device_id: ConversationGrant(
+            handle=handle, device_id=device_id, profile_id="family"
+        ),
+        gateway_socket_factory=FakeSocketFactory(socket),
+    )
+    peer = Peer()
+    endpoint = BridgeEndpoint(
+        peer, bridge, headers={"Authorization": "Device device-secret"}
+    )
+    endpoint._stop = ObservedStop()
+    try:
+        for request_id, method in [
+            ("open", "conversation.open"),
+            ("close", "conversation.close"),
+        ]:
+            if request_id == "close":
+                assert event_read_started.wait(2)
+            response = endpoint.handle_message(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "schema": 1,
+                        "id": request_id,
+                        "method": method,
+                        "params": {"conversation_handle": "opaque-1"},
+                    }
+                )
+            )
+        assert response["result"]["status"] == "closed"
+        assert peer.sent[-1]["id"] == "close"
+        assert peer.sent[-1]["result"]["status"] == "closed"
+        assert not peer.closed
+        assert socket.closed
+    finally:
+        endpoint.close()
+
+
+@pytest.mark.parametrize(
+    "cause, expected_detail",
+    [
+        (
+            BridgeProtocolError("standard event has conflicting session identity"),
+            "standard event has conflicting session identity",
+        ),
+        (BridgeProtocolError("private-payload-secret"), "unclassified"),
+        (
+            ConnectionError("wss://server/api/ws?token=private-token-secret"),
+            "unclassified",
+        ),
+    ],
+)
+def test_reader_failure_diagnostics_exclude_private_content(
+    caplog, cause, expected_detail
+):
+    socket = FakeJsonSocket([])
+    client = StandardGatewayClient(
+        url="wss://example/api/ws",
+        token="private-token-secret",
+        socket_factory=FakeSocketFactory(socket),
+    )
+    error = BridgeTransportError("private-exception-secret")
+    error.__cause__ = cause
+    client._socket = socket
+    client._closed = False
+    try:
+        client._set_reader_error(error, socket)
+        assert "error=BridgeTransportError" in caplog.text
+        assert "cause=" + type(cause).__name__ in caplog.text
+        assert "detail=" + expected_detail in caplog.text
+        assert "private-" not in caplog.text
+        assert "wss://" not in caplog.text
+    finally:
+        client.close()
+
+
+def test_concurrent_equal_claim_refreshes_do_not_invalidate_binding():
+    from threading import Barrier
+
+    barrier = Barrier(2)
+    grant = ConversationGrant("opaque-1", "puck-kitchen", "family")
+
+    def resolve(handle, device_id):
+        barrier.wait(timeout=2)
+        return ConversationGrant(handle, device_id, "family")
+
+    bridge = _make_bridge(FakeSocketFactory(FakeJsonSocket([])), resolver=resolve)
+    gateway = object()
+    with bridge._state_lock:
+        bridge._state = "ready"
+        bridge._gateway = gateway
+        bridge._runtime_session_id = "runtime-1"
+        bridge._conversation_handle = grant.handle
+        bridge._device_id = grant.device_id
+        bridge._endpoint_headers = {"Authorization": "Device device-secret"}
+        bridge._grant = grant
+    errors = []
+    results = []
+
+    def authorize():
+        try:
+            results.append(bridge._revalidate_ready_binding())
+        except BridgeTransportError as error:
+            errors.append(error)
+
+    threads = [Thread(target=authorize) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=3)
+        assert not thread.is_alive()
+    assert errors == []
+    assert results == [(gateway, "runtime-1")] * 2
+    assert bridge.state == "ready"
+
+
+@pytest.mark.parametrize(
+    "mutation, accepted",
+    [
+        ({"session_id": "stored-1"}, True),
+        ({"session_id": "different-session"}, False),
+        ({"profile_id": "other-profile"}, False),
+        ({"status": "revoked"}, False),
+        ({"credential_generation": 2}, False),
+        ({"protected_capabilities": frozenset({"sensitive_entry"})}, False),
+        ({"capability_revision": 2}, False),
+    ],
+)
+def test_refresh_preserves_persistence_but_rejects_changed_authority(
+    mutation, accepted
+):
+    from dataclasses import replace
+
+    grant = ConversationGrant("opaque-1", "puck-kitchen", "family")
+    bridge = None
+
+    def resolve(handle, device_id):
+        # Simulate an update after validation captured its snapshot but before
+        # this resolver returns that older snapshot.
+        with bridge._state_lock:
+            if accepted:
+                bridge._persist_session_after_accepted_turn()
+            else:
+                bridge._grant = replace(grant, **mutation)
+        return replace(grant)
+
+    bridge = _make_bridge(FakeSocketFactory(FakeJsonSocket([])), resolver=resolve)
+    gateway = object()
+    with bridge._state_lock:
+        bridge._state = "ready"
+        bridge._gateway = gateway
+        bridge._runtime_session_id = "runtime-1"
+        bridge._conversation_handle = grant.handle
+        bridge._device_id = grant.device_id
+        bridge._endpoint_headers = {"Authorization": "Device device-secret"}
+        bridge._grant = grant
+        bridge._resume_session_id = "stored-1"
+        bridge._unpersisted_session_id = "stored-1"
+    if accepted:
+        assert bridge._revalidate_ready_binding() == (gateway, "runtime-1")
+        assert bridge._grant.session_id == "stored-1"
+        assert bridge._unpersisted_session_id is None
+    else:
+        with pytest.raises(
+            BridgeTransportError, match="changed during Home authorization"
+        ):
+            bridge._revalidate_ready_binding()
+
+
+@pytest.mark.parametrize("original_id, refreshed_id", [(None, ""), ("", None)])
+def test_concurrent_refresh_accepts_equivalent_absent_session_ids(
+    original_id, refreshed_id
+):
+    from dataclasses import replace
+
+    grant = ConversationGrant(
+        "opaque-1", "puck-kitchen", "family", session_id=original_id
+    )
+    bridge = None
+
+    def resolve(handle, device_id):
+        with bridge._state_lock:
+            bridge._grant = replace(grant, session_id=refreshed_id)
+        return replace(grant, session_id=refreshed_id)
+
+    bridge = _make_bridge(FakeSocketFactory(FakeJsonSocket([])), resolver=resolve)
+    gateway = object()
+    with bridge._state_lock:
+        bridge._state = "ready"
+        bridge._gateway = gateway
+        bridge._runtime_session_id = "runtime-1"
+        bridge._conversation_handle = grant.handle
+        bridge._device_id = grant.device_id
+        bridge._endpoint_headers = {"Authorization": "Device device-secret"}
+        bridge._grant = grant
+    assert bridge._revalidate_ready_binding() == (gateway, "runtime-1")
+    assert bridge.state == "ready"

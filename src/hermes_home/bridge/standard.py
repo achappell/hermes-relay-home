@@ -638,6 +638,10 @@ class StandardGatewayClient:
             if self._closed or self._socket is not socket:
                 return
             self._reader_error = error
+            LOGGER.warning(
+                "Standard reader unavailable: error=%s cause=%s detail=%s",
+                *safe_failure_diagnostic(error),
+            )
             self._condition.notify_all()
 
     def _receive_frame(
@@ -658,6 +662,42 @@ class StandardGatewayClient:
             if self._socket is None or self._closed:
                 raise RuntimeError("standard gateway is not connected")
             return self._socket
+
+
+def safe_failure_diagnostic(error: BaseException) -> tuple[str, str, str]:
+    """Content-free failure metadata; never log remote exception messages."""
+    cause = error.__cause__
+    protocol = cause if isinstance(cause, BridgeProtocolError) else error
+    allowed = {
+        "standard gateway JSON-RPC frame is not an object",
+        "standard gateway JSON-RPC version is not 2.0",
+        "standard gateway response has no valid ID",
+        "standard event params are not an object",
+        "standard event has no type",
+        "standard event payload is not an object",
+        "standard event session identity is not a string",
+        "standard title event has no runtime session identity",
+        "standard event has conflicting session identity",
+        "standard event correlation ID is not a string",
+        "standard event has conflicting correlation ID",
+        "standard event sequence must be a positive integer",
+        "standard gateway sent duplicate gateway.ready",
+    }
+    detail = "unclassified"
+    if isinstance(protocol, BridgeProtocolError) and str(protocol) in allowed:
+        detail = str(protocol)
+
+    def class_name(value: BaseException | None) -> str:
+        if value is None:
+            return "none"
+        name = type(value).__name__
+        return (
+            name
+            if len(name) <= 64 and name.isascii() and name.isidentifier()
+            else "unknown"
+        )
+
+    return class_name(error), class_name(cause), detail
 
 
 def _validate_timeout(value: float | None, name: str) -> float | None:
@@ -1398,13 +1438,30 @@ class HomeBridge:
             raise BridgeAuthorizationError("conversation_mismatch")
 
         with self._state_lock:
+            current = self._grant
+            # Concurrent event polling and prompt admission both refresh this
+            # immutable snapshot. Equal authority is not a changed binding.
+            # First-turn persistence may also promote its empty session ID to
+            # the already validated durable ID while the resolver is reading.
+            same_authority = (
+                current is not None
+                and current == replace(grant, session_id=current.session_id)
+                and current.protected_capabilities == grant.protected_capabilities
+                and current.capability_revision == grant.capability_revision
+                and (current.session_id or None)
+                in (grant.session_id or None, expected_resume_id or None)
+            )
             if (
                 self._gateway is not gateway
                 or self._runtime_session_id != runtime_session_id
-                or self._grant is not grant
+                or not same_authority
                 or self._state != "ready"
             ):
                 raise BridgeTransportError("bridge changed during Home authorization")
+            if current.session_id and not refreshed.session_id:
+                # An older resolver snapshot must not undo accepted-turn
+                # persistence that completed while this check was in flight.
+                refreshed = replace(refreshed, session_id=current.session_id)
             self._grant = refreshed
         return gateway, runtime_session_id
 
@@ -3032,8 +3089,17 @@ def _event_from_frame(frame: Mapping[str, object]) -> dict[str, object] | None:
         raise BridgeProtocolError("standard event session identity is not a string")
     if payload_session_id not in (None, "") and not isinstance(payload_session_id, str):
         raise BridgeProtocolError("standard event session identity is not a string")
+    # Standard session.title carries its durable storage ID in the payload;
+    # only the envelope identifies the runtime that emitted the event. Do not
+    # weaken identity checks for turn events or infer a title's runtime from
+    # its durable ID.
+    if event_type == "session.title" and not envelope_session_id:
+        raise BridgeProtocolError(
+            "standard title event has no runtime session identity"
+        )
     if (
-        isinstance(envelope_session_id, str)
+        event_type != "session.title"
+        and isinstance(envelope_session_id, str)
         and envelope_session_id
         and isinstance(payload_session_id, str)
         and payload_session_id

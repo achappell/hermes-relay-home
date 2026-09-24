@@ -3653,3 +3653,56 @@ def test_interrupted_turn_ends_its_audio_instead_of_reporting_a_failure() -> Non
         assert audio_kinds() == ["start", "end"]
     finally:
         endpoint.close()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        BridgeTransportError("upstream dropped"),
+        BridgeTimeoutError("upstream timed out"),
+        TimeoutError("upstream timed out"),
+        RuntimeError("upstream unavailable"),
+    ],
+)
+def test_upstream_event_loss_closes_peer_but_preserves_uncertain_turn(failure):
+    class UncertainBridge(FakeBridge):
+        def reauthorize(self, *, headers):
+            self.reauthorize_calls.append(dict(headers))
+            return BridgeStatus(
+                "unavailable",
+                HANDLE,
+                "stale_conversation",
+                unresolved_turn=BridgeTurn("home-turn-1", HANDLE, "uncertain"),
+            )
+
+    connection = FakeConnection()
+    bridge = UncertainBridge()
+    endpoint = BridgeEndpoint(connection, bridge, headers=HEADERS, route=ROUTE)
+    try:
+        _open(endpoint)
+        _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="prompt-1",
+            method="prompt.submit",
+            params={"conversation_handle": HANDLE, "text": "Once only"},
+        )
+        bridge.events.append(failure)
+        bridge.event_ready.set()
+        _wait_for(lambda: connection.closed)
+        assert bridge.close_calls == 0
+        assert endpoint.has_recoverable_state
+        endpoint.adopt(FakeConnection(), headers=HEADERS)
+        response = _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="reconnect-1",
+            method="conversation.reconnect",
+            params={"conversation_handle": HANDLE},
+        )
+        assert response["result"]["unresolved_turn"]["status"] == "uncertain"
+        assert bridge.prompt_calls == ["Once only"]
+    finally:
+        endpoint.close()

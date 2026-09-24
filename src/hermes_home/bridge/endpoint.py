@@ -37,6 +37,7 @@ from hermes_home.bridge.standard import (
     BridgeTurn,
     GatewayRPCError,
     endpoint_safe_payload,
+    safe_failure_diagnostic,
 )
 from hermes_home.observability.diagnostics import DiagnosticEvent, DiagnosticsRecorder
 
@@ -296,6 +297,7 @@ class BridgeEndpoint:
         self._bound_handle: str | None = None
         self._ready = False
         self._submitting_turn = False
+        self._conversation_closing = False
         self._availability_reason = (
             "hermes_unavailable" if bridge is None else "stale_conversation"
         )
@@ -640,6 +642,11 @@ class BridgeEndpoint:
             bridge = self._bridge
         if bridge is None:  # pragma: no cover - _require_ready proves this
             raise _RequestError("hermes_unavailable")
+        # Stop polling before closing the upstream socket. Its expected wakeup
+        # must not close the downstream socket before this RPC is acknowledged.
+        with self._state_lock:
+            self._conversation_closing = True
+            self._ready = False
         try:
             closed = bridge.close_conversation()
         except Exception as error:  # noqa: BLE001 - injected bridge is untrusted
@@ -1066,6 +1073,7 @@ class BridgeEndpoint:
                         "conversation_mismatch",
                     )
                 self._ready = True
+                self._conversation_closing = False
                 self._availability_reason = None
                 if reconnect:
                     self._choice_authority.revoke_all()
@@ -1165,6 +1173,9 @@ class BridgeEndpoint:
             try:
                 event = bridge.next_event()
             except BridgeProtocolError as error:
+                with self._state_lock:
+                    if self._conversation_closing:
+                        continue
                 # Messages are fixed, content-free validation text.
                 LOGGER.warning(
                     "closing Home bridge connection: Standard event rejected: %s", error
@@ -1172,19 +1183,50 @@ class BridgeEndpoint:
                 self._mark_unavailable("protocol_error")
                 self.close()
                 return
-            except BridgeTimeoutError:
+            except (BridgeTimeoutError, TimeoutError) as error:
+                with self._state_lock:
+                    if self._conversation_closing:
+                        continue
+                # The Standard adapter consumes healthy idle polls itself.
+                # A timeout escaping that adapter is an unavailable transport.
+                LOGGER.warning(
+                    "Home upstream unavailable: error=%s cause=%s detail=%s",
+                    *safe_failure_diagnostic(error),
+                )
                 self._mark_unavailable("transport_timeout")
+                self._close_connection(code=1011, reason="upstream transport timeout")
                 continue
-            except TimeoutError:
-                self._mark_unavailable("transport_timeout")
-                continue
-            except BridgeTransportError, ConnectionError, EOFError, OSError:
+            except (BridgeTransportError, ConnectionError, EOFError, OSError) as error:
+                with self._state_lock:
+                    if self._conversation_closing:
+                        continue
+                LOGGER.warning(
+                    "Home upstream unavailable: error=%s cause=%s detail=%s",
+                    *safe_failure_diagnostic(error),
+                )
                 self._mark_unavailable("transport_unavailable")
+                # Wake the endpoint's receive loop rather than leaving the UI
+                # waiting forever. Keep the bridge's uncertain turn for the
+                # authenticated reconnect response; close() would erase it.
+                self._close_connection(
+                    code=1011, reason="upstream transport unavailable"
+                )
                 continue
-            except RuntimeError:
+            except RuntimeError as error:
+                with self._state_lock:
+                    if self._conversation_closing:
+                        continue
+                LOGGER.warning(
+                    "Home upstream unavailable: error=%s cause=%s detail=%s",
+                    *safe_failure_diagnostic(error),
+                )
                 self._mark_unavailable("hermes_unavailable")
+                self._close_connection(code=1011, reason="upstream unavailable")
                 continue
             except Exception as error:  # noqa: BLE001 - fail closed on bridge defects
+                with self._state_lock:
+                    if self._conversation_closing:
+                        continue
                 LOGGER.warning(
                     "closing Home bridge connection: bridge event failed: %s",
                     type(error).__name__,
