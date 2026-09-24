@@ -42,7 +42,8 @@
       "properties": {
         "id": {"$ref": "#/$defs/id"},
         "name": {"type": "string", "minLength": 1, "maxLength": 128},
-        "available": {"type": "boolean"}
+        "available": {"type": "boolean"},
+        "shared": {"type": "boolean"}
       }
     },
     "wake_mapping": {

@@ -88,18 +88,33 @@ def _validate_profiles(value: object) -> list[dict[str, object]]:
     for index, profile in enumerate(value):
         path = f"profiles[{index}]"
         _require_mapping(profile, path)
-        _require_keys(profile, {"id", "name", "available"}, path)
+        # ``shared`` is optional: an omitted flag means an owned Profile, whose
+        # client grants need the owner's approval (HOME-NW-17).
+        keys = {"id", "name", "available"}
+        if "shared" in profile:
+            keys = keys | {"shared"}
+        _require_keys(profile, keys, path)
         profile_id = _require_id(profile["id"], f"{path}.id")
         name = _require_name(profile["name"], f"{path}.name")
         available = profile["available"]
         if type(available) is not bool:
             raise ConfigurationValidationError(f"{path}.available must be a boolean")
+        shared = profile.get("shared", False)
+        if type(shared) is not bool:
+            raise ConfigurationValidationError(f"{path}.shared must be a boolean")
         if profile_id in seen_ids:
             raise ConfigurationValidationError(
                 f"duplicate id {profile_id!r} in profiles"
             )
         seen_ids.add(profile_id)
-        profiles.append({"id": profile_id, "name": name, "available": available})
+        record: dict[str, object] = {
+            "id": profile_id,
+            "name": name,
+            "available": available,
+        }
+        if shared:
+            record["shared"] = True
+        profiles.append(record)
     return profiles
 
 

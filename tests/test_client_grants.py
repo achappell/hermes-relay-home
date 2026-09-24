@@ -127,9 +127,7 @@ def test_only_a_holder_of_the_profile_may_decide() -> None:
     with pytest.raises(CredentialStateError, match="unauthorized"):
         service.decide_owner_grant(outsider.device_id, pending.grant_id, approve=True)
     with pytest.raises(CredentialStateError, match="unauthorized"):
-        service.decide_owner_grant(
-            requester.device_id, pending.grant_id, approve=True
-        )
+        service.decide_owner_grant(requester.device_id, pending.grant_id, approve=True)
 
 
 def test_owner_rejection_removes_the_pending_grant() -> None:

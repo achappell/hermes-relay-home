@@ -234,3 +234,41 @@ def test_mapping_may_target_an_unavailable_profile_but_claims_cannot_use_it() ->
     }
 
     assert validate_candidate(candidate) == candidate
+
+
+def _profile_candidate(profile: dict[str, object]) -> dict[str, object]:
+    return {
+        "rooms": [],
+        "profiles": [profile],
+        "wake_mappings": [],
+        "devices": [],
+    }
+
+
+def test_profile_shared_flag_is_optional_and_normalized() -> None:
+    owned = validate_candidate(
+        _profile_candidate({"id": "amanda", "name": "Amanda", "available": True})
+    )
+    shared = validate_candidate(
+        _profile_candidate(
+            {"id": "spark", "name": "Spark", "available": True, "shared": True}
+        )
+    )
+    explicit_owned = validate_candidate(
+        _profile_candidate(
+            {"id": "jensen", "name": "Jensen", "available": True, "shared": False}
+        )
+    )
+
+    assert "shared" not in owned["profiles"][0]
+    assert shared["profiles"][0]["shared"] is True
+    assert "shared" not in explicit_owned["profiles"][0]
+
+
+def test_profile_shared_flag_must_be_a_boolean() -> None:
+    with pytest.raises(ConfigurationValidationError, match="shared"):
+        validate_candidate(
+            _profile_candidate(
+                {"id": "spark", "name": "Spark", "available": True, "shared": "yes"}
+            )
+        )
