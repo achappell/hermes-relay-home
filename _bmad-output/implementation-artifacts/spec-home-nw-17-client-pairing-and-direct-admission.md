@@ -226,7 +226,6 @@ A pending grant expires after 24 hours. A grant never becomes active without an 
 
 ## Open Decisions
 
-- Per-device claim limit (8 proposed) and reconnect grace (120 seconds proposed).
 - Whether the page also offers "approve from a paired phone" once 3-I and 3-A exist; out of scope here.
 
 ## Consuming Stories
@@ -238,6 +237,7 @@ A pending grant expires after 24 hours. A grant never becomes active without an 
 
 - 2026-09-23: Drafted from the TUI Home migration investigation.
 - 2026-09-23: Replaced Home-decided continuity (client idle timeout and automatic resume) with a client-owned session lifecycle, per Amanda: the TUI manages sessions like a regular CLI.
+- 2026-09-23: Resolved per Amanda: per-device client claim limit 8 and reconnect grace 120 seconds, both Home settings.
 - 2026-09-23: Resolved per Amanda: owned Profiles require owner approval from a paired client (first-device bootstrap by admin); clients store credentials in the platform secure store; Tailscale is required for client reachability for now, but Home authorization never depends on Tailscale identity; clients keep pairings per Home.
 - 2026-09-23: Resolved per Amanda: `session.list` shows the Profile's conversations from every surface, including Room devices and other paired clients.
 
