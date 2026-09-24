@@ -72,6 +72,11 @@ class Home:
             confirmation_factory=lambda: "ABCD2345",
             revocation_observer=self.claims,
         )
+        self.claims.set_client_grant_checker(
+            lambda device_id, grant_id: (
+                self.service.active_client_grant(device_id, grant_id) is not None
+            )
+        )
         self.directory = FakeDirectory()
         self.app = HomeApplication(
             configuration_store=self.configuration,
@@ -428,3 +433,54 @@ def test_room_devices_cannot_use_client_claims(home) -> None:
     )
 
     assert approved.status == 400
+
+
+def test_claim_on_a_grant_revoked_without_its_sweep_cannot_open(home) -> None:
+    material = home.pair("laptop", ["amanda"])
+    grant = _grant(material, "Amanda")
+    handle = home.claim(material, grant["grant_id"], "claim-1").body[
+        "conversation_handle"
+    ]
+
+    # Revoke in the domain only, as if the claim sweep had failed.
+    home.service.revoke_client_grant(grant["grant_id"])
+
+    assert home.claims.resolve(handle, material["device_id"]) is None
+
+
+def test_session_list_refuses_an_unavailable_profile(home) -> None:
+    material = home.pair("laptop", ["amanda"])
+    grant = _grant(material, "Amanda")
+    snapshot = home.configuration.read()
+    candidate = {
+        key: snapshot[key] for key in ("rooms", "profiles", "wake_mappings", "devices")
+    }
+    candidate["profiles"] = [
+        {**profile, "available": profile["id"] != "amanda"}
+        for profile in candidate["profiles"]
+    ]
+    home.configuration.replace(expected_revision=1, candidate=candidate)
+
+    response = home.call(
+        "POST",
+        "/api/v1/client-sessions/list",
+        {"schema": 1, "grant_id": grant["grant_id"]},
+        credential=material["credential"],
+    )
+
+    assert response.status == 409
+    assert response.body["error"]["code"] == "profile_unavailable"
+
+
+def test_shared_profile_holder_cannot_remove_another_device(home) -> None:
+    phone = home.pair("phone", ["spark"], endpoint_type="android")
+    laptop = home.pair("laptop", ["spark"])
+
+    response = home.call(
+        "POST",
+        f"/api/v1/profile-grants/{_grant(phone, 'Spark')['grant_id']}/revoke",
+        {"schema": 1},
+        credential=laptop["credential"],
+    )
+
+    assert response.status == 401

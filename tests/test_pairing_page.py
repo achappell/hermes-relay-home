@@ -248,13 +248,21 @@ def test_sign_out_ends_the_session(page) -> None:
         ("POST", "/api/v1/devices/d-1/revoke"),
         ("GET", "/api/v1/configuration"),
         ("GET", "/metrics"),
+        ("POST", "/api/v1/devices/d-1/credentials/rotate"),
+        ("POST", "/api/v1/enrollment/requests/r-1/reject"),
+        ("GET", "/api/v1/diagnostics/status"),
     ],
 )
-def test_admin_token_routes_refuse_proxied_requests(page, method, path) -> None:
+@pytest.mark.parametrize(
+    "proxy_header", [("X-Forwarded-For", "100.64.0.9"), ("Forwarded", "for=100.64.0.9")]
+)
+def test_admin_token_routes_refuse_proxied_requests(
+    page, method, path, proxy_header
+) -> None:
     headers = {
         "Authorization": "Bearer admin-secret",
         "Content-Type": "application/json",
-        "X-Forwarded-For": "100.64.0.9",
+        proxy_header[0]: proxy_header[1],
     }
 
     response = page.app.handle(method, path, headers, b'{"schema": 1}')
@@ -283,3 +291,103 @@ def test_device_routes_still_work_through_the_proxy(page) -> None:
     )
 
     assert response.status == 200
+
+
+def _paired(page, profiles):
+    page.call("POST", "/pair/api/offers", {})
+    request = page.request_pairing()
+    page.call(
+        "POST",
+        f"/pair/api/requests/{request['request_id']}/approve",
+        {"profiles": profiles},
+    )
+    return page.call(
+        "POST",
+        f"/api/v1/enrollment/requests/{request['request_id']}/consume",
+        {
+            "schema": 1,
+            "enrollment_code": "K7Q4MX2PNV",
+            "secure_storage": "platform_secure_store",
+        },
+        cookie=False,
+    ).body
+
+
+def test_waiting_request_shows_what_the_device_asked_for(page) -> None:
+    page.sign_in()
+    page.call("POST", "/pair/api/offers", {})
+    page.request_pairing()
+
+    (request,) = page.call("GET", "/pair/api/state").body["requests"]
+
+    assert request["requested_capabilities"] == ["client_claim"]
+    assert request["requested_rooms"] == []
+
+
+def test_offers_need_an_https_home_address(page) -> None:
+    page.sign_in()
+
+    response = page.call("POST", "/pair/api/offers", {}, origin=f"http://{HOST}")
+
+    assert response.status == 409
+    assert response.body["error"]["code"] == "https_required"
+
+
+def test_pair_again_preselects_the_previous_profiles(page) -> None:
+    page.sign_in()
+
+    page.call("POST", "/pair/api/offers", {"profiles": ["amanda", "spark"]})
+    page.request_pairing()
+
+    (request,) = page.call("GET", "/pair/api/state").body["requests"]
+    assert request["preselected_profiles"] == ["amanda", "spark"]
+
+
+def test_removing_a_profile_on_the_page_closes_its_live_claims(page) -> None:
+    page.sign_in()
+    material = _paired(page, ["amanda"])
+    (grant,) = material["client_grants"]
+    handle = page.claims.create_client_claim(
+        claim_id="claim-1",
+        device_id=material["device_id"],
+        grant_id=grant["grant_id"],
+        profile_id="amanda",
+        configuration_revision=1,
+        credential_generation=1,
+    )
+
+    page.call("POST", f"/pair/api/grants/{grant['grant_id']}/revoke", {})
+
+    assert page.claims.resolve(handle, material["device_id"]) is None
+
+
+def test_page_actions_use_the_matching_status(page) -> None:
+    page.sign_in()
+
+    missing = page.call("POST", "/pair/api/grants/nope/revoke", {})
+
+    assert missing.status == 404
+
+
+def test_page_sessions_expire_and_the_oldest_is_evicted() -> None:
+    from hermes_home.api import pairing
+
+    clock = [1_000.0]
+    tokens = iter(f"session-{index}" for index in range(100))
+    surface = pairing.PairingSurface(
+        authenticate_admin=lambda headers: True,
+        credential_service=object(),
+        configuration=dict,
+        clock=lambda: clock[0],
+        token_factory=lambda: next(tokens),
+    )
+    headers = {"Host": HOST, "Origin": ORIGIN, "Content-Type": "application/json"}
+    body = json.dumps({"admin_token": "anything"}).encode()
+
+    for _ in range(pairing.MAX_SESSIONS + 1):
+        surface.handle("POST", "/pair/api/session", headers, body)
+
+    assert not surface._signed_in({"Cookie": "hermes_home_pair=session-0"})
+    assert surface._signed_in({"Cookie": "hermes_home_pair=session-1"})
+    clock[0] += pairing.SESSION_SECONDS
+    assert not surface._signed_in({"Cookie": "hermes_home_pair=session-1"})

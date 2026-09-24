@@ -39,6 +39,17 @@ from hermes_home.storage.sqlite import (
 SESSION_COOKIE = "hermes_home_pair"
 SESSION_SECONDS = 12 * 60 * 60
 MAX_SESSIONS = 32
+MAX_REMEMBERED_OFFERS = 64
+_STATE_ERROR_STATUS = {
+    "unauthorized": 401,
+    "forbidden": 403,
+    "rejected": 403,
+    "not_found": 404,
+    "conflict": 409,
+    "approval_pending": 409,
+    "expired_or_consumed": 410,
+    "service_unavailable": 503,
+}
 
 
 class PairingSurface:
@@ -61,6 +72,8 @@ class PairingSurface:
         self._clock = clock
         self._token_factory = token_factory or (lambda: secrets.token_urlsafe(32))
         self._sessions: dict[str, float] = {}
+        # "Pair again" remembers the Profiles to pre-tick for one offer.
+        self._offer_profiles: dict[str, tuple[str, ...]] = {}
         self._lock = Lock()
 
     def handle(
@@ -90,7 +103,7 @@ class PairingSurface:
         if method == "POST" and not _same_origin(headers):
             return _error(403, "origin_rejected")
         if path == "/pair/api/session":
-            return self._sign_in(headers, body)
+            return self._sign_in(body)
         if not self._signed_in(headers):
             return _error(401, "sign_in_required")
         if path == "/pair/api/logout":
@@ -98,13 +111,13 @@ class PairingSurface:
         if path == "/pair/api/state":
             return self._state()
         if path == "/pair/api/offers":
-            return self._offer(headers)
+            return self._offer(headers, body)
         parts = path.split("/")
         if len(parts) == 6 and parts[3] in {"requests", "devices", "grants"}:
             return self._action(parts[3], parts[4], parts[5], body)
         return _error(404, "not_found")
 
-    def _sign_in(self, headers: Mapping[str, str], body: bytes | str) -> HTTPResponse:
+    def _sign_in(self, body: bytes | str) -> HTTPResponse:
         try:
             request = _json_body(body, {"admin_token"})
         except ValueError:
@@ -128,7 +141,6 @@ class PairingSurface:
             f"{SESSION_COOKIE}={session}; Path=/pair; Max-Age={SESSION_SECONDS}; "
             "HttpOnly; Secure; SameSite=Strict"
         )
-        del headers
         return HTTPResponse(
             200,
             {"schema": 1, "signed_in": True},
@@ -179,6 +191,8 @@ class PairingSurface:
         ):
             return _error(503, "service_unavailable")
         names = {profile["id"]: profile["name"] for profile in snapshot["profiles"]}
+        with self._lock:
+            remembered = dict(self._offer_profiles)
         return _json(
             {
                 "schema": 1,
@@ -199,8 +213,15 @@ class PairingSurface:
                         "type": request.endpoint_type,
                         "confirmation_code": request.confirmation_code,
                         "expires_at": request.expires_at,
+                        "requested_capabilities": list(
+                            request.requested_scope.capabilities
+                        ),
+                        "requested_rooms": list(request.requested_scope.rooms),
                         "personal_client": request.endpoint_type
                         in CLIENT_ENDPOINT_TYPES,
+                        "preselected_profiles": list(
+                            remembered.get(request.offer_id, ())
+                        ),
                     }
                     for request in requests
                     if request.status == "pending"
@@ -216,6 +237,7 @@ class PairingSurface:
                         "grants": [
                             {
                                 "grant_id": grant.grant_id,
+                                "profile_id": grant.profile_id,
                                 "profile": names.get(grant.profile_id, "Unknown"),
                                 "status": grant.status,
                                 "bootstrap": grant.bootstrap,
@@ -229,14 +251,34 @@ class PairingSurface:
             }
         )
 
-    def _offer(self, headers: Mapping[str, str]) -> HTTPResponse:
+    def _offer(self, headers: Mapping[str, str], body: bytes | str) -> HTTPResponse:
         origin = _origin(headers)
         if origin is None:
             return _error(403, "origin_rejected")
+        if not origin.startswith("https://"):
+            # The link carries this address to another device; a plain-http or
+            # loopback address could never reach this Home from there.
+            return _error(409, "https_required")
+        try:
+            request = _json_object(body) if _has_body(body) else {}
+            if set(request) - {"profiles"}:
+                raise ValueError("unknown offer fields")
+            profiles = request.get("profiles", [])
+            if not isinstance(profiles, list) or any(
+                type(item) is not str or not 1 <= len(item) <= 128 for item in profiles
+            ):
+                raise ValueError("profiles must be identifiers")
+        except TypeError, ValueError:
+            return _error(400, "invalid_request")
         try:
             offer = self._service.create_offer(short_code=True)
         except CredentialStoreError:
             return _error(503, "service_unavailable")
+        if profiles:
+            with self._lock:
+                while len(self._offer_profiles) >= MAX_REMEMBERED_OFFERS:
+                    self._offer_profiles.pop(next(iter(self._offer_profiles)))
+                self._offer_profiles[offer.offer_id] = tuple(profiles)
         code = offer.enrollment_code
         link = f"hermes-home://pair?home={quote(origin, safe='')}&code={code}"
         return _json(
@@ -273,7 +315,7 @@ class PairingSurface:
             else:
                 return _error(404, "not_found")
         except CredentialStateError as error:
-            return _error(409 if error.code != "not_found" else 404, error.code)
+            return _error(_STATE_ERROR_STATUS.get(error.code, 400), error.code)
         except CredentialValidationError, ValueError, TypeError:
             return _error(400, "invalid_request")
         except CredentialStoreError, OSError, RuntimeError:
@@ -377,6 +419,18 @@ def _digest(session: str) -> str:
     return hashlib.sha256(session.encode("utf-8")).hexdigest()
 
 
+def _json_object(body: bytes | str) -> dict[str, object]:
+    if isinstance(body, bytes):
+        body = body.decode("utf-8")
+    try:
+        value = json.loads(body)
+    except json.JSONDecodeError as error:
+        raise ValueError("invalid JSON") from error
+    if not isinstance(value, dict):
+        raise TypeError("request body must be an object")
+    return value
+
+
 def _json_body(body: bytes | str, expected: set[str]) -> dict[str, object]:
     if isinstance(body, bytes):
         body = body.decode("utf-8") if body else ""
@@ -391,6 +445,10 @@ def _json_body(body: bytes | str, expected: set[str]) -> dict[str, object]:
     if not isinstance(value, dict) or set(value) != expected:
         raise ValueError("invalid request fields")
     return value
+
+
+def _has_body(body: bytes | str) -> bool:
+    return bool(body.strip())
 
 
 def _json(body: dict[str, object]) -> HTTPResponse:

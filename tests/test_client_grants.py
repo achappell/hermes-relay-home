@@ -330,3 +330,134 @@ def test_short_code_offer_accepts_typed_variants() -> None:
 
     assert offer.enrollment_code == "K7Q4MX2PNV"
     assert request.status == "pending"
+
+
+def test_shared_profile_holder_may_revoke_only_its_own_grant() -> None:
+    service = _service()
+    phone = _pair(service, endpoint_id="phone", profiles=["spark"], shared=("spark",))
+    tablet = _pair(service, endpoint_id="tablet", profiles=["spark"], shared=("spark",))
+    (phone_grant,) = phone.client_grants
+    (tablet_grant,) = tablet.client_grants
+
+    with pytest.raises(CredentialStateError, match="unauthorized"):
+        service.revoke_client_grant(
+            phone_grant.grant_id,
+            requester_device_id=tablet.device_id,
+            shared_profiles=("spark",),
+        )
+    service.revoke_client_grant(
+        tablet_grant.grant_id,
+        requester_device_id=tablet.device_id,
+        shared_profiles=("spark",),
+    )
+
+    assert service.client_grants(phone.device_id) == (phone_grant,)
+    assert service.client_grants(tablet.device_id) == ()
+
+
+def test_revoking_twice_returns_the_grant_so_claims_can_be_closed_again() -> None:
+    service = _service()
+    material = _pair(service, endpoint_id="laptop", profiles=["amanda"])
+    (grant,) = material.client_grants
+
+    first = service.revoke_client_grant(grant.grant_id)
+    second = service.revoke_client_grant(grant.grant_id)
+
+    assert first.status == second.status == "revoked"
+
+
+def test_client_claim_cannot_share_a_credential_with_room_claims() -> None:
+    service = _service()
+    offer = service.create_offer()
+    request = service.submit_request(
+        enrollment_code=offer.enrollment_code,
+        endpoint_id="laptop",
+        label="Laptop",
+        endpoint_type="tui",
+        requested_rooms=[],
+        requested_capabilities=["client_claim", "wake_claim"],
+        secure_storage="platform_secure_store",
+    )
+
+    with pytest.raises(CredentialValidationError, match="cannot be combined"):
+        service.approve_request(
+            request.request_id,
+            CredentialScope.from_values(
+                rooms=[], capabilities=["client_claim", "wake_claim"]
+            ),
+            configured_rooms=[],
+            configured_profiles=PROFILES,
+            client_profiles=["amanda"],
+        )
+
+
+def test_an_expired_holder_does_not_strand_a_new_device() -> None:
+    from hermes_home.domain.credentials import CREDENTIAL_TTL_SECONDS
+
+    clock = Clock()
+    service = _service(clock)
+    _pair(service, endpoint_id="old-phone", profiles=["jensen"])
+    clock.now += CREDENTIAL_TTL_SECONDS + 1
+
+    material = _pair(service, endpoint_id="new-phone", profiles=["jensen"])
+
+    (grant,) = material.client_grants
+    assert grant.status == "active"
+    assert grant.bootstrap is True
+
+
+def test_client_grants_wait_when_configuration_is_unreadable() -> None:
+    service = _service()
+    offer = service.create_offer()
+    request = service.submit_request(
+        enrollment_code=offer.enrollment_code,
+        endpoint_id="laptop",
+        label="Laptop",
+        endpoint_type="tui",
+        requested_rooms=[],
+        requested_capabilities=["client_claim"],
+        secure_storage="platform_secure_store",
+    )
+    service.approve_request(
+        request.request_id,
+        _client_scope(),
+        configured_rooms=[],
+        configured_profiles=PROFILES,
+        client_profiles=["amanda"],
+    )
+
+    with pytest.raises(CredentialStateError, match="service_unavailable"):
+        service.consume_request(
+            request.request_id,
+            enrollment_code=offer.enrollment_code,
+            secure_storage="platform_secure_store",
+            shared_profiles=None,
+        )
+
+
+def test_room_device_enrolls_without_configuration() -> None:
+    service = _service()
+    offer = service.create_offer()
+    request = service.submit_request(
+        enrollment_code=offer.enrollment_code,
+        endpoint_id="puck",
+        label="Kitchen Puck",
+        endpoint_type="puck",
+        requested_rooms=["kitchen"],
+        requested_capabilities=["wake_claim"],
+        secure_storage="platform_secure_store",
+    )
+    service.approve_request(
+        request.request_id,
+        CredentialScope.from_values(rooms=["kitchen"], capabilities=["wake_claim"]),
+        configured_rooms=["kitchen"],
+    )
+
+    material = service.consume_request(
+        request.request_id,
+        enrollment_code=offer.enrollment_code,
+        secure_storage="platform_secure_store",
+        shared_profiles=None,
+    )
+
+    assert material.client_grants == ()

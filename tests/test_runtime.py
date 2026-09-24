@@ -247,6 +247,8 @@ def test_create_runtime_auto_wires_the_standard_backed_pilot_factory(
             "HERMES_HOME_STANDARD_GATEWAY_URL": ("wss://media-server.example/api/ws"),
             "HERMES_HOME_STANDARD_TOKEN_FILE": str(standard_token_file),
             "HERMES_HOME_CREDENTIAL_ROOT_SECRET_FILE": str(credential_root_file),
+            "HERMES_HOME_CLIENT_CLAIMS_PER_DEVICE": "3",
+            "HERMES_HOME_CLIENT_RECONNECT_GRACE_SECONDS": "45",
         }
     )
     captured = {}
@@ -282,6 +284,12 @@ def test_create_runtime_auto_wires_the_standard_backed_pilot_factory(
         assert application._credential_service._revocation_observer is (
             runtime.conversation_store
         )
+        from hermes_home.bridge.production import StandardSessionDirectory
+
+        assert isinstance(application._session_directory, StandardSessionDirectory)
+        assert runtime.conversation_store._client_claims_per_device == 3
+        assert runtime.conversation_store._client_reconnect_grace == 45.0
+        assert runtime.conversation_store._client_grant_checker is not None
     finally:
         runtime.close()
 
@@ -778,3 +786,39 @@ def test_create_runtime_persists_the_shared_diagnostics_timeline_across_restart(
         assert timeline[0].failure_code == "hermes_unavailable"
     finally:
         restarted.close()
+
+
+def test_load_settings_reads_and_bounds_client_claim_settings(tmp_path) -> None:
+    token_file = tmp_path / "admin-token"
+    token_file.write_text("admin-secret", encoding="utf-8")
+    base = {"HERMES_HOME_ADMIN_TOKEN_FILE": str(token_file)}
+
+    defaults = load_settings(base)
+    tuned = load_settings(
+        {
+            **base,
+            "HERMES_HOME_CLIENT_CLAIMS_PER_DEVICE": "4",
+            "HERMES_HOME_CLIENT_RECONNECT_GRACE_SECONDS": "30",
+        }
+    )
+
+    assert (
+        defaults.client_claims_per_device,
+        defaults.client_reconnect_grace_seconds,
+    ) == (
+        8,
+        120.0,
+    )
+    assert (tuned.client_claims_per_device, tuned.client_reconnect_grace_seconds) == (
+        4,
+        30.0,
+    )
+    for name, value in (
+        ("HERMES_HOME_CLIENT_CLAIMS_PER_DEVICE", "0"),
+        ("HERMES_HOME_CLIENT_CLAIMS_PER_DEVICE", "65"),
+        ("HERMES_HOME_CLIENT_CLAIMS_PER_DEVICE", "many"),
+        ("HERMES_HOME_CLIENT_RECONNECT_GRACE_SECONDS", "0"),
+        ("HERMES_HOME_CLIENT_RECONNECT_GRACE_SECONDS", "601"),
+    ):
+        with pytest.raises(RuntimeConfigurationError):
+            load_settings({**base, name: value})

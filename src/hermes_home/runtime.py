@@ -321,6 +321,13 @@ def create_runtime(
                 root_secret=settings.credential_root_secret,
                 revocation_observer=conversation_store,
             )
+            if conversation_store is not None:
+                service = credential_service
+                conversation_store.set_client_grant_checker(
+                    lambda device_id, grant_id: (
+                        service.active_client_grant(device_id, grant_id) is not None
+                    )
+                )
         if health_probe_provider is None and settings.standard_gateway_url is not None:
             if settings.standard_token is None:
                 raise RuntimeConfigurationError(

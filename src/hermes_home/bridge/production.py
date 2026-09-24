@@ -75,6 +75,7 @@ class ConversationGrantStore:
         client_claims_per_device: int = DEFAULT_CLIENT_CLAIMS_PER_DEVICE,
         client_reconnect_grace_seconds: float = DEFAULT_CLIENT_RECONNECT_GRACE_SECONDS,
         session_ref_factory: Callable[[], str] | None = None,
+        client_grant_checker: Callable[[str, str], bool] | None = None,
     ) -> None:
         if (
             type(client_claims_per_device) is not int
@@ -87,6 +88,7 @@ class ConversationGrantStore:
             lambda: "sref-" + secrets.token_urlsafe(18)
         )
         self._configuration = configuration
+        self._client_grant_checker = client_grant_checker
         self._credential_scope_resolver = credential_scope_resolver
         self._clock = clock
         self._idle_timeout = _positive_timeout(idle_timeout_seconds)
@@ -385,13 +387,17 @@ class ConversationGrantStore:
         """Close every active claim made under one client grant."""
         return self._close_matching_claims("grant_id = ?", (grant_id,), reason)
 
+    def set_client_grant_checker(self, checker: Callable[[str, str], bool]) -> None:
+        """Attach the grant check once the credential service exists."""
+        self._client_grant_checker = checker
+
     def resolve(self, handle: str, device_id: str) -> ConversationGrant | None:
         with self._lock:
             try:
                 row = self._connection.execute(
                     "SELECT device_id, room_id, wake_mapping_id, profile_id, "
                     "session_id, status, idle_deadline, credential_generation, activity, "
-                    "configuration_revision "
+                    "configuration_revision, claim_kind, grant_id "
                     "FROM conversation_claims WHERE handle = ?",
                     (handle,),
                 ).fetchone()
@@ -404,6 +410,16 @@ class ConversationGrantStore:
                 reason = _expiry_reason(row[8])
                 self._close_locked(handle, reason, now)
                 return None
+            if row[10] == "client" and self._client_grant_checker is not None:
+                # A grant revoked after the claim was made, or while its
+                # claims were being closed, must not keep the conversation.
+                try:
+                    grant_active = self._client_grant_checker(device_id, row[11])
+                except OSError, RuntimeError, TypeError, ValueError:
+                    return None
+                if not grant_active:
+                    self._close_locked(handle, "grant_revoked", now)
+                    return None
             try:
                 snapshot = self._configuration()
                 profiles = {profile["id"]: profile for profile in snapshot["profiles"]}
@@ -1350,7 +1366,9 @@ class StandardSessionDirectory:
                 {
                     "id": session_id,
                     "title": title if isinstance(title, str) else "",
-                    "started_at": started_at if type(started_at) in (int, float) else 0,
+                    "started_at": started_at
+                    if type(started_at) in (int, float) and isfinite(started_at)
+                    else 0,
                     "message_count": message_count if type(message_count) is int else 0,
                 }
             )

@@ -592,6 +592,10 @@ class CredentialService:
                         "approved scope references an unavailable touch profile"
                     )
             if "client_claim" in scope.capabilities:
+                if {"wake_claim", "touch_claim"}.intersection(scope.capabilities):
+                    raise CredentialValidationError(
+                        "client_claim cannot be combined with wake or touch claims"
+                    )
                 if record["type"] not in CLIENT_ENDPOINT_TYPES:
                     raise CredentialValidationError(
                         "client_claim is limited to personal client endpoints"
@@ -650,9 +654,13 @@ class CredentialService:
         *,
         enrollment_code: str,
         secure_storage: str,
-        shared_profiles: Iterable[object] = (),
+        shared_profiles: Iterable[object] | None = (),
     ) -> CredentialMaterial:
-        """Atomically consume approval and persist a new endpoint credential."""
+        """Atomically consume approval and persist a new endpoint credential.
+
+        ``shared_profiles`` is ``None`` when Home could not read configuration;
+        that only blocks a request that carries client Profile grants.
+        """
         request_id = _identifier(request_id, "request_id")
         if type(enrollment_code) is not str or not enrollment_code:
             raise CredentialValidationError("enrollment code must not be blank")
@@ -660,7 +668,11 @@ class CredentialService:
         if secure_storage != SECURE_STORAGE_PLATFORM:
             raise CredentialValidationError("platform secure storage is required")
         digest = self._digest(enrollment_code)
-        shared = frozenset(_bounded_values(shared_profiles, "shared_profiles"))
+        shared = (
+            None
+            if shared_profiles is None
+            else frozenset(_bounded_values(shared_profiles, "shared_profiles"))
+        )
 
         def consume(
             state: dict[str, object],
@@ -687,6 +699,8 @@ class CredentialService:
                 raise CredentialStateError("conflict")
             if request["secure_storage"] != secure_storage:
                 raise CredentialValidationError("platform secure storage is required")
+            if shared is None and request.get("approved_client_profiles"):
+                raise CredentialStateError("service_unavailable")
 
             offer = _find_record_by_id(_records(state, "offers"), request["offer_id"])
             if offer is None or not hmac.compare_digest(
@@ -1056,9 +1070,16 @@ class CredentialService:
         grant_id: str,
         *,
         requester_device_id: str | None = None,
+        shared_profiles: Iterable[object] = (),
     ) -> ClientGrant:
-        """End one grant; a device may revoke only grants for its own Profiles."""
+        """End one grant; a device may revoke only grants for its own Profiles.
+
+        On a shared Profile a device may end only its own grant. Revoking an
+        already-revoked grant returns it again, so a caller can retry closing
+        that grant's claims after a partial failure.
+        """
         grant_id = _identifier(grant_id, "grant_id")
+        shared = frozenset(_bounded_values(shared_profiles, "shared_profiles"))
         if requester_device_id is not None:
             requester_device_id = _identifier(requester_device_id, "device_id")
 
@@ -1070,17 +1091,24 @@ class CredentialService:
             if record is None or record.get("status") not in {
                 "active",
                 "pending_owner",
+                "revoked",
             }:
                 raise CredentialStateError("not_found")
-            if requester_device_id is not None and not any(
-                item.get("device_id") == requester_device_id
-                and item.get("profile_id") == record.get("profile_id")
-                and item.get("status") == "active"
-                for item in records
-            ):
-                raise CredentialStateError("unauthorized")
-            record["status"] = "revoked"
-            record["decided_at"] = now
+            if requester_device_id is not None:
+                holds_profile = any(
+                    item.get("device_id") == requester_device_id
+                    and item.get("profile_id") == record.get("profile_id")
+                    and item.get("status") == "active"
+                    for item in records
+                )
+                own_grant = record.get("device_id") == requester_device_id
+                if not holds_profile or (
+                    record.get("profile_id") in shared and not own_grant
+                ):
+                    raise CredentialStateError("unauthorized")
+            if record["status"] != "revoked":
+                record["status"] = "revoked"
+                record["decided_at"] = now
             return _grant_from_record(record)
 
         return self._store.mutate(revoke)
@@ -1128,7 +1156,7 @@ class CredentialService:
         *,
         device_id: str,
         request: Mapping[str, object],
-        shared: frozenset[str],
+        shared: frozenset[str] | None,
         now: float,
     ) -> tuple[ClientGrant, ...]:
         records = _client_grant_records(state)
@@ -1137,12 +1165,17 @@ class CredentialService:
         profiles = _bounded_values(
             request.get("approved_client_profiles") or (), "client_profiles"
         )
+        shared = shared or frozenset()
+        # Only a device that can still authenticate can approve; a holder whose
+        # credential expired must not strand new devices in pending_owner.
+        live = _live_device_ids(state, now)
         issued: list[ClientGrant] = []
         for profile_id in profiles:
             held_elsewhere = any(
                 item.get("profile_id") == profile_id
                 and item.get("status") == "active"
                 and item.get("device_id") != device_id
+                and item.get("device_id") in live
                 for item in records
             )
             if profile_id in shared:
@@ -1278,6 +1311,23 @@ def _end_device_grants(state: dict[str, object], device_id: str, now: float) -> 
         }:
             record["status"] = "revoked"
             record["decided_at"] = now
+
+
+def _live_device_ids(state: Mapping[str, object], now: float) -> frozenset[str]:
+    """Devices holding a credential that can still authenticate right now."""
+    live: set[str] = set()
+    for record in state.get("credentials") or []:
+        status = record.get("status")
+        device_id = record.get("device_id")
+        if not isinstance(device_id, str):
+            continue
+        active = status == "active" and now < _timestamp(record.get("expires_at"))
+        overlapping = status == "replaced" and now < _timestamp(
+            record.get("overlap_until", 0.0)
+        )
+        if active or overlapping:
+            live.add(device_id)
+    return frozenset(live)
 
 
 def _current_grants(state: Mapping[str, object], now: float) -> tuple[ClientGrant, ...]:

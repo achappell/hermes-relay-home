@@ -132,6 +132,8 @@ fieldset.profiles { border: 0; padding: 8px 0; margin: 0; }
 (() => {
   const $ = (id) => document.getElementById(id);
   let state = null, offerExpires = 0, poll = null, clockSkew = 0;
+  // Profile choices survive the 2-second refresh, keyed by request.
+  const choicesByRequest = new Map();
 
   async function api(path, body) {
     const options = body === undefined
@@ -183,9 +185,19 @@ fieldset.profiles { border: 0; padding: 8px 0; margin: 0; }
   function render() {
     const requests = $("requests"); requests.replaceChildren();
     $("no-requests").hidden = state.requests.length > 0;
+    const waiting = new Set(state.requests.map((request) => request.request_id));
+    for (const id of [...choicesByRequest.keys()]) if (!waiting.has(id)) choicesByRequest.delete(id);
     for (const request of state.requests) {
+      if (!choicesByRequest.has(request.request_id)) {
+        choicesByRequest.set(request.request_id, new Set(request.preselected_profiles || []));
+      }
+      const chosen = choicesByRequest.get(request.request_id);
       const item = el("div", undefined, "item");
       item.append(el("div", request.label + " (" + request.type + ")"));
+      const asks = el("div", undefined, "muted");
+      asks.append("Asks for: " + (request.requested_capabilities.join(", ") || "nothing"));
+      if (request.requested_rooms.length) asks.append("; rooms: " + request.requested_rooms.join(", "));
+      item.append(asks);
       const confirm = el("div", undefined, "muted");
       confirm.append("Confirm the device shows ", el("span", request.confirmation_code, "confirm"));
       item.append(confirm);
@@ -196,14 +208,15 @@ fieldset.profiles { border: 0; padding: 8px 0; margin: 0; }
         for (const profile of state.profiles.filter((p) => p.available)) {
           const label = el("label", undefined, "inline");
           const box = document.createElement("input");
-          box.type = "checkbox"; box.value = profile.id;
+          box.type = "checkbox"; box.value = profile.id; box.checked = chosen.has(profile.id);
+          box.addEventListener("change", () => { if (box.checked) chosen.add(profile.id); else chosen.delete(profile.id); });
           label.append(box, profile.name + (profile.shared ? " (shared)" : ""));
           choices.append(label);
         }
         item.append(choices);
         const approve = el("button", "Approve", "primary"); approve.type = "button";
         approve.addEventListener("click", async () => {
-          const profiles = [...choices.querySelectorAll("input:checked")].map((box) => box.value);
+          const profiles = [...chosen];
           if (!profiles.length) { $("app-error").textContent = "Choose at least one Profile."; return; }
           approve.disabled = true;
           try { await api("/pair/api/requests/" + encodeURIComponent(request.request_id) + "/approve", { profiles }); refresh(); }
@@ -232,7 +245,11 @@ fieldset.profiles { border: 0; padding: 8px 0; margin: 0; }
       item.append(title);
       const status = el("div", undefined, "muted");
       const statusClass = device.status === "active" ? "ok" : "danger";
-      status.append(el("span", device.status, "badge " + statusClass), "Renews by itself; current credential valid until " + when(device.expires_at));
+      if (device.status === "expired") {
+        status.append(el("span", "expired", "badge danger"), "Expired " + when(device.expires_at) + ". Pair it again to reconnect.");
+      } else {
+        status.append(el("span", device.status, "badge " + statusClass), "Last renewed " + when(device.issued_at) + "; renews by itself before " + when(device.expires_at));
+      }
       item.append(status);
       for (const grant of device.grants) {
         const line = el("div", undefined, "row");
@@ -256,6 +273,11 @@ fieldset.profiles { border: 0; padding: 8px 0; margin: 0; }
         catch (error) { fail(error); }
       });
       const actions = el("div", undefined, "row gap-small");
+      if (device.status === "expired") {
+        const again = el("button", "Pair again", "primary"); again.type = "button";
+        again.addEventListener("click", () => createOffer(device.grants.map((grant) => grant.profile_id)));
+        actions.append(again);
+      }
       actions.append(revoke); item.append(actions);
       devices.append(item);
     }
@@ -276,9 +298,9 @@ fieldset.profiles { border: 0; padding: 8px 0; margin: 0; }
     catch (error) { $("signin-error").textContent = error.status === 401 ? "That token was not accepted." : "Sign-in failed: " + error.message; }
   });
   $("signout").addEventListener("click", async () => { try { await api("/pair/api/logout", {}); } catch (error) {} showApp(false); });
-  $("new-offer").addEventListener("click", async () => {
+  async function createOffer(profiles) {
     try {
-      const offer = await api("/pair/api/offers", {});
+      const offer = await api("/pair/api/offers", profiles && profiles.length ? { profiles } : {});
       $("qr").innerHTML = offer.qr_svg;
       $("code").textContent = offer.code;
       $("home").textContent = offer.home;
@@ -286,8 +308,14 @@ fieldset.profiles { border: 0; padding: 8px 0; margin: 0; }
       $("offer").hidden = false; $("offer").classList.remove("dim");
       offerExpires = offer.expires_at; tick();
       $("copy-link").onclick = () => navigator.clipboard && navigator.clipboard.writeText(offer.link);
-    } catch (error) { fail(error); }
-  });
+      $("offer").scrollIntoView({ behavior: "smooth", block: "nearest" });
+    } catch (error) {
+      if (error.message === "https_required") {
+        $("app-error").textContent = "Open this page through its https Home address; a pairing link must reach this Home from another device.";
+      } else { fail(error); }
+    }
+  }
+  $("new-offer").addEventListener("click", () => createOffer([]));
 
   api("/pair/api/state").then(() => showApp(true)).catch(() => showApp(false));
 })();

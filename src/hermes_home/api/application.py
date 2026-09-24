@@ -195,8 +195,10 @@ class HomeApplication:
         if pairing is not None:
             return pairing
         if _is_admin_route(method, path) and _is_proxied(headers):
-            # Admin-token routes stay loopback-only; the signed-in pairing page
-            # is the only published admin surface. This only ever denies.
+            # Home binds loopback; a proxied request reached it through a
+            # published path, and admin-token routes must not be usable there.
+            # The signed-in pairing page is the only published admin surface.
+            # This only ever denies; it never grants.
             return _error(403, "admin_local_only")
         if path == "/api/v1/configuration":
             if method == "GET":
@@ -821,18 +823,20 @@ class HomeApplication:
             )
         except TypeError, ValueError, json.JSONDecodeError:
             return _error(400, "invalid_request")
+        # Only client grants need configuration; a Room device can finish
+        # enrolling while configuration is unreadable.
         try:
             snapshot = self._configuration_store.read()
-        except ConfigurationMigrationRequired, OSError, RuntimeError, TypeError:
-            return _error(503, "service_unavailable")
-        except ValueError:
-            return _error(503, "service_unavailable")
+            shared_profiles = _shared_profile_ids(snapshot)
+        except OSError, RuntimeError, TypeError, ValueError, KeyError:
+            snapshot = None
+            shared_profiles = None
         try:
             material = self._credential_service.consume_request(
                 request_id,
                 enrollment_code=request["enrollment_code"],
                 secure_storage=request["secure_storage"],
-                shared_profiles=_shared_profile_ids(snapshot),
+                shared_profiles=shared_profiles,
             )
         except CredentialStateError as error:
             return _credential_error(error)
@@ -841,7 +845,7 @@ class HomeApplication:
         except CredentialStoreError:
             return _error(503, "service_unavailable")
         payload = _material_payload(material)
-        if material.client_grants:
+        if material.client_grants and snapshot is not None:
             payload["client_grants"] = _client_grant_views(
                 material.client_grants, snapshot
             )
@@ -1446,6 +1450,17 @@ class HomeApplication:
             if not self._discard_new_claim(conversation_handle, context.device_id):
                 return _error(503, "service_unavailable")
             return _error(401, "unauthorized")
+        try:
+            still_granted = self._credential_service.active_client_grant(
+                context.device_id, grant.grant_id
+            )
+        except CredentialStoreError, CredentialValidationError:
+            still_granted = None
+        if still_granted is None:
+            # The grant was revoked while the claim was being created; its
+            # claim sweep may already have run, so discard this one here.
+            self._discard_new_claim(conversation_handle, context.device_id)
+            return _error(403, "client_claim_unavailable")
 
         session: dict[str, object] = {"mode": "new"}
         if session_id is not None:
@@ -1496,6 +1511,16 @@ class HomeApplication:
             return failure
         if self._session_directory is None or self._conversation_claim_store is None:
             return _error(503, "service_unavailable")
+        try:
+            snapshot = self._configuration_store.read()
+        except OSError, RuntimeError, TypeError, ValueError:
+            return _error(503, "service_unavailable")
+        profile = next(
+            (item for item in snapshot["profiles"] if item["id"] == grant.profile_id),
+            None,
+        )
+        if profile is None or profile["available"] is not True:
+            return _error(409, "profile_unavailable")
         try:
             rows = self._session_directory.list_sessions(grant.profile_id, limit)
             active = self._conversation_claim_store.active_session_ids()
@@ -1582,7 +1607,11 @@ class HomeApplication:
         try:
             if action == "revoke":
                 grant = self._credential_service.revoke_client_grant(
-                    grant_id, requester_device_id=context.device_id
+                    grant_id,
+                    requester_device_id=context.device_id,
+                    shared_profiles=_shared_profile_ids(
+                        self._configuration_store.read()
+                    ),
                 )
             else:
                 grant = self._credential_service.decide_owner_grant(
@@ -1592,7 +1621,7 @@ class HomeApplication:
             return _credential_error(error)
         except CredentialValidationError:
             return _error(400, "invalid_request")
-        except CredentialStoreError:
+        except CredentialStoreError, OSError, RuntimeError, TypeError, ValueError:
             return _error(503, "service_unavailable")
         if action == "revoke" and self._conversation_claim_store is not None:
             try:
