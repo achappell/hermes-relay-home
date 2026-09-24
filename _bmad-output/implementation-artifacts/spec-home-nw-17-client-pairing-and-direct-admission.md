@@ -43,6 +43,8 @@ Once paired, a client stays paired: it renews its own credential automatically i
 ## Resolved Direction
 
 - **Approval lives on a Home page for now.** The page is the first trusted surface for FR-28. It is built on public API routes, so the iOS and Android control-plane stories (3-I, 3-A) can later approve through the same calls without a second pairing model.
+- **Profile owners approve access to their own Profile.** Each Profile is configured as `shared` (for example Spark or a family Profile) or owned by one person. The admin may grant a shared Profile on the pairing page. A grant to an owned Profile becomes `pending_owner` until the owner approves it from a client already paired to that Profile; the grant appears there as an approval request showing the device label, type, and requester. Bootstrap exception: when an owned Profile has no paired client yet, the admin may approve the first grant on the page, and that approval is recorded. Every client of a Profile can list the devices currently holding it, so no grant is silent. Revocation by the owner or the admin is immediate.
+- **Home authentication does not depend on the network path.** Clients currently reach Home over Tailscale, and the pairing link carries the tailnet address, so a client without Tailscale cannot pair yet; home-network routes remain HOME-NW-04 roaming work. Home never uses Tailscale identity headers for authorization. The pairing page signs in with the admin credential, and owner approval uses the owner's paired Device credential. Either works unchanged behind a different route or proxy.
 - **A pairing link carries everything the client needs.** The QR code and the copyable text encode one link, `hermes-home://pair?home=<https base URL>&code=<enrollment code>`. A client needs nothing else: no URL typing, no pasted credential, no handle. The short code (for example `K7Q-4MX`) is shown for typing when a camera is not available, with the Home base URL shown beside it.
 - **Profiles are granted per client, not per Room.** A client credential carries a list of `client_grants`, one per approved Profile, each with an opaque `grant_id` and a display label. Device configuration returns the list of `{grant_id, label}`; Profile IDs stay on Home. The TUI's Profile switcher and the mobile Profile pickers choose by `grant_id`.
 - **No Room, no arbitration, no preemption.** A personal client is not a household room device. Its claims are keyed by device and grant. Several terminal windows on one laptop are several clients of the same device, so a device may hold several active claims per grant, bounded by `HERMES_HOME_CLIENT_CLAIMS_PER_DEVICE` (default 8); excess claims are denied `claim_limit`.
@@ -142,12 +144,27 @@ The client opens the bridge with `conversation.open` and its handle, then manage
 
 ### Pairing page
 
-`GET /pair` serves a static page. Admin sign-in exchanges the admin token for an `HttpOnly`, `Secure`, `SameSite=Strict` session cookie with a 12-hour lifetime; every state-changing page call also checks `Origin`. The page calls the existing offer, request-list, approve, reject, and revoke operations through cookie-authenticated equivalents under `/pair/api/*`. The page shows paired devices with type, label, Profiles, expiry, and last renewal, and can revoke one or start "pair again".
+`GET /pair` serves a static page. Admin sign-in exchanges the admin token for an `HttpOnly`, `Secure`, `SameSite=Strict` session cookie with a 12-hour lifetime; every state-changing page call also checks `Origin`. The page calls the existing offer, request-list, approve, reject, and revoke operations through cookie-authenticated equivalents under `/pair/api/*`. The page shows paired devices with type, label, Profiles, grant state (`active` or `pending_owner`), expiry, and last renewal, and can revoke one or start "pair again".
+
+### Owner approval on a paired client
+
+A client with a grant for an owned Profile can list and decide pending grants for that Profile:
+
+- `GET /api/v1/profile-grants/pending`: pending grants for Profiles this device is granted, with an opaque `pending_id`, device label, type, requested Profile label, and requested time.
+- `POST /api/v1/profile-grants/{pending_id}/approve` and `/reject`: Device-authenticated; allowed only for a device holding an active grant for the same owned Profile.
+- `GET /api/v1/profile-grants/holders`: the devices currently holding each of this device's Profiles.
+
+A pending grant expires after 24 hours. A grant never becomes active without an owner decision, except under the bootstrap rule.
 
 ## I/O & Edge-Case Matrix
 
 | Situation | Behavior | Guardrail |
 | --- | --- | --- |
+| Admin grants a shared Profile | Grant active at approval | Profile configured `shared` |
+| Admin grants an owned Profile that already has a paired client | Grant `pending_owner`; shown on the owner's clients | No session access until the owner approves |
+| Owner approves or rejects from a paired client | Grant becomes active or is removed | Only a device holding that Profile may decide |
+| Admin grants the first device for an owned Profile | Grant active under the bootstrap rule; recorded | Visible in every later holder list |
+| Pending owner grant not decided in 24 hours | Expires | Admin may request again |
 | Client submits a valid pairing link | Pending request with confirmation code; page shows it | Code single-use; 5-minute expiry unchanged |
 | Client polls before approval | `approval_pending` | No credential material before approval |
 | Admin rejects or code expires | Client shows the terminal reason and offers a new pairing | No partial credential |
@@ -170,7 +187,8 @@ The client opens the bridge with `conversation.open` and its handle, then manage
 
 ## Code Map
 
-- `src/hermes_home/domain/credentials.py`: add `client_claim` to `SUPPORTED_CREDENTIAL_CAPABILITIES`; add `client_grants` (Profile ID and opaque grant ID) to `CredentialScope` with bounded validation, serialization, and "absent grants nothing" semantics; validate grants against available Profiles at approval; return `approval_pending` from `consume_request` for pending requests; accept endpoint types `tui`, `ios`, and `android`.
+- `docs/contracts/v1/configuration.schema.json` and configuration storage: add Profile `ownership` (`shared` or an owner person ID).
+- `src/hermes_home/domain/credentials.py`: grant states `active` and `pending_owner`, bootstrap rule, owner decisions, and holder listing; add `client_claim` to `SUPPORTED_CREDENTIAL_CAPABILITIES`; add `client_grants` (Profile ID and opaque grant ID) to `CredentialScope` with bounded validation, serialization, and "absent grants nothing" semantics; validate grants against available Profiles at approval; return `approval_pending` from `consume_request` for pending requests; accept endpoint types `tui`, `ios`, and `android`.
 - `src/hermes_home/bridge/production.py`: migrate `conversation_claims` to allow client claims without a Room or wake mapping (nullable `room_id` and `wake_mapping_id`, plus `grant_id` and `claim_kind`); exempt client claims from the Room conflict query, idle timer, and first-open binding; enforce the per-device claim limit; close client claims on `conversation.close` or after the reconnect grace.
 - `src/hermes_home/bridge/standard.py` and `src/hermes_home/bridge/endpoint.py`: forward the allowed session operations for client-claim connections to the claim's Profile; maintain the grant-scoped `session_ref` mapping; reject other session methods with `method_unavailable`.
 - `src/hermes_home/api/application.py`: add the `/api/v1/client-claims` branch mirroring the tap-claim durable-context checks and `_discard_new_claim` recovery; add `client_grants` to device configuration; add the `/pair` page and `/pair/api/*` cookie-authenticated admin equivalents.
@@ -186,8 +204,9 @@ The client opens the bridge with `conversation.open` and its handle, then manage
 2. Claim-store migration, client claim route, claim limit, close, and reconnect grace.
 3. Client-claim session operations and grant-scoped `session_ref` mapping.
 4. Device configuration `client_grants`.
-5. Pairing page with admin session, QR/code offer, pending approval with Profile selection, device list, revoke, and pair again.
-6. Contract documentation, schema fixture, and deployment notes.
+5. Profile ownership, owner-approval routes, and holder listing.
+6. Pairing page with admin session, QR/code offer, pending approval with Profile selection, device list, revoke, and pair again.
+7. Contract documentation, schema fixture, and deployment notes.
 
 **Acceptance Criteria:**
 
@@ -200,6 +219,8 @@ The client opens the bridge with `conversation.open` and its handle, then manage
 - No Standard Session ID or Profile ID reaches a client.
 - Revoking the device or making a Profile unavailable closes active client claims.
 - Renewal inside the window keeps a client paired past the original 90 days without re-pairing.
+- A grant to an owned Profile does not become active until the owner approves it from a paired client, except for the recorded first-device bootstrap; a shared Profile can be granted by the admin directly.
+- No Home authorization decision reads Tailscale identity or any other network-path identity.
 - Admin routes remain unreachable from the tailnet except through the authenticated page.
 - Focused tests, `ruff check src tests`, and `ruff format --check src tests` pass.
 
@@ -210,13 +231,14 @@ The client opens the bridge with `conversation.open` and its handle, then manage
 
 ## Consuming Stories
 
-- TUI: pair from a link (`hermes-relay pair <link>`), store the credential in the private profile env, choose Profiles by grant, claim on launch, and own the session lifecycle like a regular CLI: a new session by default, `--continue` for the most recent, `--resume <ref>`, and in-app `/sessions`, `/new`, `/resume`, and `/title`. Close the claim on quit, renew the credential automatically, and keep the legacy voice-session path as rollback.
-- iOS and Android: scan the QR code, store the credential in platform secure storage, and replace the operator-supplied disposable handles with client claims.
+- TUI: pair from a link (`hermes-relay pair <link>`), store the credential in the platform secure store (macOS Keychain; Secret Service on Linux) and refuse to pair when none is available, keep pairings keyed per Home so one client can pair with more than one household, show and decide pending owner grants (`/approvals`) and Profile holders, choose Profiles by grant, claim on launch, and own the session lifecycle like a regular CLI: a new session by default, `--continue` for the most recent, `--resume <ref>`, and in-app `/sessions`, `/new`, `/resume`, and `/title`. Close the claim on quit, renew the credential automatically, and keep the legacy voice-session path as rollback.
+- iOS and Android: scan the QR code, store the credential in platform secure storage keyed per Home, show and decide pending owner grants and Profile holders, and replace the operator-supplied disposable handles with client claims.
 
 ## Spec Change Log
 
 - 2026-09-23: Drafted from the TUI Home migration investigation.
 - 2026-09-23: Replaced Home-decided continuity (client idle timeout and automatic resume) with a client-owned session lifecycle, per Amanda: the TUI manages sessions like a regular CLI.
+- 2026-09-23: Resolved per Amanda: owned Profiles require owner approval from a paired client (first-device bootstrap by admin); clients store credentials in the platform secure store; Tailscale is required for client reachability for now, but Home authorization never depends on Tailscale identity; clients keep pairings per Home.
 - 2026-09-23: Resolved per Amanda: `session.list` shows the Profile's conversations from every surface, including Room devices and other paired clients.
 
 ## Verification
