@@ -1750,10 +1750,19 @@ class HomeBridge:
                 "session_id": runtime_session_id,
                 "name": name,
             }
-        if arg is not None:
-            params["arg"] = arg
+        # Standard Hermes lists /title as a command but renames through
+        # session.title; command.dispatch rejects it as not dispatchable.
+        if name == "title":
+            if not isinstance(arg, str) or not arg.strip():
+                raise ValueError("title requires a non-empty argument")
+            method = "session.title"
+            params = {"session_id": runtime_session_id, "title": arg.strip()}
+        else:
+            method = "command.dispatch"
+            if arg is not None:
+                params["arg"] = arg
         try:
-            result = gateway.request("command.dispatch", params)
+            result = gateway.request(method, params)
         except GatewayRPCError as error:
             if not self._binding_is_current(
                 gateway=gateway, runtime_session_id=runtime_session_id

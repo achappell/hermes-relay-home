@@ -1051,6 +1051,54 @@ def test_bridge_dispatches_only_a_command_advertised_by_standard_gateway():
     }
 
 
+def test_bridge_renames_through_session_title_not_command_dispatch():
+    gateway_socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {"session_id": "runtime-hermes-1"},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "home-2",
+                "result": {"title": "Twinkle story", "session_key": "stored-1"},
+            },
+        ],
+        catalog_pairs=["title"],
+    )
+    bridge = HomeBridge(
+        gateway_url="wss://hermes.example/api/ws",
+        hermes_token="server-hermes-secret",
+        device_authenticator=StaticCredentialAuthenticator(
+            admin_token="admin-secret",
+            device_credentials={"device-secret": "puck-kitchen"},
+        ),
+        conversation_resolver=lambda handle, device_id: ConversationGrant(
+            handle=handle,
+            device_id=device_id,
+            profile_id="family",
+        ),
+        gateway_socket_factory=FakeSocketFactory(gateway_socket),
+    )
+    bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle="opaque-conversation-1",
+    )
+
+    bridge.dispatch_command("title", "  Twinkle story ")
+
+    assert gateway_socket.sent[-1] == {
+        "jsonrpc": "2.0",
+        "id": "home-3",
+        "method": "session.title",
+        "params": {"session_id": "runtime-hermes-1", "title": "Twinkle story"},
+    }
+    with pytest.raises(ValueError):
+        bridge.dispatch_command("title", " ")
+
+
 def test_bridge_marks_command_transport_loss_before_reporting_it():
     gateway_socket = CommandLossJsonSocket(
         [
