@@ -470,6 +470,22 @@ other clients), newest first, 1–50 entries. `session_ref` values are opaque an
 valid only for the grant that received them. `active` marks a session another
 active claim holds; resuming it returns `session_busy`.
 
+### `POST /api/v1/client-claims/session`
+
+```json
+{"schema": 1, "conversation_handle": "opaque-home-claim-01J..."}
+```
+
+```json
+{"schema": 1, "session_ref": "sref-01J..."}
+```
+
+Names the session behind the caller's own active client claim, so a client can
+resume that conversation later with `{"mode": "resume", "session_ref": ...}`. A
+new claim has no session until its first accepted turn, so `session_ref` is
+`null` until then. A handle that is not an active client claim of the calling
+device returns `404 not_found`; grant denials match the client-claim route.
+
 ### Profile grants
 
 A device that holds an active grant for a Profile can manage that Profile's

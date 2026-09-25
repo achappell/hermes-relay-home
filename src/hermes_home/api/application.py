@@ -213,6 +213,8 @@ class HomeApplication:
             return self._post_client_claim(headers, body)
         elif path == "/api/v1/client-sessions/list" and method == "POST":
             return self._post_client_session_list(headers, body)
+        elif path == "/api/v1/client-claims/session" and method == "POST":
+            return self._post_client_claim_session(headers, body)
         elif path == "/api/v1/profile-grants/pending" and method == "GET":
             return self._get_pending_profile_grants(headers)
         elif path == "/api/v1/profile-grants/holders" and method == "GET":
@@ -1486,6 +1488,48 @@ class HomeApplication:
             },
         )
 
+    def _post_client_claim_session(
+        self,
+        headers: Mapping[str, str],
+        body: bytes | str,
+    ) -> HTTPResponse:
+        """Name the session a client's own claim is using, so the client can
+        resume it later. A new claim has no session until its first accepted
+        turn, so the reference is null until then."""
+        context, failure = self._client_context(headers)
+        if failure is not None:
+            return failure
+        try:
+            request = self._json_request(
+                headers, body, {"schema", "conversation_handle"}
+            )
+            handle = request["conversation_handle"]
+            if type(handle) is not str or not 1 <= len(handle) <= 256:
+                raise ValueError("conversation_handle is invalid")
+        except TypeError, ValueError, json.JSONDecodeError:
+            return _error(400, "invalid_request")
+        if self._conversation_claim_store is None:
+            return _error(503, "service_unavailable")
+        try:
+            binding = self._conversation_claim_store.client_claim_binding(
+                handle, context.device_id
+            )
+        except OSError, RuntimeError, TypeError, ValueError:
+            return _error(503, "service_unavailable")
+        if binding is None:
+            return _error(404, "not_found")
+        grant_id, session_id = binding
+        grant, failure = self._client_grant(context.device_id, grant_id)
+        if failure is not None:
+            return failure
+        if session_id is None:
+            return HTTPResponse(200, {"schema": 1, "session_ref": None})
+        try:
+            ref = self._conversation_claim_store.session_ref(grant.grant_id, session_id)
+        except OSError, RuntimeError, TypeError, ValueError:
+            return _error(503, "service_unavailable")
+        return HTTPResponse(200, {"schema": 1, "session_ref": ref})
+
     def _post_client_session_list(
         self,
         headers: Mapping[str, str],
@@ -2432,6 +2476,7 @@ def _metric_route(path: str) -> str:
         "/api/v1/touch-claims": "touch_claims",
         "/api/v1/client-claims": "client_claims",
         "/api/v1/client-sessions/list": "client_sessions",
+        "/api/v1/client-claims/session": "client_sessions",
         "/api/v1/devices": "device_configuration",
         "/metrics": "metrics",
         "/api/v1/diagnostics/status": "diagnostics_status",

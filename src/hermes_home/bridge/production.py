@@ -368,6 +368,27 @@ class ConversationGrantStore:
                 raise OSError("cannot read Home session reference") from error
         return None if row is None else row[0]
 
+    def client_claim_binding(
+        self, handle: str, device_id: str
+    ) -> tuple[str, str | None] | None:
+        """Return (grant ID, Standard Session ID or None) for the caller's own
+        active client claim, or None when the handle is not one."""
+        if type(handle) is not str or type(device_id) is not str:
+            return None
+        with self._lock:
+            try:
+                row = self._connection.execute(
+                    "SELECT grant_id, session_id FROM conversation_claims "
+                    "WHERE handle = ? AND device_id = ? AND claim_kind = 'client' "
+                    "AND status = 'active'",
+                    (handle, device_id),
+                ).fetchone()
+            except sqlite3.Error as error:
+                raise OSError("cannot read Home client claim") from error
+        if row is None or row[0] is None:
+            return None
+        return row[0], row[1]
+
     def active_session_ids(self) -> frozenset[str]:
         """Return Standard Sessions currently bound to any active claim."""
         now = _finite_time(self._clock())

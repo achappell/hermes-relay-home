@@ -297,6 +297,7 @@ Rejected:
 - 2026-09-24: Code review decisions: unopened client claims keep the 90-second first-open expiry; "Pair again" pre-ticks an expired device's Profiles. Client claims re-check their grant on every open; shared-Profile holders may revoke only their own grant; client claims cannot share a credential with wake or touch claims; only holders with live credentials count as owners; offers require an https Home address.
 - 2026-09-24: Admin-token routes refuse proxied requests (`admin_local_only`), because Tailscale Serve publishes by path prefix and the device enrollment prefix also carries admin approval; the header is used only to deny.
 - 2026-09-24: Implementation refinements: session choice moves to claim time (new, most_recent, resume) with an HTTP session list, keeping the bridge's one-claim-one-session invariant; `/title` uses Hermes's advertised command; client grants live in their own device-keyed record; Profile ownership is an optional `shared` flag.
+- 2026-09-25: Added `POST /api/v1/client-claims/session`, per Amanda, for Android "continue last conversation" (ANDROID-HOME-02 slice 2). A new claim's response carries no `session_ref`, and the Standard session is bound only after the first accepted turn, so a client could not otherwise learn which session to resume. The route answers only for the caller's own active client claim.
 
 ## Verification
 

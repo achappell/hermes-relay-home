@@ -484,3 +484,65 @@ def test_shared_profile_holder_cannot_remove_another_device(home) -> None:
     )
 
     assert response.status == 401
+
+
+def _claim_session(home, material, handle):
+    return home.call(
+        "POST",
+        "/api/v1/client-claims/session",
+        {"schema": 1, "conversation_handle": handle},
+        credential=material["credential"],
+    )
+
+
+def test_claim_session_is_null_until_a_turn_then_names_a_resumable_ref(home) -> None:
+    material = home.pair("phone", ["amanda"], endpoint_type="android")
+    grant = _grant(material, "Amanda")
+    handle = home.claim(material, grant["grant_id"], "claim-1").body[
+        "conversation_handle"
+    ]
+
+    before = _claim_session(home, material, handle)
+    assert before.status == 200, before.body
+    assert before.body == {"schema": 1, "session_ref": None}
+
+    home.claims.persist_session(
+        home.claims.resolve(handle, material["device_id"]), "stored-9"
+    )
+    after = _claim_session(home, material, handle)
+    assert after.status == 200, after.body
+    ref = after.body["session_ref"]
+    assert ref.startswith("sref-")
+    assert "stored-" not in json.dumps(after.body)
+
+    home.claims.close_claim(handle, material["device_id"], reason="client_closed")
+    resumed = home.claim(
+        material,
+        grant["grant_id"],
+        "claim-2",
+        session={"mode": "resume", "session_ref": ref},
+    )
+    assert resumed.status == 200, resumed.body
+    assert resumed.body["session"] == {"mode": "resumed", "session_ref": ref}
+
+
+def test_claim_session_answers_only_for_the_callers_own_claim(home) -> None:
+    owner = home.pair("phone", ["spark"], endpoint_type="android")
+    other = home.pair("laptop", ["spark"])
+    handle = home.claim(owner, _grant(owner, "Spark")["grant_id"], "claim-1").body[
+        "conversation_handle"
+    ]
+
+    foreign = _claim_session(home, other, handle)
+    unknown = _claim_session(home, owner, "handle-missing")
+    malformed = home.call(
+        "POST",
+        "/api/v1/client-claims/session",
+        {"schema": 1},
+        credential=owner["credential"],
+    )
+
+    assert foreign.status == 404
+    assert foreign.body["error"]["code"] == "not_found"
+    assert unknown.status == 404
+    assert malformed.status == 400
