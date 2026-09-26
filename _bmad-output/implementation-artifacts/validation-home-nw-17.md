@@ -40,3 +40,40 @@ Not validated here: deployment to CaticornQueen, the live Tailscale Serve paths 
 | Guard test for `session_busy` | Disabled the store check and reran the client-claim suites | 2 tests failed as expected; restored |
 
 A new runtime dependency, `segno` (BSD-3-Clause, pure Python), renders the pairing QR code. The claim-table migration runs once on startup and preserves existing rows. No credentials, `.env` files, or generated local state were added.
+
+## Pairing UI follow-up (2026-09-26)
+
+Amanda's browser testing found that the generated QR SVG was clipped when sized below its intrinsic dimensions: Segno's SVG had fixed `width` and `height` attributes but no `viewBox`, so the browser cropped the right and bottom instead of scaling it. The QR now includes a matching `viewBox` and four-module quiet zone, and its CSS size is capped by the available column width. The Copy link action now falls back to `document.execCommand("copy")` when the Clipboard API is missing or rejects the write, and announces success or a manual-copy recovery message; the displayed link is a read-only, keyboard-selectable field for manual recovery.
+
+The offer test now parses the SVG and asserts that its `viewBox` matches the intrinsic dimensions. In a local browser harness using the actual pairing page and generated SVG, the QR rendered fully at 320 CSS px (200×200, no horizontal page overflow, with a 16px link field) and at the 561 px breakpoint (200×200, no horizontal page overflow). Clicking Copy link and pasting into a local verification field produced the exact pairing URI both with the Clipboard API and with that API disabled to exercise the fallback.
+
+| Check | Exact command or interaction | Result |
+| --- | --- | --- |
+| Pair page tests | `../../.venv/bin/python -m pytest -q tests/test_pairing_page.py` | `34 passed in 0.38s` |
+| Ruff lint | `uvx ruff check src tests` | All checks passed |
+| Ruff format | `uvx ruff format --check src tests` | 68 files already formatted |
+| Whitespace and diff | `git diff --check` | Passed; no output |
+| Responsive QR and copy | Local pair-page harness at 320 px and 561 px; copy then paste with Clipboard API present and disabled | Complete QR, no horizontal overflow, exact URI pasted in both paths |
+
+This local verification used a stub and created no Home offer or credential. At that point, QR camera decoding, screen-reader behavior, cross-browser fallback behavior, and live deployment remained unverified; deployment verification is recorded below.
+
+## Pairing UI correction and copy feedback (2026-09-26)
+
+The user-provided live screenshot still showed the clipped QR, confirming that the installed Home had not received the worktree change. During follow-up verification, the first local preview also loaded the editable package from the main checkout; checking `pairing.__file__` exposed the mismatch. Restarting the preview with `PYTHONPATH=src` loaded the worktree version. Chrome then showed the whole QR with its four-module quiet zone. Clicking Copy link changed the button to green “Copied” and announced “Pairing link copied.”; the button resets after three seconds. The QR and button were verified in this corrected local preview.
+
+The final focused test and lint checks pass, and a wheel was built to `/tmp/hermes-home-pairing-fix/hermes_relay_home-0.1.0-py3-none-any.whl`; its packaged sources contain the viewBox fix and three-second confirmation. It was subsequently installed using a package-only update; see the deployment and verification section below. No live offer or credential was created.
+
+| Check | Exact command or interaction | Result |
+| --- | --- | --- |
+| Pair page tests | `../../.venv/bin/python -m pytest -q tests/test_pairing_page.py` | `35 passed in 0.36s` |
+| Ruff lint | `uvx ruff check src tests` | All checks passed |
+| Ruff format | `uvx ruff format --check src tests` | 68 files already formatted |
+| Whitespace and diff | `git diff --check` | Passed; no output |
+| Corrected local browser preview | Worktree-backed Home pairing page; create offer and copy at desktop layout | Full QR, four-module quiet zone, green “Copied” button, and live status visible |
+| Windows package build | `uv build --wheel --out-dir /tmp/hermes-home-pairing-fix` | Built `hermes_relay_home-0.1.0-py3-none-any.whl`; packaged fix confirmed |
+
+## Deployment and verification (2026-09-26)
+
+After Amanda approved deployment, the wheel was copied to CaticornQueen and its SHA-256 matched the local artifact. The existing `Hermes Home` scheduled task was stopped; `uv pip install --python C:\ProgramData\HermesHome\venv\Scripts\python.exe --no-deps --force-reinstall` installed only the Home package; then the task was restarted. The existing machine environment, credentials, and Prometheus configuration were left untouched. A backup of the prior `hermes_home` package and distribution metadata is at `C:\ProgramData\HermesHome\backups\pairing-ui-20260926-135637`.
+
+The scheduled task returned to `Running`. Both the local Home `/pair` route and the Tailscale `/pair` route returned HTTP 200 and served the new Copy feedback markup and styles. A fake-link smoke call through Home's installed Python 3.14.7 environment generated a 270×270 SVG with a matching `viewBox`; the installed QR generator source has the four-module border. No live pairing offer was created; complete QR rendering and copy feedback were verified in the worktree-backed local browser preview. Live camera decoding, screen-reader behavior, and cross-browser clipboard fallback remain unverified.

@@ -1,5 +1,6 @@
 import itertools
 import json
+from xml.etree import ElementTree
 
 import pytest
 
@@ -106,6 +107,16 @@ def test_page_is_self_contained_with_a_strict_policy(page) -> None:
     assert "__NONCE__" not in response.body
 
 
+def test_copy_link_shows_visible_and_announced_success_feedback(page) -> None:
+    response = page.call("GET", "/pair", cookie=False)
+
+    assert 'id="copy-status" role="status"' in response.body
+    assert (
+        "button.copied { border-color: var(--ok); color: var(--ok); }" in response.body
+    )
+    assert 'button.textContent = "Copied";' in response.body
+
+
 def test_sign_in_sets_a_hardened_session_cookie(page) -> None:
     cookie = page.sign_in()
 
@@ -144,6 +155,8 @@ def test_offer_shows_a_typeable_code_link_and_qr(page) -> None:
         "hermes-home://pair?home=https%3A%2F%2Fhome.example.ts.net&code=K7Q4MX2PNV"
     )
     assert offer["qr_svg"].startswith("<svg")
+    qr = ElementTree.fromstring(offer["qr_svg"])
+    assert qr.attrib["viewBox"] == (f"0 0 {qr.attrib['width']} {qr.attrib['height']}")
 
 
 def test_page_approval_pairs_a_tui_end_to_end(page) -> None:

@@ -365,16 +365,22 @@ def _page_headers(nonce: str) -> tuple[tuple[str, str], ...]:
 
 def _qr_svg(link: str) -> str:
     buffer = io.BytesIO()
-    segno.make(link, error="m").save(
+    qr = segno.make(link, error="m")
+    scale = 6
+    border = 4
+    qr.save(
         buffer,
         kind="svg",
-        scale=6,
-        border=2,
+        scale=scale,
+        border=border,
         xmldecl=False,
         dark="#111111",
         light="#ffffff",
     )
-    return buffer.getvalue().decode("utf-8")
+    svg = buffer.getvalue().decode("utf-8")
+    width, height = qr.symbol_size(scale=scale, border=border)
+    root_end = svg.find(">")
+    return svg[:root_end] + f' viewBox="0 0 {width} {height}"' + svg[root_end:]
 
 
 def _header(headers: Mapping[str, str], name: str) -> str | None:
