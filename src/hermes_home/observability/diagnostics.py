@@ -2012,16 +2012,20 @@ def _require_service_version(value: object) -> None:
         raise DiagnosticValidationError("service version is not safe")
 
 
+def _event_expiry(event: DiagnosticEvent) -> float:
+    """Return the instant after which ``event`` must no longer be retained."""
+    if event.retention_deadline is not None:
+        return event.retention_deadline
+    try:
+        return event.occurred_at + _RETENTION_SECONDS[event.retention_class]
+    except (OverflowError, TypeError, ValueError) as error:
+        raise DiagnosticValidationError(
+            "event retention deadline cannot be represented"
+        ) from error
+
+
 def _event_expired(event: DiagnosticEvent, *, before: float) -> bool:
-    deadline = event.retention_deadline
-    if deadline is None:
-        try:
-            deadline = event.occurred_at + _RETENTION_SECONDS[event.retention_class]
-        except (OverflowError, TypeError, ValueError) as error:
-            raise DiagnosticValidationError(
-                "event retention deadline cannot be represented"
-            ) from error
-    return deadline <= before
+    return _event_expiry(event) <= before
 
 
 def _upload_idempotency_key(events: Sequence[DiagnosticEvent]) -> str:
