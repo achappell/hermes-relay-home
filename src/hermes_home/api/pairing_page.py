@@ -44,6 +44,7 @@ button {
   font: inherit; border-radius: 8px; padding: 8px 14px; cursor: pointer;
   border: 1px solid var(--line); background: var(--panel); color: var(--text);
 }
+button.copied { border-color: var(--ok); color: var(--ok); }
 button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
 button.danger { color: var(--danger); }
 button:disabled { opacity: .5; cursor: default; }
@@ -56,9 +57,15 @@ label.inline { display: inline-flex; gap: 6px; align-items: center; margin: 4px 
 .muted { color: var(--muted); }
 .code { font: 600 1.6rem/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; }
 .confirm { font: 600 1.2rem/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .1em; }
-.offer { display: grid; grid-template-columns: auto 1fr; gap: 20px; align-items: center; }
-.qr svg { display: block; width: 200px; height: 200px; background: #fff; border-radius: 8px; }
-.link { font: .85rem ui-monospace, Menlo, monospace; word-break: break-all; color: var(--muted); }
+.offer { display: grid; grid-template-columns: minmax(0, 200px) minmax(0, 1fr); gap: 20px; align-items: center; }
+.qr { width: min(200px, 100%); justify-self: center; }
+.qr svg { display: block; width: 100%; height: auto; aspect-ratio: 1; background: #fff; border-radius: 8px; }
+.link {
+  display: block; width: 100%; min-height: 4.2em; margin: 0; padding: 0;
+  border: 0; resize: none; background: transparent; color: var(--muted);
+  font: .85rem/1.4 ui-monospace, Menlo, monospace;
+  word-break: break-all; user-select: all;
+}
 .item { border-top: 1px solid var(--line); padding: 14px 0; }
 .item:first-of-type { border-top: 0; padding-top: 0; }
 .badge { display: inline-block; font-size: .8rem; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); margin-right: 6px; }
@@ -69,7 +76,12 @@ label.inline { display: inline-flex; gap: 6px; align-items: center; margin: 4px 
 .gap-top { margin-top: 16px; } .gap-small { margin-top: 8px; } .gap-medium { margin-top: 12px; }
 fieldset.profiles { border: 0; padding: 8px 0; margin: 0; }
 .dim { opacity: .4; }
-@media (max-width: 560px) { .offer { grid-template-columns: 1fr; } .qr svg { margin: 0 auto; } }
+.copy-status { min-height: 1.5em; margin: 4px 0 0; }
+@media (max-width: 560px) {
+  .offer { grid-template-columns: 1fr; }
+  .qr svg { margin: 0 auto; }
+  .link { font-size: 1rem; min-height: 5.6em; }
+}
 </style>
 </head>
 <body>
@@ -104,11 +116,12 @@ fieldset.profiles { border: 0; padding: 8px 0; margin: 0; }
             <div class="muted gap-small">Home</div>
             <div id="home"></div>
             <div class="muted gap-small">Link</div>
-            <div class="link" id="link"></div>
+            <textarea class="link" id="link" aria-label="Pairing link" rows="3" readonly></textarea>
             <div class="row gap-medium">
               <button id="copy-link" type="button">Copy link</button>
               <span class="muted" id="countdown" aria-live="polite"></span>
             </div>
+            <p class="muted copy-status" id="copy-status" role="status"></p>
           </div>
         </div>
       </div>
@@ -132,6 +145,7 @@ fieldset.profiles { border: 0; padding: 8px 0; margin: 0; }
 (() => {
   const $ = (id) => document.getElementById(id);
   let state = null, offerExpires = 0, poll = null, clockSkew = 0;
+  let copyFeedbackTimer = null;
   // Profile choices survive the 2-second refresh, keyed by request.
   const choicesByRequest = new Map();
 
@@ -159,6 +173,63 @@ fieldset.profiles { border: 0; padding: 8px 0; margin: 0; }
 
   function when(seconds) {
     return new Date(seconds * 1000).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  }
+
+  function copyWithFallback(text) {
+    if (typeof document.execCommand !== "function") return false;
+    const active = document.activeElement;
+    const field = document.createElement("textarea");
+    field.value = text;
+    field.setAttribute("readonly", "");
+    field.setAttribute("aria-hidden", "true");
+    field.style.position = "fixed";
+    field.style.insetInlineStart = "-9999px";
+    document.body.append(field);
+    field.focus();
+    field.select();
+    field.setSelectionRange(0, field.value.length);
+    let copied = false;
+    try { copied = document.execCommand("copy"); } catch (error) { copied = false; }
+    field.remove();
+    if (active && typeof active.focus === "function") active.focus();
+    return copied;
+  }
+
+  function resetCopyFeedback() {
+    clearTimeout(copyFeedbackTimer);
+    copyFeedbackTimer = null;
+    const button = $("copy-link");
+    button.textContent = "Copy link";
+    button.classList.remove("copied");
+    $("copy-status").textContent = "";
+  }
+
+  function showCopySuccess() {
+    const button = $("copy-link");
+    button.textContent = "Copied";
+    button.classList.add("copied");
+    $("copy-status").textContent = "Pairing link copied.";
+    copyFeedbackTimer = setTimeout(resetCopyFeedback, 3000);
+  }
+
+  async function copyPairingLink() {
+    const link = $("link").value;
+    const status = $("copy-status");
+    resetCopyFeedback();
+    try {
+      if (!navigator.clipboard || !window.isSecureContext) {
+        if (!copyWithFallback(link)) throw new Error("clipboard_unavailable");
+      } else {
+        await navigator.clipboard.writeText(link);
+      }
+      showCopySuccess();
+    } catch (error) {
+      if (copyWithFallback(link)) {
+        showCopySuccess();
+      } else {
+        status.textContent = "Copy failed. Select the link above and copy it manually.";
+      }
+    }
   }
 
   function showApp(signedIn) {
@@ -298,16 +369,17 @@ fieldset.profiles { border: 0; padding: 8px 0; margin: 0; }
     catch (error) { $("signin-error").textContent = error.status === 401 ? "That token was not accepted." : "Sign-in failed: " + error.message; }
   });
   $("signout").addEventListener("click", async () => { try { await api("/pair/api/logout", {}); } catch (error) {} showApp(false); });
+  $("copy-link").addEventListener("click", copyPairingLink);
   async function createOffer(profiles) {
     try {
       const offer = await api("/pair/api/offers", profiles && profiles.length ? { profiles } : {});
       $("qr").innerHTML = offer.qr_svg;
       $("code").textContent = offer.code;
       $("home").textContent = offer.home;
-      $("link").textContent = offer.link;
+      $("link").value = offer.link;
+      resetCopyFeedback();
       $("offer").hidden = false; $("offer").classList.remove("dim");
       offerExpires = offer.expires_at; tick();
-      $("copy-link").onclick = () => navigator.clipboard && navigator.clipboard.writeText(offer.link);
       $("offer").scrollIntoView({ behavior: "smooth", block: "nearest" });
     } catch (error) {
       if (error.message === "https_required") {
