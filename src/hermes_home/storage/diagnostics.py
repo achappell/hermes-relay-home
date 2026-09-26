@@ -18,6 +18,7 @@ from hermes_home.observability.diagnostics import (
     DiagnosticsStatus,
     DiagnosticStoreError,
     _event_expired,
+    _event_expiry,
     _require_timestamp,
 )
 
@@ -48,7 +49,8 @@ class SQLiteDiagnosticsStore:
                     correlation_id TEXT NOT NULL,
                     occurred_at REAL NOT NULL,
                     payload TEXT NOT NULL,
-                    uploaded INTEGER NOT NULL DEFAULT 0 CHECK (uploaded IN (0, 1))
+                    uploaded INTEGER NOT NULL DEFAULT 0 CHECK (uploaded IN (0, 1)),
+                    expires_at REAL
                 )
                 """
             )
@@ -56,6 +58,13 @@ class SQLiteDiagnosticsStore:
                 """
                 CREATE INDEX IF NOT EXISTS diagnostic_events_correlation
                 ON diagnostic_events (correlation_id, occurred_at, event_id)
+                """
+            )
+            self._migrate_expiry_column()
+            self._connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS diagnostic_events_expiry
+                ON diagnostic_events (expires_at)
                 """
             )
             self._connection.execute(
@@ -80,6 +89,34 @@ class SQLiteDiagnosticsStore:
             raise DiagnosticStoreError(
                 "diagnostics database cannot be initialized"
             ) from error
+
+    def _migrate_expiry_column(self) -> None:
+        """Give databases created before ``expires_at`` a deadline per event.
+
+        Purging compares this column in SQL. Decoding every stored event on
+        each purge stalled the audio relay, which records per stream.
+        """
+        columns = {
+            row[1]
+            for row in self._connection.execute("PRAGMA table_info(diagnostic_events)")
+        }
+        if "expires_at" not in columns:
+            self._connection.execute(
+                "ALTER TABLE diagnostic_events ADD COLUMN expires_at REAL"
+            )
+        rows = self._connection.execute(
+            "SELECT event_id, payload FROM diagnostic_events WHERE expires_at IS NULL"
+        ).fetchall()
+        for event_id, payload in rows:
+            try:
+                expires_at = _event_expiry(_decode_event(payload))
+            except DiagnosticStoreError, ValueError:
+                # An undecodable event cannot prove it may be kept.
+                expires_at = float("-inf")
+            self._connection.execute(
+                "UPDATE diagnostic_events SET expires_at = ? WHERE event_id = ?",
+                (expires_at, event_id),
+            )
 
     def append(
         self,
@@ -139,14 +176,15 @@ class SQLiteDiagnosticsStore:
                     self._connection.execute(
                         """
                         INSERT INTO diagnostic_events
-                            (event_id, correlation_id, occurred_at, payload)
-                        VALUES (?, ?, ?, ?)
+                            (event_id, correlation_id, occurred_at, payload, expires_at)
+                        VALUES (?, ?, ?, ?, ?)
                         """,
                         (
                             event.event_id,
                             event.correlation_id,
                             event.occurred_at,
                             serialized,
+                            _event_expiry(event),
                         ),
                     )
                     self._connection.commit()
@@ -270,20 +308,9 @@ class SQLiteDiagnosticsStore:
         _require_timestamp(before, "diagnostic purge clock")
         try:
             with self._lock:
-                rows = self._connection.execute(
-                    "SELECT event_id, payload FROM diagnostic_events"
-                ).fetchall()
-                expired_ids = [
-                    event_id
-                    for event_id, payload in rows
-                    if _event_expired(_decode_event(payload), before=before)
-                ]
-                if not expired_ids:
-                    return 0
-                placeholders = ",".join("?" for _ in expired_ids)
                 cursor = self._connection.execute(
-                    f"DELETE FROM diagnostic_events WHERE event_id IN ({placeholders})",
-                    tuple(expired_ids),
+                    "DELETE FROM diagnostic_events WHERE expires_at <= ?",
+                    (before,),
                 )
                 self._connection.commit()
                 return cursor.rowcount

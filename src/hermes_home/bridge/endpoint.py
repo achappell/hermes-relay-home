@@ -1388,6 +1388,9 @@ class BridgeEndpoint:
     def _audio_loop(self, turn_id: str) -> None:
         started = False
         ended = False
+        # Summed and recorded once at the end: a diagnostic per PCM frame
+        # stalled this relay below real time.
+        forwarded_bytes = 0
         try:
             while not self._stop.is_set():
                 with self._state_lock:
@@ -1470,15 +1473,12 @@ class BridgeEndpoint:
                             outcome="started",
                         )
                     elif kind == "pcm":
-                        self._record_audio_diagnostic(
-                            turn_id,
-                            outcome="accepted",
-                            byte_count=len(outgoing),
-                        )
+                        forwarded_bytes += len(outgoing)
                     elif kind == "end":
                         self._record_audio_diagnostic(
                             turn_id,
                             outcome="completed",
+                            byte_count=forwarded_bytes,
                         )
                     else:
                         self._record_audio_diagnostic(

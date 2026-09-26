@@ -1,4 +1,6 @@
 import hashlib
+import json
+import sqlite3
 from dataclasses import replace
 
 import pytest
@@ -89,6 +91,71 @@ def test_sqlite_diagnostics_store_purges_expired_events_and_bounds_records(
             )
             == 1
         )
+    finally:
+        store.close()
+
+
+def test_sqlite_diagnostics_store_purges_by_deadline_without_decoding_events(
+    tmp_path, monkeypatch
+) -> None:
+    store = SQLiteDiagnosticsStore(tmp_path / "home.sqlite3", clock=lambda: 100.0)
+    try:
+        store.append(
+            _event("event-soon", "corr-soon", 100.0, retention_deadline=150.0),
+            max_events=10,
+        )
+        store.append(_event("event-kept", "corr-kept", 100.0), max_events=10)
+
+        def _no_decode(serialized: object) -> DiagnosticEvent:
+            raise AssertionError("purging must not decode stored events")
+
+        monkeypatch.setattr("hermes_home.storage.diagnostics._decode_event", _no_decode)
+
+        assert store.purge_expired(before=150.0) == 1
+        assert store.purge_expired(before=150.0) == 0
+    finally:
+        store.close()
+
+
+def test_sqlite_diagnostics_store_backfills_expiry_for_legacy_databases(
+    tmp_path,
+) -> None:
+    database = tmp_path / "home.sqlite3"
+    legacy = _event("event-legacy", "corr-legacy", 100.0, retention_deadline=150.0)
+    connection = sqlite3.connect(database)
+    connection.execute(
+        """
+        CREATE TABLE diagnostic_events (
+            event_id TEXT PRIMARY KEY,
+            correlation_id TEXT NOT NULL,
+            occurred_at REAL NOT NULL,
+            payload TEXT NOT NULL,
+            uploaded INTEGER NOT NULL DEFAULT 0 CHECK (uploaded IN (0, 1))
+        )
+        """
+    )
+    connection.execute(
+        "INSERT INTO diagnostic_events VALUES (?, ?, ?, ?, 0)",
+        (
+            legacy.event_id,
+            legacy.correlation_id,
+            legacy.occurred_at,
+            json.dumps(legacy.to_dict()),
+        ),
+    )
+    connection.execute(
+        "INSERT INTO diagnostic_events VALUES ('evt-broken', 'corr-broken', 1.0, 'x', 0)"
+    )
+    connection.commit()
+    connection.close()
+
+    store = SQLiteDiagnosticsStore(database, clock=lambda: 100.0)
+    try:
+        assert store.purge_expired(before=149.0) == 1
+        assert store.events(correlation_id=legacy.correlation_id, before=149.0) == (
+            legacy,
+        )
+        assert store.purge_expired(before=150.0) == 1
     finally:
         store.close()
 

@@ -2651,7 +2651,6 @@ def test_bridge_records_audio_facts_without_retaining_pcm() -> None:
             ("turn", "started"),
             ("turn", "accepted"),
             ("audio", "started"),
-            ("audio", "accepted"),
             ("audio", "completed"),
         ]
         assert timeline[3].byte_count == 4
