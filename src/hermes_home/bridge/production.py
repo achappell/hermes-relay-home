@@ -1369,7 +1369,12 @@ class StandardSessionDirectory:
         )
 
     def list_sessions(self, profile_id: str, limit: int) -> list[dict[str, object]]:
-        result = self._request("session.list", {"profile": profile_id, "limit": limit})
+        # Scheduled jobs can outnumber real conversations many times over, so
+        # over-fetch before filtering them out.
+        result = self._request(
+            "session.list",
+            {"profile": profile_id, "limit": max(limit, _SESSION_LIST_OVERFETCH)},
+        )
         rows = result.get("sessions")
         if not isinstance(rows, list):
             raise BridgeProtocolError("Standard session list is malformed")
@@ -1379,6 +1384,8 @@ class StandardSessionDirectory:
                 continue
             session_id = row.get("id")
             if not isinstance(session_id, str) or not session_id:
+                continue
+            if _is_background_session(session_id, row.get("source")):
                 continue
             title = row.get("title")
             started_at = row.get("started_at")
@@ -1393,12 +1400,16 @@ class StandardSessionDirectory:
                     "message_count": message_count if type(message_count) is int else 0,
                 }
             )
+            if len(sessions) == limit:
+                break
         return sessions
 
     def most_recent(self, profile_id: str) -> str | None:
-        result = self._request("session.most_recent", {"profile": profile_id})
-        session_id = result.get("session_id")
-        return session_id if isinstance(session_id, str) and session_id else None
+        # Standard's session.most_recent counts scheduled cron runs as
+        # conversations, so a client "continue" could land in a job's session
+        # (often held by the job). Use the same filtered list as the picker.
+        sessions = self.list_sessions(profile_id, 1)
+        return str(sessions[0]["id"]) if sessions else None
 
     def _request(
         self, method: str, params: Mapping[str, object]
@@ -1416,6 +1427,23 @@ class StandardSessionDirectory:
             return client.request(method, dict(params))
         finally:
             client.close()
+
+
+_SESSION_LIST_OVERFETCH = 200
+
+# Standard sources that are not conversations a person can continue.
+# Standard's own listing already hides "kanban" and "tool".
+_BACKGROUND_SESSION_SOURCES = frozenset({"cron"})
+
+
+def _is_background_session(session_id: str, source: object) -> bool:
+    """A scheduled job's session: by source, or by Standard's cron ID prefix."""
+    if (
+        isinstance(source, str)
+        and source.strip().lower() in _BACKGROUND_SESSION_SOURCES
+    ):
+        return True
+    return session_id.startswith("cron_")
 
 
 def create_standard_bridge_factory(
