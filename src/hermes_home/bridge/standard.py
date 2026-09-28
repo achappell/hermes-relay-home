@@ -1240,6 +1240,9 @@ class HomeBridge:
         ):
             self._close_claim(handle, grant.device_id, reason="endpoint_revoked")
             return self._reconnect_failure(handle, "stale_conversation")
+        if refreshed.configuration_revision != grant.configuration_revision:
+            self._close_claim(handle, grant.device_id, reason="authorization_revoked")
+            return self._reconnect_failure(handle, "conversation_mismatch")
         if refreshed.profile_id != grant.profile_id:
             self._close_claim(handle, grant.device_id, reason="authorization_revoked")
             return self._reconnect_failure(handle, "conversation_mismatch")
@@ -1683,6 +1686,73 @@ class HomeBridge:
         self._revalidate_ready_binding()
         self._record_activity(state)
         return True
+
+    @property
+    def recovery_available(self) -> bool:
+        with self._state_lock:
+            return self._grant is not None and self._resume_session_id is not None
+
+    @property
+    def upstream_available(self) -> bool:
+        with self._state_lock:
+            gateway = self._gateway
+            return self._state == "ready" and gateway is not None and gateway.is_open
+
+    def suspend_failed_upstream(self) -> bool:
+        """Drop failed transport while retaining Session and uncertainty for recovery."""
+        with self._lifecycle_lock:
+            self._mark_transport_loss()
+            return self.recovery_available
+
+    def recover_upstream(self, *, headers: Mapping[str, str]) -> BridgeStatus:
+        """Authorize a candidate without mutation, then attempt one Session resume."""
+        with self._lifecycle_lock:
+            with self._state_lock:
+                grant = self._grant
+                handle = self._conversation_handle
+                resume_id = self._resume_session_id
+            if grant is None or handle is None:
+                return BridgeStatus("unavailable", handle or "", "stale_conversation")
+            try:
+                device_id, generation = self._authenticate_device(headers)
+                if device_id is None or device_id != grant.device_id:
+                    return BridgeStatus("unavailable", handle, "unauthorized")
+                refreshed = self._conversation_resolver(handle, device_id)
+            except OSError, RuntimeError, TypeError, ValueError:
+                return BridgeStatus("unavailable", handle, "authorization_unavailable")
+            if (
+                not isinstance(refreshed, ConversationGrant)
+                or refreshed.status != "active"
+            ):
+                return BridgeStatus("unavailable", handle, "stale_conversation")
+            if (
+                refreshed.device_id != device_id
+                or refreshed.handle != handle
+                or refreshed.profile_id != grant.profile_id
+                or refreshed.configuration_revision != grant.configuration_revision
+                or refreshed.session_id not in (None, "", resume_id)
+            ):
+                return BridgeStatus("unavailable", handle, "conversation_mismatch")
+            if (
+                refreshed.credential_generation != generation
+                or generation != grant.credential_generation
+            ):
+                return BridgeStatus("unavailable", handle, "stale_conversation")
+            try:
+                status = self._reconnect(headers=headers)
+                if status.status == "ready" and self.upstream_available:
+                    return status
+                unresolved = status.unresolved_turn
+            except Exception:  # noqa: BLE001 - every authorized failed attempt is terminal
+                with self._state_lock:
+                    unresolved = self._unresolved_turn
+            try:
+                self.retire_failed_upstream()
+            except BridgeAuthorizationError:
+                LOGGER.warning("Home upstream retirement persistence unavailable")
+            return BridgeStatus(
+                "unavailable", handle, "stale_conversation", unresolved_turn=unresolved
+            )
 
     def retire_failed_upstream(self) -> None:
         """Permanently release a failed claim without replaying or deleting its Session."""

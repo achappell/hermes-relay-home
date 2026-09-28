@@ -182,10 +182,36 @@ def create_bridge_server(
             parking_lot.take(handle) if method == "conversation.reconnect" else None
         )
         endpoint = None if parked is None else parked.endpoint
+        recovery_timer = None
         if endpoint is not None:
+            recovery_timer = threading.Timer(
+                max(0.0, parked.expires_at - time.monotonic()), endpoint.close
+            )
+            recovery_timer.daemon = True
+            recovery_timer.start()
             try:
                 endpoint.adopt(connection, headers=headers)
             except RuntimeError:
+                recovery_timer.cancel()
+                if endpoint.has_recoverable_state:
+                    parking_lot.park(endpoint, expires_at=parked.expires_at)
+                    connection.send(
+                        json.dumps(
+                            {
+                                "jsonrpc": "2.0",
+                                "schema": 1,
+                                "id": request_id,
+                                "result": {
+                                    "schema": 1,
+                                    "status": "unavailable",
+                                    "conversation_handle": handle,
+                                    "reason": "transport_unavailable",
+                                },
+                            }
+                        )
+                    )
+                    connection.close()
+                    return
                 endpoint.close()
                 endpoint = None
                 parked = None
@@ -199,7 +225,14 @@ def create_bridge_server(
                 max_message_size=MAX_BRIDGE_MESSAGE_BYTES,
                 diagnostics=diagnostics,
             )
-        endpoint.run(first_message=first_message, park_on_disconnect=True)
+        if parked is not None:
+            try:
+                endpoint.handle_message(first_message)
+            finally:
+                recovery_timer.cancel()
+            endpoint.run(park_on_disconnect=True)
+        else:
+            endpoint.run(first_message=first_message, park_on_disconnect=True)
         if endpoint.has_recoverable_state:
             expires_at = (
                 parked.expires_at

@@ -653,3 +653,130 @@ def test_healthy_idle_background_disconnect_retains_upstream_until_grace(
         thread.join(timeout=2)
         for bridge in bridges:
             bridge.close()
+
+
+@pytest.mark.parametrize("blocked_phase", ["suspend", "rebuild"])
+def test_recovery_keeps_original_deadline_and_honors_deferred_close(
+    monkeypatch, blocked_phase
+):
+    from websockets.exceptions import ConnectionClosed
+
+    from hermes_home.api.bridge_server import _EndpointParkingLot
+
+    parked = threading.Event()
+    blocked = threading.Event()
+    release = threading.Event()
+    retired = threading.Event()
+    fail = threading.Event()
+    deadlines = []
+    endpoints = []
+    original_park = _EndpointParkingLot.park
+
+    def observe(self, endpoint, **kwargs):
+        original_park(self, endpoint, **kwargs)
+        endpoints.append(endpoint)
+        with self._lock:
+            entry = self._entries.get(HANDLE)
+            if entry is not None:
+                deadlines.append(entry.expires_at)
+        parked.set()
+
+    monkeypatch.setattr(_EndpointParkingLot, "park", observe)
+
+    class RecoveringBridge(ListenerBridge):
+        recovery_available = True
+
+        def reauthorize(self, *, headers):
+            return BridgeStatus("ready", HANDLE)
+
+        def next_event(self):
+            fail.wait(2)
+            raise BridgeTransportError("lost")
+
+        def suspend_failed_upstream(self):
+            if blocked_phase == "suspend":
+                blocked.set()
+                assert release.wait(2)
+            return True
+
+        def recover_upstream(self, *, headers):
+            blocked.set()
+            assert release.wait(2)
+            return BridgeStatus("ready", HANDLE)
+
+        def retire_failed_upstream(self):
+            self.recovery_available = False
+            retired.set()
+            self.close()
+
+    bridge = RecoveringBridge()
+    server = create_bridge_server(
+        bridge_factory=lambda: bridge,
+        host="127.0.0.1",
+        port=0,
+        reconnect_grace_seconds=0.5,
+    )
+    thread = _start(server)
+    url = f"ws://127.0.0.1:{server.socket.getsockname()[1]}{BRIDGE_WS_PATH}"
+    headers = {"Authorization": "Device endpoint-secret"}
+    results = []
+
+    def rpc(method):
+        with connect(url, additional_headers=headers) as client:
+            client.send(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "schema": 1,
+                        "id": method,
+                        "method": method,
+                        "params": {"conversation_handle": HANDLE},
+                    }
+                )
+            )
+            try:
+                results.append(json.loads(client.recv(timeout=2)))
+            except ConnectionClosed:
+                results.append("closed")
+
+    worker = None
+    try:
+        rpc("conversation.open")
+        assert parked.wait(1)
+        fail.set()
+        if blocked_phase == "suspend":
+            assert blocked.wait(1)
+        else:
+            deadline = time.monotonic() + 1
+            while not endpoints[0]._recovery_pending and time.monotonic() < deadline:
+                time.sleep(0.001)
+            assert endpoints[0]._recovery_pending
+        worker = threading.Thread(target=rpc, args=("conversation.reconnect",))
+        worker.start()
+        if blocked_phase == "suspend":
+            worker.join(timeout=1)
+            assert results[-1]["result"]["status"] == "unavailable"
+            assert deadlines == [deadlines[0], deadlines[0]]
+            deadline = time.monotonic() + 1
+            while not endpoints[0]._close_requested and time.monotonic() < deadline:
+                time.sleep(0.001)
+            assert endpoints[0]._close_requested
+        else:
+            assert blocked.wait(1)
+            assert retired.wait(1)
+        release.set()
+        worker.join(timeout=2)
+        assert retired.wait(1)
+        assert not endpoints[0].has_recoverable_state
+        assert not endpoints[0].ready
+        assert bridge.closed.is_set()
+        if blocked_phase == "rebuild":
+            assert results[-1] == "closed"
+    finally:
+        release.set()
+        fail.set()
+        if worker is not None:
+            worker.join(timeout=2)
+        server.shutdown()
+        thread.join(timeout=2)
+        bridge.close()

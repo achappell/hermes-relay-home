@@ -117,3 +117,7 @@ This slice makes a dead upstream fail fast with `stale_conversation`, so the cli
 
 - Review follow-up: retirement guard is acquired atomically with the event failure check, before helper entry; deterministic helper-entry cleanup test passes. Device-bound failed-retirement markers are installed before the preliminary SQL read; read-failure/recovery tests cover the matching device and rejection of a wrong device without retiring its owner’s claim. Reviewer verified both corrections and reported no remaining blockers in them.
 - `done` here records the local terminal-safeguard slice. F1 and F2 are separately authorized follow-up slices and are not completed by this status. Live pilot acceptance remains pending.
+
+## Follow-up delivery records
+
+F1 is locally implemented and reviewed in `spec-pilot-idle-upstream-retention.md`; F2 is locally implemented and reviewed in `spec-pilot-upstream-rebuild.md`. F2 supersedes unconditional terminal retirement when a bound Session can be resumed; the terminal safeguard remains the fallback. Deployment and live pilot acceptance are still pending.
