@@ -117,7 +117,8 @@ strips the `--set-path` prefix:
 
 ```powershell
 foreach ($path in '/pair', '/api/v1/enrollment/requests', '/api/v1/client-claims',
-                  '/api/v1/client-sessions', '/api/v1/profile-grants', '/api/v1/devices') {
+                  '/api/v1/client-sessions', '/api/v1/profile-grants', '/api/v1/devices',
+                  '/api/v1/client-diagnostics') {
   tailscale serve --bg --https=443 --set-path=$path "http://127.0.0.1:8780$path"
 }
 ```
@@ -138,3 +139,8 @@ approval from a client already paired to that Profile.
 device, and `-ClientReconnectGraceSeconds` (default 120) is how long a
 disconnected client keeps its conversation before Home closes it. Both are
 written with the Standard settings and cleared with them.
+
+
+## Opt-in client connection reports
+
+Publish `/api/v1/client-diagnostics` through the existing tailnet Serve route when deploying the client-report slice. This route only accepts authenticated Device uploads; it does not expose a report-reading API. Sign in at `/pair` and use **Connection reports → Refresh reports** to review reports and recent Home events. Device reports expire seven days after receipt, with pruning on read/write. Settings in the Apple app controls per-Home consent; install the matching Apple build and enable it on the intended device. No credential changes are required.

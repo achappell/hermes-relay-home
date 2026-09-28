@@ -20,6 +20,7 @@ from hermes_home.bridge.endpoint import BridgeRoute
 from hermes_home.domain.arbitration import ArbitrationEngine
 from hermes_home.domain.credentials import CredentialService
 from hermes_home.domain.health import HealthProbeResult
+from hermes_home.observability.client_reports import ClientReportStore
 from hermes_home.observability.diagnostics import DiagnosticsRecorder
 from hermes_home.observability.metrics import MetricsRegistry
 from hermes_home.storage.credentials import SQLiteCredentialStore
@@ -70,6 +71,7 @@ class HomeRuntime:
 
     server: ThreadingHTTPServer
     store: SQLiteConfigurationStore
+    client_reports: ClientReportStore
     diagnostics_store: SQLiteDiagnosticsStore
     diagnostics: DiagnosticsRecorder
     credential_store: SQLiteCredentialStore | None = None
@@ -94,6 +96,7 @@ class HomeRuntime:
             self.credential_store.close()
         if self.conversation_store is not None:
             self.conversation_store.close()
+        self.client_reports.close()
         self.diagnostics_store.close()
         self.store.close()
 
@@ -247,6 +250,7 @@ def create_runtime(
         )
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     store = SQLiteConfigurationStore(settings.database_path)
+    client_reports: ClientReportStore | None = None
     diagnostics_store: SQLiteDiagnosticsStore | None = None
     credential_store = None
     conversation_store = None
@@ -289,6 +293,7 @@ def create_runtime(
 
     try:
         diagnostics_store = SQLiteDiagnosticsStore(settings.database_path)
+        client_reports = ClientReportStore(settings.database_path)
         metrics = MetricsRegistry()
         diagnostics = DiagnosticsRecorder(
             store=diagnostics_store,
@@ -361,6 +366,7 @@ def create_runtime(
             metrics=metrics,
             diagnostics=diagnostics,
             session_directory=session_directory,
+            client_reports=client_reports,
         )
         if bridge_factory is None and settings.standard_gateway_url is not None:
             if settings.standard_token is None or conversation_store is None:
@@ -413,6 +419,8 @@ def create_runtime(
             credential_store.close()
         if conversation_store is not None:
             conversation_store.close()
+        if client_reports is not None:
+            client_reports.close()
         if diagnostics_store is not None:
             diagnostics_store.close()
         store.close()
@@ -422,6 +430,7 @@ def create_runtime(
         server=server,
         store=store,
         diagnostics_store=diagnostics_store,
+        client_reports=client_reports,
         diagnostics=diagnostics,
         credential_store=credential_store,
         conversation_store=conversation_store,

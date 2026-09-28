@@ -13,6 +13,7 @@ import hmac
 import io
 import json
 import secrets
+import sqlite3
 import time
 from collections.abc import Callable, Mapping
 from threading import Lock
@@ -62,9 +63,11 @@ class PairingSurface:
         credential_service: CredentialService | None,
         configuration: Callable[[], Mapping[str, object]],
         close_grant_claims: Callable[[str], object] | None = None,
+        client_reports: Callable[[], dict] | None = None,
         clock: Callable[[], float] = time.time,
         token_factory: Callable[[], str] | None = None,
     ) -> None:
+        self._client_reports = client_reports
         self._authenticate_admin = authenticate_admin
         self._service = credential_service
         self._configuration = configuration
@@ -106,6 +109,14 @@ class PairingSurface:
             return self._sign_in(body)
         if not self._signed_in(headers):
             return _error(401, "sign_in_required")
+        if path == "/pair/api/client-diagnostics" and method == "POST":
+            if self._client_reports is None:
+                return _error(503, "service_unavailable")
+            try:
+                reports = self._client_reports()
+            except OSError, RuntimeError, sqlite3.Error:
+                return _error(503, "service_unavailable")
+            return HTTPResponse(200, reports, headers=(("Cache-Control", "no-store"),))
         if path == "/pair/api/logout":
             return self._sign_out(headers)
         if path == "/pair/api/state":

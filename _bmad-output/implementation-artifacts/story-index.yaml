@@ -256,6 +256,18 @@ stories:
     depends_on: []
     acceptance_overlay: _bmad-output/implementation-artifacts/course-correction-2026-09-23.md
     historical_horizon: later
+  - id: HOME-NW-06-client-reports
+    title: Accept and review opted-in client connection reports
+    kind: local
+    spec: _bmad-output/implementation-artifacts/spec-home-client-diagnostics.md
+    validation: _bmad-output/implementation-artifacts/validation-home-client-diagnostics.md
+    github_issue: https://github.com/achappell/hermes-relay-home/issues/66
+    tracker_key: home-nw-06-client-reports
+    product_epic: 6
+    owner: hermes-relay-home
+    release_scope: later
+    depends_on:
+      - home:HOME-NW-06
 epic_scheme: hermes-home-2026-09-23
 epics:
   1: Connect personal clients through HomeBridge
