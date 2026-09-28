@@ -1176,7 +1176,7 @@ class WebsocketsJsonSocketFactory:
 
     def open(self, url: str) -> JsonSocket:
         return WebsocketsJsonSocket(
-            connect(url, open_timeout=self._open_timeout, max_size=1_048_576)
+            connect(url, open_timeout=self._open_timeout, max_size=16 * 1_048_576)
         )
 
 

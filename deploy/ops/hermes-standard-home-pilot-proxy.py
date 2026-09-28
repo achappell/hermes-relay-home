@@ -35,7 +35,8 @@ ALLOWED_PATHS = frozenset({STANDARD_JSON_PATH, STANDARD_AUDIO_PATH})
 DEFAULT_PROXY_HOST = "127.0.0.1"
 DEFAULT_PROXY_PORT = 9121
 DEFAULT_UPSTREAM_URI = "ws://127.0.0.1:9120"
-MAX_MESSAGE_SIZE = 4 * 1_048_576
+# Session resume includes history; keep the same bounded budget as Home.
+MAX_MESSAGE_SIZE = 16 * 1_048_576
 
 
 def _token_path() -> Path:
