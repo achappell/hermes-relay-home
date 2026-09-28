@@ -5805,7 +5805,11 @@ def test_title_requires_runtime_envelope_identity():
         )
 
 
-def test_real_bridge_upstream_loss_parks_endpoint_and_retains_original_uncertain_turn():
+@pytest.mark.parametrize("complete_turn", [False, True])
+@pytest.mark.parametrize("retirement_write_fails", [False, True])
+def test_failed_upstream_rebuild_closes_durable_claim_without_replay(
+    tmp_path, complete_turn, retirement_write_fails
+):
     class FailingGatewaySocket(FakeJsonSocket):
         def __init__(self):
             super().__init__(
@@ -5847,8 +5851,61 @@ def test_real_bridge_upstream_loss_parks_endpoint_and_retains_original_uncertain
             self.close_code = code
             self.closed.set()
 
+    configuration = {
+        "revision": 1,
+        "rooms": [{"id": "kitchen", "name": "Kitchen"}],
+        "profiles": [{"id": "family", "name": "Family", "available": True}],
+        "wake_mappings": [
+            {
+                "id": "hey-hermes",
+                "phrase": "Hey Hermes",
+                "profile_id": "family",
+                "active": True,
+            }
+        ],
+        "devices": [],
+    }
+    store = ConversationGrantStore(
+        tmp_path / "home.sqlite3",
+        configuration=lambda: configuration,
+        handle_factory=lambda: "opaque-conversation-1",
+    )
+    handle = store.create_from_decision(
+        WakeDecision(
+            claim_id="live-revocation-claim",
+            decision="granted",
+            arbitration_id="live-revocation-arbitration",
+            configuration_revision=1,
+            device_id="puck-kitchen",
+            room_id="kitchen",
+            wake_mapping_id="hey-hermes",
+            profile_id="family",
+        ),
+        credential_generation=None,
+    )
+    if retirement_write_fails:
+        store._connection.execute("""
+            CREATE TRIGGER fail_retirement BEFORE UPDATE ON conversation_claims
+            WHEN NEW.close_reason = 'upstream_lost'
+            BEGIN SELECT RAISE(ABORT, 'simulated persistence failure'); END
+        """)
     socket = FailingGatewaySocket()
-    bridge = _make_bridge(FakeSocketFactory(socket))
+
+    def make_bridge():
+        return HomeBridge(
+            gateway_url="wss://hermes.example/api/ws",
+            hermes_token="server-hermes-secret",
+            device_authenticator=StaticCredentialAuthenticator(
+                admin_token="admin-secret",
+                device_credentials={"device-secret": "puck-kitchen"},
+            ),
+            conversation_resolver=store.resolve,
+            gateway_socket_factory=FakeSocketFactory(socket),
+            session_persistor=store.persist_session,
+            conversation_closer=store.close_claim,
+        )
+
+    bridge = make_bridge()
     peer = Peer()
     headers = {"Authorization": "Device device-secret"}
     handle = "opaque-conversation-1"
@@ -5880,7 +5937,23 @@ def test_real_bridge_upstream_loss_parks_endpoint_and_retains_original_uncertain
             {"conversation_handle": handle, "text": "Only once"},
             "prompt",
         )["result"]
-        original_turn = result["turn_id"]
+        assert result["turn_id"]
+        if complete_turn:
+            socket.incoming.append(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "event",
+                    "params": {
+                        "type": "message.complete",
+                        "session_id": "runtime-1",
+                        "payload": {"status": "completed"},
+                    },
+                }
+            )
+            deadline = time.monotonic() + 2
+            while endpoint.has_active_turn and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert not endpoint.has_active_turn
         runner = Thread(target=endpoint.run, kwargs={"park_on_disconnect": True})
         runner.start()
         socket.fail.set()
@@ -5889,14 +5962,51 @@ def test_real_bridge_upstream_loss_parks_endpoint_and_retains_original_uncertain
         assert not runner.is_alive()
         assert peer.close_code == 1011
         assert endpoint.has_recoverable_state
-        assert bridge.state == "turn_uncertain"
-        replacement = Peer()
-        endpoint.adopt(replacement, headers=headers)
-        recovered = request(
-            "conversation.reconnect", {"conversation_handle": handle}, "reconnect"
+        assert store.resolve(handle, "puck-kitchen") is not None
+        endpoint.adopt(Peer(), headers=headers)
+        failed_resume = request(
+            "conversation.reconnect", {"conversation_handle": handle}, "resume"
         )["result"]
-        assert recovered["unresolved_turn"]["turn_id"] == original_turn
-        assert recovered["unresolved_turn"]["status"] == "uncertain"
+        assert failed_resume["status"] == "unavailable"
+        assert failed_resume["reason"] == "stale_conversation"
+        assert not endpoint.has_recoverable_state
+        assert bridge.state == "disconnected"
+        assert store.resolve(handle, "puck-kitchen") is None
+        row = store._connection.execute(
+            "SELECT status, close_reason, session_id FROM conversation_claims WHERE handle = ?",
+            (handle,),
+        ).fetchone()
+        if retirement_write_fails:
+            assert row[0] == "active"
+        else:
+            assert tuple(row) == ("closed", "upstream_lost", "stored-1")
+        for attempt in range(5):
+            replacement = BridgeEndpoint(Peer(), make_bridge(), headers=headers)
+            try:
+                recovered = replacement.handle_message(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "schema": 1,
+                            "id": attempt,
+                            "method": "conversation.reconnect",
+                            "params": {"conversation_handle": handle},
+                        }
+                    )
+                )["result"]
+                assert recovered["status"] == "unavailable"
+                assert recovered["reason"] == "stale_conversation"
+                assert not replacement.has_recoverable_state
+            finally:
+                replacement.close()
+        if retirement_write_fails:
+            store._connection.execute("DROP TRIGGER fail_retirement")
+            assert store.resolve(handle, "puck-kitchen") is None
+            row = store._connection.execute(
+                "SELECT status, close_reason, session_id FROM conversation_claims WHERE handle = ?",
+                (handle,),
+            ).fetchone()
+            assert tuple(row) == ("closed", "upstream_lost", "stored-1")
         assert sum(frame.get("method") == "prompt.submit" for frame in socket.sent) == 1
     finally:
         socket.fail.set()
@@ -6164,3 +6274,343 @@ def test_concurrent_refresh_accepts_equivalent_absent_session_ids(
         bridge._grant = grant
     assert bridge._revalidate_ready_binding() == (gateway, "runtime-1")
     assert bridge.state == "ready"
+
+
+@pytest.mark.parametrize("complete_first", [False, True])
+@pytest.mark.parametrize(
+    "resume_outcome", ["success", "rejected", "mismatch", "timeout"]
+)
+def test_live_reconnect_rebuilds_same_session_and_preserves_context(
+    monkeypatch, complete_first, resume_outcome
+):
+    from websockets.exceptions import ConnectionClosed
+    from websockets.sync.client import connect
+
+    from hermes_home.api.bridge_server import _EndpointParkingLot, create_bridge_server
+
+    parked = Event()
+    original_park = _EndpointParkingLot.park
+
+    def observed_park(self, endpoint, **kwargs):
+        original_park(self, endpoint, **kwargs)
+        parked.set()
+
+    monkeypatch.setattr(_EndpointParkingLot, "park", observed_park)
+    context = []
+    sockets = []
+    bridges = []
+    claim_active = [True]
+
+    class SessionSocket(FakeJsonSocket):
+        def __init__(self, number):
+            super().__init__([_event("gateway.ready", {})], inject_catalog=False)
+            self.number = number
+            self.fail = Event()
+            self.runtime_id = f"runtime-{number}"
+
+        def send_json(self, frame):
+            super().send_json(frame)
+            method = frame["method"]
+            if method == "commands.catalog":
+                result = {"pairs": []}
+            elif method == "session.resume":
+                assert frame["params"]["session_id"] == "stored-context"
+                if self.number > 1 and resume_outcome == "timeout":
+                    raise TimeoutError("synthetic resume timeout")
+                if self.number > 1 and resume_outcome == "rejected":
+                    self.incoming.append(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": frame["id"],
+                            "error": {"code": -32000, "message": "session unavailable"},
+                        }
+                    )
+                    return
+                result = {
+                    "session_id": self.runtime_id,
+                    "stored_session_id": "stored-context",
+                }
+                if self.number > 1 and resume_outcome == "mismatch":
+                    result["stored_session_id"] = "wrong-session"
+            elif method == "prompt.submit":
+                context.append(frame["params"]["text"])
+                result = {"accepted": True}
+            else:
+                raise AssertionError(f"unexpected operation {method}")
+            self.incoming.append(
+                {"jsonrpc": "2.0", "id": frame["id"], "result": result}
+            )
+
+        def complete(self):
+            self.incoming.append(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "event",
+                    "params": {
+                        "type": "message.complete",
+                        "session_id": self.runtime_id,
+                        "payload": {"status": "completed", "text": " | ".join(context)},
+                    },
+                }
+            )
+
+        def receive_json(self, timeout=None):
+            deadline = time.monotonic() + (timeout or 0.05)
+            while time.monotonic() < deadline:
+                if self.closed or self.fail.is_set():
+                    raise ConnectionError("synthetic socket loss")
+                if self.incoming:
+                    return self.incoming.popleft()
+                time.sleep(0.001)
+            raise TimeoutError("healthy idle")
+
+    class Factory:
+        def open(self, url):
+            socket = SessionSocket(len(sockets) + 1)
+            sockets.append(socket)
+            return socket
+
+    def factory():
+        bridge = HomeBridge(
+            gateway_url="wss://hermes.example/api/ws",
+            hermes_token="server-secret",
+            device_authenticator=StaticCredentialAuthenticator(
+                admin_token="admin-secret",
+                device_credentials={"device-secret": "puck-kitchen"},
+            ),
+            conversation_resolver=lambda handle, device: (
+                ConversationGrant(handle, device, "family", session_id="stored-context")
+                if claim_active[0]
+                else None
+            ),
+            conversation_closer=lambda handle, device, *, reason: (
+                claim_active.__setitem__(0, False) or True
+            ),
+            gateway_socket_factory=Factory(),
+        )
+        bridges.append(bridge)
+        return bridge
+
+    def rpc(client, method, **params):
+        client.send(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "schema": 1,
+                    "id": method,
+                    "method": method,
+                    "params": {
+                        "conversation_handle": "opaque-conversation-1",
+                        **params,
+                    },
+                }
+            )
+        )
+        while True:
+            message = json.loads(client.recv(timeout=2))
+            if message.get("id") == method:
+                return message["result"]
+
+    def completed(client):
+        while True:
+            message = json.loads(client.recv(timeout=2))
+            if message.get("method") == "event":
+                event = message["params"]["event"]
+                if event["type"] == "message.complete":
+                    return event["payload"]["text"]
+
+    server = create_bridge_server(
+        bridge_factory=factory, host="127.0.0.1", port=0, reconnect_grace_seconds=5
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    from hermes_home.bridge.endpoint import BRIDGE_WS_PATH
+
+    url = f"ws://127.0.0.1:{server.socket.getsockname()[1]}{BRIDGE_WS_PATH}"
+    headers = {"Authorization": "Device device-secret"}
+    try:
+        with connect(url, additional_headers=headers) as client:
+            assert rpc(client, "conversation.open")["status"] == "ready"
+            first = rpc(client, "prompt.submit", text="Remember plum")
+            if complete_first:
+                sockets[0].complete()
+                assert completed(client) == "Remember plum"
+            sockets[0].fail.set()
+            with pytest.raises(ConnectionClosed):
+                while True:
+                    client.recv(timeout=2)
+        assert parked.wait(2)
+        with connect(
+            url, additional_headers={"Authorization": "Device wrong"}
+        ) as client:
+            assert rpc(client, "conversation.reconnect")["reason"] == "unauthorized"
+        assert len(sockets) == 1
+        with connect(url, additional_headers=headers) as client:
+            recovered = rpc(client, "conversation.reconnect")
+            if resume_outcome != "success":
+                assert recovered["status"] == "unavailable"
+                assert recovered["reason"] == "stale_conversation"
+                assert not claim_active[0]
+                for _ in range(5):
+                    with connect(url, additional_headers=headers) as retry:
+                        assert (
+                            rpc(retry, "conversation.reconnect")["reason"]
+                            == "stale_conversation"
+                        )
+                assert len(sockets) == 2
+                assert context == ["Remember plum"]
+                return
+            assert recovered["status"] == "ready"
+            if not complete_first:
+                assert recovered["unresolved_turn"]["turn_id"] == first["turn_id"]
+                assert recovered["unresolved_turn"]["delivery"] == "uncertain"
+            else:
+                assert recovered["unresolved_turn"] is False
+            assert len(sockets) == 2
+            assert len(bridges) == 1
+            assert (
+                rpc(client, "prompt.submit", text="Recall it")["status"] == "submitted"
+            )
+            sockets[1].complete()
+            assert completed(client) == "Remember plum | Recall it"
+        assert context == ["Remember plum", "Recall it"]
+        assert (
+            sum(frame.get("method") == "session.resume" for frame in sockets[1].sent)
+            == 1
+        )
+        assert all(
+            frame.get("method") != "session.create"
+            for socket in sockets
+            for frame in socket.sent
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+        for bridge in bridges:
+            bridge.close()
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ("wrong-device", "unauthorized"),
+        ("generation", "stale_conversation"),
+        ("profile", "conversation_mismatch"),
+        ("session", "conversation_mismatch"),
+        ("configuration", "conversation_mismatch"),
+        ("revoked", "stale_conversation"),
+    ],
+)
+def test_recovery_candidate_rejection_does_not_mutate_binding(change, reason):
+    from dataclasses import replace
+
+    grant = ConversationGrant(
+        "opaque-conversation-1", "puck-kitchen", "family", session_id="stored-1"
+    )
+    current = [grant]
+    socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {"session_id": "runtime-1", "stored_session_id": "stored-1"},
+            },
+        ]
+    )
+    factory = FakeSocketFactory(socket)
+    bridge = _make_bridge(
+        factory,
+        resolver=lambda handle, device: current[0],
+        authenticator=StaticCredentialAuthenticator(
+            admin_token="admin-secret",
+            device_credentials={
+                "device-secret": "puck-kitchen",
+                "other-secret": "other-device",
+            },
+        ),
+    )
+    headers = {"Authorization": "Device device-secret"}
+    try:
+        assert (
+            bridge.open(headers=headers, conversation_handle=grant.handle).status
+            == "ready"
+        )
+        assert bridge.suspend_failed_upstream()
+        original_state = bridge.state
+        if change == "wrong-device":
+            headers = {"Authorization": "Device other-secret"}
+        elif change == "generation":
+            current[0] = replace(grant, credential_generation=1)
+        elif change == "profile":
+            current[0] = replace(grant, profile_id="another-profile")
+        elif change == "session":
+            current[0] = replace(grant, session_id="another-session")
+        elif change == "configuration":
+            current[0] = replace(grant, configuration_revision=99)
+        else:
+            current[0] = None
+        result = bridge.recover_upstream(headers=headers)
+        assert result.status == "unavailable"
+        assert result.reason == reason
+        assert len(factory.urls) == 1
+        assert bridge.state == original_state
+        assert bridge.recovery_available
+        assert bridge._grant == grant
+    finally:
+        bridge.close()
+
+
+@pytest.mark.parametrize("failure", ["configuration-race", "callback-exception"])
+def test_authorized_recovery_failure_is_terminal(failure):
+    from dataclasses import replace
+
+    grant = ConversationGrant(
+        "opaque-conversation-1", "puck-kitchen", "family", session_id="stored-1"
+    )
+    resolutions = []
+    retired = []
+
+    def resolver(handle, device):
+        resolutions.append((handle, device))
+        if failure == "configuration-race" and len(resolutions) == 3:
+            return replace(grant, configuration_revision=77)
+        return grant
+
+    socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {}),
+            {
+                "jsonrpc": "2.0",
+                "id": "home-1",
+                "result": {"session_id": "runtime-1", "stored_session_id": "stored-1"},
+            },
+        ]
+    )
+
+    class Factory(FakeSocketFactory):
+        def open(self, url):
+            if self.urls:
+                raise LookupError("unexpected injected callback failure")
+            return super().open(url)
+
+    factory = Factory(socket)
+    bridge = _make_bridge(factory, resolver=resolver)
+    bridge._conversation_closer = lambda handle, device, *, reason: (
+        retired.append(reason) or True
+    )
+    headers = {"Authorization": "Device device-secret"}
+    try:
+        assert (
+            bridge.open(headers=headers, conversation_handle=grant.handle).status
+            == "ready"
+        )
+        assert bridge.suspend_failed_upstream()
+        status = bridge.recover_upstream(headers=headers)
+        assert status.status == "unavailable"
+        assert status.reason == "stale_conversation"
+        assert retired[-1] == "upstream_lost"
+        assert not bridge.recovery_available
+        assert bridge.state == "disconnected"
+    finally:
+        bridge.close()

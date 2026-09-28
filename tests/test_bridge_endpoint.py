@@ -3663,19 +3663,15 @@ def test_interrupted_turn_ends_its_audio_instead_of_reporting_a_failure() -> Non
         RuntimeError("upstream unavailable"),
     ],
 )
-def test_upstream_event_loss_closes_peer_but_preserves_uncertain_turn(failure):
-    class UncertainBridge(FakeBridge):
-        def reauthorize(self, *, headers):
-            self.reauthorize_calls.append(dict(headers))
-            return BridgeStatus(
-                "unavailable",
-                HANDLE,
-                "stale_conversation",
-                unresolved_turn=BridgeTurn("home-turn-1", HANDLE, "uncertain"),
-            )
+def test_upstream_event_loss_retires_bridge_and_prevents_adoption(failure, caplog):
+    class RetiringBridge(FakeBridge):
+        retire_calls = 0
+
+        def retire_failed_upstream(self):
+            self.retire_calls += 1
 
     connection = FakeConnection()
-    bridge = UncertainBridge()
+    bridge = RetiringBridge()
     endpoint = BridgeEndpoint(connection, bridge, headers=HEADERS, route=ROUTE)
     try:
         _open(endpoint)
@@ -3690,18 +3686,326 @@ def test_upstream_event_loss_closes_peer_but_preserves_uncertain_turn(failure):
         bridge.events.append(failure)
         bridge.event_ready.set()
         _wait_for(lambda: connection.closed)
+        assert bridge.close_calls == 1
+        assert bridge.retire_calls == 1
+        assert not endpoint.has_recoverable_state
+        for _ in range(5):
+            with pytest.raises(RuntimeError, match="not parked"):
+                endpoint.adopt(FakeConnection(), headers=HEADERS)
+        assert bridge.reauthorize_calls == []
+        assert bridge.reconnect_calls == []
+        assert bridge.prompt_calls == ["Once only"]
+        assert "timestamp=" in caplog.text
+        assert "claim=opaque-h" in caplog.text
+        assert "endpoint-secret" not in caplog.text
+        endpoint._event_thread.join(timeout=1)
+        assert not endpoint._event_thread.is_alive()
+    finally:
+        endpoint.close()
+
+
+def test_concurrent_cleanup_waits_for_upstream_claim_retirement():
+    retiring = threading.Event()
+    release = threading.Event()
+
+    class BlockingRetirementBridge(FakeBridge):
+        def retire_failed_upstream(self):
+            retiring.set()
+            assert release.wait(2)
+            assert self.close_calls == 0
+
+    bridge = BlockingRetirementBridge()
+    endpoint = BridgeEndpoint(FakeConnection(), bridge, headers=HEADERS)
+    worker = threading.Thread(
+        target=endpoint._retire_failed_upstream, args=(ConnectionError(),)
+    )
+    worker.start()
+    try:
+        assert retiring.wait(1)
+        endpoint.close()
         assert bridge.close_calls == 0
-        assert endpoint.has_recoverable_state
+        assert not endpoint.has_recoverable_state
+    finally:
+        release.set()
+        worker.join(timeout=2)
+        endpoint.close()
+    assert not worker.is_alive()
+    assert bridge.close_calls == 1
+
+
+def test_event_failure_claims_retirement_before_releasing_state_lock(monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+    bridge = FakeBridge()
+    endpoint = BridgeEndpoint(FakeConnection(), bridge, headers=HEADERS)
+    original = endpoint._retire_failed_upstream
+
+    def delayed_retire(error):
+        entered.set()
+        assert release.wait(2)
+        original(error)
+
+    monkeypatch.setattr(endpoint, "_retire_failed_upstream", delayed_retire)
+    try:
+        _open(endpoint)
+        bridge.events.append(ConnectionError("lost"))
+        bridge.event_ready.set()
+        assert entered.wait(1)
+        endpoint.close()
+        assert bridge.close_calls == 0
+    finally:
+        release.set()
+        if endpoint._event_thread is not None:
+            endpoint._event_thread.join(timeout=2)
+        endpoint.close()
+    assert bridge.close_calls == 1
+
+
+def test_old_event_failure_cannot_suspend_recovered_gateway():
+    lost = threading.Event()
+    marked = threading.Event()
+    release = threading.Event()
+    fresh_poll = threading.Event()
+
+    class RacingBridge(FakeBridge):
+        upstream_available = True
+        recovery_available = True
+        suspensions = 0
+        reads = 0
+
+        def next_event(self):
+            self.reads += 1
+            if self.reads == 1:
+                assert lost.wait(2)
+                self.upstream_available = False
+                marked.set()
+                assert release.wait(2)
+                raise BridgeTransportError("old gateway failure")
+            fresh_poll.set()
+            return super().next_event()
+
+        def suspend_failed_upstream(self):
+            self.suspensions += 1
+            return True
+
+        def recover_upstream(self, *, headers):
+            self.upstream_available = True
+            return self.status
+
+    bridge = RacingBridge()
+    endpoint = BridgeEndpoint(FakeConnection(), bridge, headers=HEADERS)
+    try:
+        _open(endpoint)
+        endpoint.detach()
+        lost.set()
+        assert marked.wait(1)
         endpoint.adopt(FakeConnection(), headers=HEADERS)
         response = _send(
             endpoint,
             jsonrpc="2.0",
             schema=1,
-            id="reconnect-1",
+            id="recover",
             method="conversation.reconnect",
             params={"conversation_handle": HANDLE},
         )
-        assert response["result"]["unresolved_turn"]["status"] == "uncertain"
-        assert bridge.prompt_calls == ["Once only"]
+        assert response["result"]["status"] == "ready"
+        release.set()
+        assert fresh_poll.wait(1)
+        assert endpoint.ready
+        assert bridge.suspensions == 1
+        assert bridge.close_calls == 0
+    finally:
+        lost.set()
+        release.set()
+        endpoint.close()
+
+
+def test_recovery_waits_for_old_audio_and_drops_its_frame(monkeypatch):
+    audio_started = threading.Event()
+    release_audio = threading.Event()
+    waiting_audio = threading.Event()
+    new_audio = threading.Event()
+
+    class RecoveringBridge(FakeBridge):
+        recovery_available = True
+        audio_reads = 0
+
+        def suspend_failed_upstream(self):
+            return True
+
+        def recover_upstream(self, *, headers):
+            return self.status
+
+        def next_audio(self, *, timeout=None):
+            self.audio_reads += 1
+            if self.audio_reads == 1:
+                audio_started.set()
+                assert release_audio.wait(2)
+                return AudioFrame("pcm", turn_id="home-turn-1", data=b"old audio")
+            new_audio.set()
+            return AudioFrame("unavailable", turn_id="home-turn-2")
+
+    bridge = RecoveringBridge()
+    first = FakeConnection()
+    replacement = FakeConnection()
+    endpoint = BridgeEndpoint(first, bridge, headers=HEADERS)
+    original_wait = endpoint._wait_for_stale_audio
+
+    def observed_wait():
+        waiting_audio.set()
+        original_wait()
+
+    monkeypatch.setattr(endpoint, "_wait_for_stale_audio", observed_wait)
+    response = []
+    worker = None
+    try:
+        _open(endpoint)
+        _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="first",
+            method="prompt.submit",
+            params={"conversation_handle": HANDLE, "text": "First"},
+        )
+        assert audio_started.wait(1)
+        bridge.events.append(BridgeTransportError("lost"))
+        bridge.event_ready.set()
+        _wait_for(lambda: first.closed)
+        endpoint.adopt(replacement, headers=HEADERS)
+        worker = threading.Thread(
+            target=lambda: response.append(
+                _send(
+                    endpoint,
+                    jsonrpc="2.0",
+                    schema=1,
+                    id="recover",
+                    method="conversation.reconnect",
+                    params={"conversation_handle": HANDLE},
+                )
+            )
+        )
+        worker.start()
+        assert waiting_audio.wait(1)
+        assert replacement.sent == []
+        release_audio.set()
+        worker.join(timeout=2)
+        assert response[0]["result"]["status"] == "ready"
+        assert len(replacement.sent) == 1
+        bridge.prompt_result = BridgeTurn("home-turn-2", HANDLE)
+        _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="next",
+            method="prompt.submit",
+            params={"conversation_handle": HANDLE, "text": "Next"},
+        )
+        assert new_audio.wait(1)
+        assert b"old audio" not in replacement.sent
+    finally:
+        release_audio.set()
+        if worker is not None:
+            worker.join(timeout=2)
+        endpoint.close()
+
+
+def test_recovery_fences_event_projection_and_discards_old_buffer(monkeypatch):
+    projecting = threading.Event()
+    release = threading.Event()
+    recovered = threading.Event()
+
+    class RecoveringBridge(FakeBridge):
+        upstream_available = True
+        recovery_available = True
+
+        def suspend_failed_upstream(self):
+            return True
+
+        def recover_upstream(self, *, headers):
+            recovered.set()
+            self.upstream_available = True
+            return self.status
+
+    bridge = RecoveringBridge()
+    endpoint = BridgeEndpoint(FakeConnection(), bridge, headers=HEADERS)
+    replacement = FakeConnection()
+    original_payload = endpoint._event_payload
+
+    def blocked_projection(event):
+        projecting.set()
+        assert release.wait(2)
+        return original_payload(event)
+
+    monkeypatch.setattr(endpoint, "_event_payload", blocked_projection)
+    worker = None
+    try:
+        _open(endpoint)
+        endpoint.detach()
+        bridge.events.append(BridgeEvent(HANDLE, "status", {"label": "old transport"}))
+        bridge.event_ready.set()
+        assert projecting.wait(1)
+        bridge.upstream_available = False
+        endpoint.adopt(replacement, headers=HEADERS)
+        worker = threading.Thread(
+            target=lambda: _send(
+                endpoint,
+                jsonrpc="2.0",
+                schema=1,
+                id="recover",
+                method="conversation.reconnect",
+                params={"conversation_handle": HANDLE},
+            )
+        )
+        worker.start()
+        assert not recovered.wait(0.05)
+        assert replacement.sent == []
+        release.set()
+        worker.join(timeout=2)
+        assert not worker.is_alive()
+        assert recovered.is_set()
+        assert len(replacement.sent) == 1
+        assert json.loads(replacement.sent[0])["result"]["status"] == "ready"
+    finally:
+        release.set()
+        if worker is not None:
+            worker.join(timeout=2)
+        endpoint.close()
+
+
+def test_adopted_transport_receives_no_events_or_audio_before_authorization():
+    bridge = FakeBridge()
+    endpoint = BridgeEndpoint(FakeConnection(), bridge, headers=HEADERS)
+    candidate = FakeConnection()
+    try:
+        _open(endpoint)
+        endpoint.detach()
+        endpoint.adopt(candidate, headers=HEADERS)
+        endpoint._send_json(
+            {
+                "jsonrpc": "2.0",
+                "method": "event",
+                "params": {
+                    "conversation_handle": HANDLE,
+                    "event": {"type": "status", "payload": {"state": "idle"}},
+                },
+            }
+        )
+        endpoint._send_binary(b"old audio")
+        endpoint._send_json(
+            {"jsonrpc": "2.0", "method": "audio", "params": {"kind": "end"}}
+        )
+        assert candidate.sent == []
+        _send(
+            endpoint,
+            jsonrpc="2.0",
+            schema=1,
+            id="authorize",
+            method="conversation.reconnect",
+            params={"conversation_handle": HANDLE},
+        )
+        assert json.loads(candidate.sent[0])["id"] == "authorize"
+        assert json.loads(candidate.sent[1])["method"] == "event"
+        assert len(candidate.sent) == 2
     finally:
         endpoint.close()

@@ -45,12 +45,13 @@ class _EndpointParkingLot:
         self._grace_seconds = grace_seconds
         self._lock = threading.Lock()
         self._entries: dict[str, _ParkedEndpoint] = {}
+        self._closed = False
 
     def park(
         self, endpoint: BridgeEndpoint, *, expires_at: float | None = None
     ) -> None:
         handle = endpoint.conversation_handle
-        if handle is None:
+        if handle is None or not endpoint.has_recoverable_state:
             endpoint.close()
             return
         deadline = (
@@ -63,12 +64,29 @@ class _EndpointParkingLot:
         timer = threading.Timer(remaining, self._expire, args=(handle,))
         timer.daemon = True
         with self._lock:
-            previous = self._entries.pop(handle, None)
-            self._entries[handle] = _ParkedEndpoint(endpoint, deadline, timer)
+            if self._closed:
+                previous = None
+                close_endpoint = True
+            else:
+                previous = self._entries.pop(handle, None)
+                self._entries[handle] = _ParkedEndpoint(endpoint, deadline, timer)
+                close_endpoint = False
+        if close_endpoint:
+            endpoint.close()
+            return
         if previous is not None:
             previous.timer.cancel()
             previous.endpoint.close()
         timer.start()
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            entries = list(self._entries.values())
+            self._entries.clear()
+        for parked in entries:
+            parked.timer.cancel()
+            parked.endpoint.close()
 
     def take(self, handle: str) -> _ParkedEndpoint | None:
         with self._lock:
@@ -164,10 +182,36 @@ def create_bridge_server(
             parking_lot.take(handle) if method == "conversation.reconnect" else None
         )
         endpoint = None if parked is None else parked.endpoint
+        recovery_timer = None
         if endpoint is not None:
+            recovery_timer = threading.Timer(
+                max(0.0, parked.expires_at - time.monotonic()), endpoint.close
+            )
+            recovery_timer.daemon = True
+            recovery_timer.start()
             try:
                 endpoint.adopt(connection, headers=headers)
             except RuntimeError:
+                recovery_timer.cancel()
+                if endpoint.has_recoverable_state:
+                    parking_lot.park(endpoint, expires_at=parked.expires_at)
+                    connection.send(
+                        json.dumps(
+                            {
+                                "jsonrpc": "2.0",
+                                "schema": 1,
+                                "id": request_id,
+                                "result": {
+                                    "schema": 1,
+                                    "status": "unavailable",
+                                    "conversation_handle": handle,
+                                    "reason": "transport_unavailable",
+                                },
+                            }
+                        )
+                    )
+                    connection.close()
+                    return
                 endpoint.close()
                 endpoint = None
                 parked = None
@@ -181,7 +225,14 @@ def create_bridge_server(
                 max_message_size=MAX_BRIDGE_MESSAGE_BYTES,
                 diagnostics=diagnostics,
             )
-        endpoint.run(first_message=first_message, park_on_disconnect=True)
+        if parked is not None:
+            try:
+                endpoint.handle_message(first_message)
+            finally:
+                recovery_timer.cancel()
+            endpoint.run(park_on_disconnect=True)
+        else:
+            endpoint.run(first_message=first_message, park_on_disconnect=True)
         if endpoint.has_recoverable_state:
             expires_at = (
                 parked.expires_at
@@ -191,13 +242,22 @@ def create_bridge_server(
             parking_lot.park(endpoint, expires_at=expires_at)
 
     server_factory = websocket_serve or serve
-    return server_factory(
+    server = server_factory(
         handler,
         host,
         port,
         process_request=process_request,
         max_size=MAX_BRIDGE_MESSAGE_BYTES,
     )
+    shutdown = getattr(server, "shutdown", None)
+    if callable(shutdown):
+
+        def shutdown_with_cleanup() -> None:
+            parking_lot.close()
+            shutdown()
+
+        server.shutdown = shutdown_with_cleanup
+    return server
 
 
 def _new_bridge(bridge_factory: Callable[[], object] | None) -> object | None:
