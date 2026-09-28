@@ -549,43 +549,107 @@ def test_parked_upstream_failure_is_terminal_through_live_server(monkeypatch, id
             bridge.close()
 
 
-def test_healthy_idle_background_disconnect_uses_fresh_bridge_on_return(caplog):
+@pytest.mark.parametrize("shutdown_while_parked", [False, True])
+def test_healthy_idle_background_disconnect_retains_upstream_until_grace(
+    caplog, shutdown_while_parked
+):
     bridges = []
 
     class IdleBridge(ListenerBridge):
         retired = False
+        prompt_calls = 0
+
+        def __init__(self):
+            super().__init__()
+            self.complete = threading.Event()
+
+        def next_event(self):
+            while not self.closed.is_set():
+                if self.complete.wait(0.01):
+                    self.complete.clear()
+                    return BridgeEvent(
+                        HANDLE,
+                        "message.complete",
+                        {"status": "completed"},
+                        turn_id="turn-after-idle",
+                    )
+            raise ConnectionError("closed")
+
+        def next_audio(self, *, timeout=None):
+            return AudioFrame("unavailable", turn_id="turn-after-idle")
 
         def retire_failed_upstream(self):
             self.retired = True
+
+        def reauthorize(self, *, headers):
+            if headers["Authorization"] != "Device endpoint-secret":
+                return BridgeStatus("unavailable", HANDLE, "unauthorized")
+            return BridgeStatus("ready", HANDLE)
+
+        def submit_prompt(self, text):
+            self.prompt_calls += 1
+            return BridgeTurn("turn-after-idle", HANDLE)
 
     def factory():
         bridge = IdleBridge()
         bridges.append(bridge)
         return bridge
 
-    server = create_bridge_server(bridge_factory=factory, host="127.0.0.1", port=0)
+    server = create_bridge_server(
+        bridge_factory=factory, host="127.0.0.1", port=0, reconnect_grace_seconds=1.0
+    )
     thread = _start(server)
     url = f"ws://127.0.0.1:{server.socket.getsockname()[1]}{BRIDGE_WS_PATH}"
     headers = {"Authorization": "Device endpoint-secret"}
+
+    def request(client, method, **params):
+        client.send(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "schema": 1,
+                    "id": method,
+                    "method": method,
+                    "params": {"conversation_handle": HANDLE, **params},
+                }
+            )
+        )
+        return json.loads(client.recv(timeout=2))["result"]
+
     try:
-        for method in ("conversation.open", "conversation.reconnect"):
-            with connect(url, additional_headers=headers) as client:
-                client.send(
-                    json.dumps(
-                        {
-                            "jsonrpc": "2.0",
-                            "schema": 1,
-                            "id": method,
-                            "method": method,
-                            "params": {"conversation_handle": HANDLE},
-                        }
-                    )
-                )
-                assert json.loads(client.recv(timeout=2))["result"]["status"] == "ready"
-            assert bridges[-1].closed.wait(2)
-        assert len(bridges) == 2
-        assert all(not bridge.retired for bridge in bridges)
+        with connect(url, additional_headers=headers) as client:
+            assert request(client, "conversation.open")["status"] == "ready"
+        # Model return late within grace (the pilot returned after 106/120s).
+        assert not bridges[0].closed.wait(0.2)
+        with connect(
+            url, additional_headers={"Authorization": "Device wrong"}
+        ) as client:
+            assert request(client, "conversation.reconnect")["reason"] == "unauthorized"
+        assert not bridges[0].closed.wait(0.2)
+        with connect(url, additional_headers=headers) as client:
+            assert request(client, "conversation.reconnect")["status"] == "ready"
+            assert (
+                request(client, "prompt.submit", text="After idle")["status"]
+                == "submitted"
+            )
+            bridges[0].complete.set()
+            while True:
+                completion = json.loads(client.recv(timeout=2))
+                if completion.get("method") == "event":
+                    assert completion["params"]["event"]["type"] == "message.complete"
+                    break
+        assert len(bridges) == 1
+        assert bridges[0].prompt_calls == 1
+        assert not bridges[0].closed.wait(0.2)
+        if shutdown_while_parked:
+            server.shutdown()
+            assert bridges[0].closed.wait(0.2)
+        else:
+            assert bridges[0].closed.wait(2)
+        assert not bridges[0].retired
         assert "Home upstream unavailable" not in caplog.text
     finally:
         server.shutdown()
         thread.join(timeout=2)
+        for bridge in bridges:
+            bridge.close()

@@ -339,7 +339,11 @@ class BridgeEndpoint:
                 not self._closed
                 and not self._stop.is_set()
                 and (
-                    self._active_turn_id is not None
+                    (
+                        self._ready
+                        and callable(getattr(self._bridge, "reauthorize", None))
+                    )
+                    or self._active_turn_id is not None
                     or self._submitting_turn
                     or bool(self._parked_events)
                 )
@@ -596,6 +600,7 @@ class BridgeEndpoint:
             status,
             handle=handle,
             reconnect=not adopted_transport,
+            preserve_on_unavailable=adopted_transport,
         )
         if adopted_transport:
             with self._state_lock:
@@ -1064,6 +1069,7 @@ class BridgeEndpoint:
         *,
         handle: str,
         reconnect: bool = False,
+        preserve_on_unavailable: bool = False,
     ) -> dict[str, object]:
         audio_thread_to_join: threading.Thread | None = None
         try:
@@ -1106,7 +1112,7 @@ class BridgeEndpoint:
             ):
                 audio_thread_to_join.join(timeout=1)
             self._start_event_pump()
-        else:
+        elif not preserve_on_unavailable:
             with self._state_lock:
                 self._choice_authority.revoke_all()
                 self._ready = False

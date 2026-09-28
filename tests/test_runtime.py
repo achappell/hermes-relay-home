@@ -308,6 +308,7 @@ def test_create_runtime_forwards_the_configured_bridge_route_and_listener(
             "HERMES_HOME_BRIDGE_BIND_HOST": "127.0.0.1",
             "HERMES_HOME_BRIDGE_PORT": "8877",
             "HERMES_HOME_BRIDGE_ROUTE_ID": "configured-local",
+            "HERMES_HOME_CLIENT_RECONNECT_GRACE_SECONDS": "147",
         }
     )
     captured = {}
@@ -331,6 +332,7 @@ def test_create_runtime_forwards_the_configured_bridge_route_and_listener(
     try:
         assert captured["host"] == "127.0.0.1"
         assert captured["port"] == 8877
+        assert captured["reconnect_grace_seconds"] == 147.0
         assert captured["route"].to_endpoint() == {
             "class": "home",
             "id": "configured-local",

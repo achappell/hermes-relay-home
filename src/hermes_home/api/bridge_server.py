@@ -45,6 +45,7 @@ class _EndpointParkingLot:
         self._grace_seconds = grace_seconds
         self._lock = threading.Lock()
         self._entries: dict[str, _ParkedEndpoint] = {}
+        self._closed = False
 
     def park(
         self, endpoint: BridgeEndpoint, *, expires_at: float | None = None
@@ -63,12 +64,29 @@ class _EndpointParkingLot:
         timer = threading.Timer(remaining, self._expire, args=(handle,))
         timer.daemon = True
         with self._lock:
-            previous = self._entries.pop(handle, None)
-            self._entries[handle] = _ParkedEndpoint(endpoint, deadline, timer)
+            if self._closed:
+                previous = None
+                close_endpoint = True
+            else:
+                previous = self._entries.pop(handle, None)
+                self._entries[handle] = _ParkedEndpoint(endpoint, deadline, timer)
+                close_endpoint = False
+        if close_endpoint:
+            endpoint.close()
+            return
         if previous is not None:
             previous.timer.cancel()
             previous.endpoint.close()
         timer.start()
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            entries = list(self._entries.values())
+            self._entries.clear()
+        for parked in entries:
+            parked.timer.cancel()
+            parked.endpoint.close()
 
     def take(self, handle: str) -> _ParkedEndpoint | None:
         with self._lock:
@@ -191,13 +209,22 @@ def create_bridge_server(
             parking_lot.park(endpoint, expires_at=expires_at)
 
     server_factory = websocket_serve or serve
-    return server_factory(
+    server = server_factory(
         handler,
         host,
         port,
         process_request=process_request,
         max_size=MAX_BRIDGE_MESSAGE_BYTES,
     )
+    shutdown = getattr(server, "shutdown", None)
+    if callable(shutdown):
+
+        def shutdown_with_cleanup() -> None:
+            parking_lot.close()
+            shutdown()
+
+        server.shutdown = shutdown_with_cleanup
+    return server
 
 
 def _new_bridge(bridge_factory: Callable[[], object] | None) -> object | None:
