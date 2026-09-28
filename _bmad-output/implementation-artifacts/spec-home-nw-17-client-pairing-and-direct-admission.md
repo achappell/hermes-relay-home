@@ -2,7 +2,7 @@
 title: 'HOME-NW-17 — Pair personal clients from a Home page and admit their direct conversations'
 type: 'feature'
 created: '2026-09-23'
-status: 'review'
+status: 'done'
 baseline_commit: '97dc3aa'
 route: 'dispatch'
 review_loop_iteration: 0
@@ -299,7 +299,8 @@ Rejected:
 - 2026-09-24: Implementation refinements: session choice moves to claim time (new, most_recent, resume) with an HTTP session list, keeping the bridge's one-claim-one-session invariant; `/title` uses Hermes's advertised command; client grants live in their own device-keyed record; Profile ownership is an optional `shared` flag.
 - 2026-09-25: Added `POST /api/v1/client-claims/session`, per Amanda, for Android "continue last conversation" (ANDROID-HOME-02 slice 2). A new claim's response carries no `session_ref`, and the Standard session is bound only after the first accepted turn, so a client could not otherwise learn which session to resume. The route answers only for the caller's own active client claim.
 - 2026-09-25: Rename corrected. Standard Hermes lists `/title` in its command catalog, but `command.dispatch` rejects it (4018: not a quick/plugin/bundle/skill command); Hermes renames through `session.title`. The bridge now routes a `title` dispatch to `session.title` for the claim's own session. Found live from the Android emulator (ANDROID-HOME-02 slice 2).
+- 2026-09-28: Amanda reported that HOME-NW-17 pairing was thoroughly tested and directed the local story status to done. This owner acceptance supersedes the earlier review state; verification caveats remain recorded in `validation-home-nw-17.md` and are not represented as newly run checks.
 
 ## Verification
 
-See [`validation-home-nw-17.md`](validation-home-nw-17.md). Local implementation and tests pass; deployment and live Standard checks are pending.
+See [`validation-home-nw-17.md`](validation-home-nw-17.md). Local implementation and tests pass; pairing-page deployment and live iOS resume transport are recorded. Amanda's 2026-09-28 acceptance closes this story locally. The validation record retains checks that were not separately evidenced; this status update does not claim they were newly run.
