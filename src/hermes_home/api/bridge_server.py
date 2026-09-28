@@ -50,7 +50,7 @@ class _EndpointParkingLot:
         self, endpoint: BridgeEndpoint, *, expires_at: float | None = None
     ) -> None:
         handle = endpoint.conversation_handle
-        if handle is None:
+        if handle is None or not endpoint.has_recoverable_state:
             endpoint.close()
             return
         deadline = (

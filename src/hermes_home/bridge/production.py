@@ -100,6 +100,7 @@ class ConversationGrantStore:
         self._lock = RLock()
         self._revocation_handlers: dict[str, set[Callable[[str], None]]] = {}
         self._watch_connected_at: dict[str, float] = {}
+        self._failed_upstream_claims: set[tuple[str, str | None]] = set()
         database_path = Path(database)
         database_path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(database_path, check_same_thread=False)
@@ -414,6 +415,17 @@ class ConversationGrantStore:
 
     def resolve(self, handle: str, device_id: str) -> ConversationGrant | None:
         with self._lock:
+            if (handle, device_id) in self._failed_upstream_claims or (
+                handle,
+                None,
+            ) in self._failed_upstream_claims:
+                # Retry retirement without readmitting failed work. The closer
+                # revalidates device ownership before changing durable state.
+                try:
+                    self.close_claim(handle, device_id, reason="upstream_lost")
+                except OSError:
+                    pass
+                return None
             try:
                 row = self._connection.execute(
                     "SELECT device_id, room_id, wake_mapping_id, profile_id, "
@@ -853,6 +865,11 @@ class ConversationGrantStore:
     ) -> bool:
         now = _finite_time(self._clock())
         with self._lock:
+            retirement_key = (handle, device_id)
+            if reason == "upstream_lost":
+                # Guard even a failed preliminary read. Device-bound markers
+                # cannot retire another device's claim during a later lookup.
+                self._failed_upstream_claims.add(retirement_key)
             try:
                 if device_id is None:
                     row = self._connection.execute(
@@ -867,8 +884,11 @@ class ConversationGrantStore:
             except sqlite3.Error as error:
                 raise OSError("cannot read Home conversation claim") from error
             if row is None:
+                self._failed_upstream_claims.discard(retirement_key)
                 return False
             self._close_locked(handle, reason, now)
+            self._failed_upstream_claims.discard(retirement_key)
+            self._failed_upstream_claims.discard((handle, None))
             return True
 
     def close_device_claims(

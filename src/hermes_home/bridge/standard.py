@@ -1684,6 +1684,22 @@ class HomeBridge:
         self._record_activity(state)
         return True
 
+    def retire_failed_upstream(self) -> None:
+        """Permanently release a failed claim without replaying or deleting its Session."""
+        with self._lifecycle_lock:
+            with self._state_lock:
+                handle = self._conversation_handle
+                device_id = self._device_id
+            try:
+                if (
+                    handle is not None
+                    and device_id is not None
+                    and not self._close_claim(handle, device_id, reason="upstream_lost")
+                ):
+                    raise BridgeAuthorizationError("authorization_unavailable")
+            finally:
+                self.close()
+
     def close_conversation(self) -> bool:
         """Close the logical claim while retaining route transport semantics."""
         with self._lifecycle_lock:

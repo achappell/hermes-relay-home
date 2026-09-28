@@ -5805,7 +5805,11 @@ def test_title_requires_runtime_envelope_identity():
         )
 
 
-def test_real_bridge_upstream_loss_parks_endpoint_and_retains_original_uncertain_turn():
+@pytest.mark.parametrize("complete_turn", [False, True])
+@pytest.mark.parametrize("retirement_write_fails", [False, True])
+def test_real_bridge_upstream_loss_closes_durable_claim_without_replay(
+    tmp_path, complete_turn, retirement_write_fails
+):
     class FailingGatewaySocket(FakeJsonSocket):
         def __init__(self):
             super().__init__(
@@ -5847,8 +5851,61 @@ def test_real_bridge_upstream_loss_parks_endpoint_and_retains_original_uncertain
             self.close_code = code
             self.closed.set()
 
+    configuration = {
+        "revision": 1,
+        "rooms": [{"id": "kitchen", "name": "Kitchen"}],
+        "profiles": [{"id": "family", "name": "Family", "available": True}],
+        "wake_mappings": [
+            {
+                "id": "hey-hermes",
+                "phrase": "Hey Hermes",
+                "profile_id": "family",
+                "active": True,
+            }
+        ],
+        "devices": [],
+    }
+    store = ConversationGrantStore(
+        tmp_path / "home.sqlite3",
+        configuration=lambda: configuration,
+        handle_factory=lambda: "opaque-conversation-1",
+    )
+    handle = store.create_from_decision(
+        WakeDecision(
+            claim_id="live-revocation-claim",
+            decision="granted",
+            arbitration_id="live-revocation-arbitration",
+            configuration_revision=1,
+            device_id="puck-kitchen",
+            room_id="kitchen",
+            wake_mapping_id="hey-hermes",
+            profile_id="family",
+        ),
+        credential_generation=None,
+    )
+    if retirement_write_fails:
+        store._connection.execute("""
+            CREATE TRIGGER fail_retirement BEFORE UPDATE ON conversation_claims
+            WHEN NEW.close_reason = 'upstream_lost'
+            BEGIN SELECT RAISE(ABORT, 'simulated persistence failure'); END
+        """)
     socket = FailingGatewaySocket()
-    bridge = _make_bridge(FakeSocketFactory(socket))
+
+    def make_bridge():
+        return HomeBridge(
+            gateway_url="wss://hermes.example/api/ws",
+            hermes_token="server-hermes-secret",
+            device_authenticator=StaticCredentialAuthenticator(
+                admin_token="admin-secret",
+                device_credentials={"device-secret": "puck-kitchen"},
+            ),
+            conversation_resolver=store.resolve,
+            gateway_socket_factory=FakeSocketFactory(socket),
+            session_persistor=store.persist_session,
+            conversation_closer=store.close_claim,
+        )
+
+    bridge = make_bridge()
     peer = Peer()
     headers = {"Authorization": "Device device-secret"}
     handle = "opaque-conversation-1"
@@ -5880,7 +5937,23 @@ def test_real_bridge_upstream_loss_parks_endpoint_and_retains_original_uncertain
             {"conversation_handle": handle, "text": "Only once"},
             "prompt",
         )["result"]
-        original_turn = result["turn_id"]
+        assert result["turn_id"]
+        if complete_turn:
+            socket.incoming.append(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "event",
+                    "params": {
+                        "type": "message.complete",
+                        "session_id": "runtime-1",
+                        "payload": {"status": "completed"},
+                    },
+                }
+            )
+            deadline = time.monotonic() + 2
+            while endpoint.has_active_turn and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert not endpoint.has_active_turn
         runner = Thread(target=endpoint.run, kwargs={"park_on_disconnect": True})
         runner.start()
         socket.fail.set()
@@ -5888,15 +5961,44 @@ def test_real_bridge_upstream_loss_parks_endpoint_and_retains_original_uncertain
         runner.join(timeout=2)
         assert not runner.is_alive()
         assert peer.close_code == 1011
-        assert endpoint.has_recoverable_state
-        assert bridge.state == "turn_uncertain"
-        replacement = Peer()
-        endpoint.adopt(replacement, headers=headers)
-        recovered = request(
-            "conversation.reconnect", {"conversation_handle": handle}, "reconnect"
-        )["result"]
-        assert recovered["unresolved_turn"]["turn_id"] == original_turn
-        assert recovered["unresolved_turn"]["status"] == "uncertain"
+        assert not endpoint.has_recoverable_state
+        assert bridge.state == "disconnected"
+        assert store.resolve(handle, "puck-kitchen") is None
+        row = store._connection.execute(
+            "SELECT status, close_reason, session_id FROM conversation_claims WHERE handle = ?",
+            (handle,),
+        ).fetchone()
+        if retirement_write_fails:
+            assert row[0] == "active"
+        else:
+            assert tuple(row) == ("closed", "upstream_lost", "stored-1")
+        for attempt in range(5):
+            replacement = BridgeEndpoint(Peer(), make_bridge(), headers=headers)
+            try:
+                recovered = replacement.handle_message(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "schema": 1,
+                            "id": attempt,
+                            "method": "conversation.reconnect",
+                            "params": {"conversation_handle": handle},
+                        }
+                    )
+                )["result"]
+                assert recovered["status"] == "unavailable"
+                assert recovered["reason"] == "stale_conversation"
+                assert not replacement.has_recoverable_state
+            finally:
+                replacement.close()
+        if retirement_write_fails:
+            store._connection.execute("DROP TRIGGER fail_retirement")
+            assert store.resolve(handle, "puck-kitchen") is None
+            row = store._connection.execute(
+                "SELECT status, close_reason, session_id FROM conversation_claims WHERE handle = ?",
+                (handle,),
+            ).fetchone()
+            assert tuple(row) == ("closed", "upstream_lost", "stored-1")
         assert sum(frame.get("method") == "prompt.submit" for frame in socket.sent) == 1
     finally:
         socket.fail.set()

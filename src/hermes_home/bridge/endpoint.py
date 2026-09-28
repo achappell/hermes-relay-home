@@ -12,6 +12,7 @@ import uuid
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Protocol
 
 from hermes_home.bridge.choice_authority import (
@@ -287,6 +288,8 @@ class BridgeEndpoint:
         self._stop = threading.Event()
         self._readiness_changed = threading.Event()
         self._closed = False
+        self._retiring_upstream = False
+        self._upstream_failed = False
         self._adopted_transport = False
         self._adoption_ack_pending = False
         self._adoption_acknowledged = False
@@ -333,9 +336,13 @@ class BridgeEndpoint:
     def has_recoverable_state(self) -> bool:
         with self._state_lock:
             return (
-                self._active_turn_id is not None
-                or self._submitting_turn
-                or bool(self._parked_events)
+                not self._closed
+                and not self._stop.is_set()
+                and (
+                    self._active_turn_id is not None
+                    or self._submitting_turn
+                    or bool(self._parked_events)
+                )
             )
 
     @property
@@ -390,7 +397,7 @@ class BridgeEndpoint:
         """Attach a candidate reconnect; buffered events wait for reauthorization."""
 
         with self._send_lock:
-            if self._closed or self._connection is not None:
+            if self._closed or self._stop.is_set() or self._connection is not None:
                 raise RuntimeError("Home bridge endpoint is not parked")
             self._connection = connection
             self._headers = dict(headers)
@@ -465,7 +472,7 @@ class BridgeEndpoint:
     def close(self) -> None:
         """Close the bridge and socket exactly once."""
         with self._state_lock:
-            if self._closed:
+            if self._closed or self._retiring_upstream:
                 return
             self._closed = True
             self._ready = False
@@ -484,7 +491,10 @@ class BridgeEndpoint:
                 bridge.close()
             except Exception as error:  # noqa: BLE001 - cleanup must continue
                 del error
-        self._close_connection()
+        self._close_connection(
+            code=1011 if self._upstream_failed else 1000,
+            reason="upstream unavailable" if self._upstream_failed else "",
+        )
         current = threading.current_thread()
         for thread in (event_thread, audio_thread):
             if thread is not None and thread is not current:
@@ -1065,6 +1075,8 @@ class BridgeEndpoint:
         result_status = payload.get("status")
         if result_status == "ready":
             with self._state_lock:
+                if self._stop.is_set():
+                    return self._unavailable_result(handle, "stale_conversation")
                 if self._bound_handle != handle:
                     self._ready = False
                     self._availability_reason = "conversation_mismatch"
@@ -1162,6 +1174,37 @@ class BridgeEndpoint:
             self._event_thread = thread
             thread.start()
 
+    def _retire_failed_upstream(self, error: Exception) -> None:
+        """Retire a dead upstream before another transport can adopt it."""
+        with self._state_lock:
+            self._conversation_closing = True
+            self._retiring_upstream = True
+            self._upstream_failed = True
+            bridge = self._bridge
+            handle = self._bound_handle
+            self._ready = False
+            self._stop.set()
+        LOGGER.warning(
+            "Home upstream unavailable: timestamp=%s claim=%s error=%s cause=%s detail=%s",
+            datetime.now(UTC).isoformat(),
+            (handle or "")[:8],
+            *safe_failure_diagnostic(error),
+        )
+        self._mark_unavailable("stale_conversation")
+        try:
+            retire = getattr(bridge, "retire_failed_upstream", None)
+            if callable(retire):
+                retire()
+        except Exception as failure:  # noqa: BLE001 - transport cleanup must finish
+            LOGGER.warning(
+                "Home upstream claim retirement failed: error=%s",
+                type(failure).__name__,
+            )
+        finally:
+            with self._state_lock:
+                self._retiring_upstream = False
+            self.close()
+
     def _event_loop(self) -> None:
         while not self._stop.is_set():
             with self._state_lock:
@@ -1174,7 +1217,7 @@ class BridgeEndpoint:
                 event = bridge.next_event()
             except BridgeProtocolError as error:
                 with self._state_lock:
-                    if self._conversation_closing:
+                    if self._conversation_closing or self._stop.is_set():
                         continue
                 # Messages are fixed, content-free validation text.
                 LOGGER.warning(
@@ -1183,49 +1226,24 @@ class BridgeEndpoint:
                 self._mark_unavailable("protocol_error")
                 self.close()
                 return
-            except (BridgeTimeoutError, TimeoutError) as error:
+            except (
+                BridgeTimeoutError,
+                TimeoutError,
+                BridgeTransportError,
+                ConnectionError,
+                EOFError,
+                OSError,
+                RuntimeError,
+            ) as error:
                 with self._state_lock:
-                    if self._conversation_closing:
+                    if self._conversation_closing or self._stop.is_set():
                         continue
-                # The Standard adapter consumes healthy idle polls itself.
-                # A timeout escaping that adapter is an unavailable transport.
-                LOGGER.warning(
-                    "Home upstream unavailable: error=%s cause=%s detail=%s",
-                    *safe_failure_diagnostic(error),
-                )
-                self._mark_unavailable("transport_timeout")
-                self._close_connection(code=1011, reason="upstream transport timeout")
-                continue
-            except (BridgeTransportError, ConnectionError, EOFError, OSError) as error:
-                with self._state_lock:
-                    if self._conversation_closing:
-                        continue
-                LOGGER.warning(
-                    "Home upstream unavailable: error=%s cause=%s detail=%s",
-                    *safe_failure_diagnostic(error),
-                )
-                self._mark_unavailable("transport_unavailable")
-                # Wake the endpoint's receive loop rather than leaving the UI
-                # waiting forever. Keep the bridge's uncertain turn for the
-                # authenticated reconnect response; close() would erase it.
-                self._close_connection(
-                    code=1011, reason="upstream transport unavailable"
-                )
-                continue
-            except RuntimeError as error:
-                with self._state_lock:
-                    if self._conversation_closing:
-                        continue
-                LOGGER.warning(
-                    "Home upstream unavailable: error=%s cause=%s detail=%s",
-                    *safe_failure_diagnostic(error),
-                )
-                self._mark_unavailable("hermes_unavailable")
-                self._close_connection(code=1011, reason="upstream unavailable")
-                continue
+                    self._retiring_upstream = True
+                self._retire_failed_upstream(error)
+                return
             except Exception as error:  # noqa: BLE001 - fail closed on bridge defects
                 with self._state_lock:
-                    if self._conversation_closing:
+                    if self._conversation_closing or self._stop.is_set():
                         continue
                 LOGGER.warning(
                     "closing Home bridge connection: bridge event failed: %s",

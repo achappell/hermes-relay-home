@@ -3663,19 +3663,15 @@ def test_interrupted_turn_ends_its_audio_instead_of_reporting_a_failure() -> Non
         RuntimeError("upstream unavailable"),
     ],
 )
-def test_upstream_event_loss_closes_peer_but_preserves_uncertain_turn(failure):
-    class UncertainBridge(FakeBridge):
-        def reauthorize(self, *, headers):
-            self.reauthorize_calls.append(dict(headers))
-            return BridgeStatus(
-                "unavailable",
-                HANDLE,
-                "stale_conversation",
-                unresolved_turn=BridgeTurn("home-turn-1", HANDLE, "uncertain"),
-            )
+def test_upstream_event_loss_retires_bridge_and_prevents_adoption(failure, caplog):
+    class RetiringBridge(FakeBridge):
+        retire_calls = 0
+
+        def retire_failed_upstream(self):
+            self.retire_calls += 1
 
     connection = FakeConnection()
-    bridge = UncertainBridge()
+    bridge = RetiringBridge()
     endpoint = BridgeEndpoint(connection, bridge, headers=HEADERS, route=ROUTE)
     try:
         _open(endpoint)
@@ -3690,18 +3686,76 @@ def test_upstream_event_loss_closes_peer_but_preserves_uncertain_turn(failure):
         bridge.events.append(failure)
         bridge.event_ready.set()
         _wait_for(lambda: connection.closed)
-        assert bridge.close_calls == 0
-        assert endpoint.has_recoverable_state
-        endpoint.adopt(FakeConnection(), headers=HEADERS)
-        response = _send(
-            endpoint,
-            jsonrpc="2.0",
-            schema=1,
-            id="reconnect-1",
-            method="conversation.reconnect",
-            params={"conversation_handle": HANDLE},
-        )
-        assert response["result"]["unresolved_turn"]["status"] == "uncertain"
+        assert bridge.close_calls == 1
+        assert bridge.retire_calls == 1
+        assert not endpoint.has_recoverable_state
+        for _ in range(5):
+            with pytest.raises(RuntimeError, match="not parked"):
+                endpoint.adopt(FakeConnection(), headers=HEADERS)
+        assert bridge.reauthorize_calls == []
+        assert bridge.reconnect_calls == []
         assert bridge.prompt_calls == ["Once only"]
+        assert "timestamp=" in caplog.text
+        assert "claim=opaque-h" in caplog.text
+        assert "endpoint-secret" not in caplog.text
+        endpoint._event_thread.join(timeout=1)
+        assert not endpoint._event_thread.is_alive()
     finally:
         endpoint.close()
+
+
+def test_concurrent_cleanup_waits_for_upstream_claim_retirement():
+    retiring = threading.Event()
+    release = threading.Event()
+
+    class BlockingRetirementBridge(FakeBridge):
+        def retire_failed_upstream(self):
+            retiring.set()
+            assert release.wait(2)
+            assert self.close_calls == 0
+
+    bridge = BlockingRetirementBridge()
+    endpoint = BridgeEndpoint(FakeConnection(), bridge, headers=HEADERS)
+    worker = threading.Thread(
+        target=endpoint._retire_failed_upstream, args=(ConnectionError(),)
+    )
+    worker.start()
+    try:
+        assert retiring.wait(1)
+        endpoint.close()
+        assert bridge.close_calls == 0
+        assert not endpoint.has_recoverable_state
+    finally:
+        release.set()
+        worker.join(timeout=2)
+        endpoint.close()
+    assert not worker.is_alive()
+    assert bridge.close_calls == 1
+
+
+def test_event_failure_claims_retirement_before_releasing_state_lock(monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+    bridge = FakeBridge()
+    endpoint = BridgeEndpoint(FakeConnection(), bridge, headers=HEADERS)
+    original = endpoint._retire_failed_upstream
+
+    def delayed_retire(error):
+        entered.set()
+        assert release.wait(2)
+        original(error)
+
+    monkeypatch.setattr(endpoint, "_retire_failed_upstream", delayed_retire)
+    try:
+        _open(endpoint)
+        bridge.events.append(ConnectionError("lost"))
+        bridge.event_ready.set()
+        assert entered.wait(1)
+        endpoint.close()
+        assert bridge.close_calls == 0
+    finally:
+        release.set()
+        if endpoint._event_thread is not None:
+            endpoint._event_thread.join(timeout=2)
+        endpoint.close()
+    assert bridge.close_calls == 1

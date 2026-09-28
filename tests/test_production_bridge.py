@@ -667,3 +667,40 @@ def test_production_factory_rejects_unsafe_standard_target(
             device_authenticator=object(),
         )
     store.close()
+
+
+@pytest.mark.parametrize("device_id", ["pixel-6a", "wrong-device"])
+def test_failed_upstream_retirement_read_is_device_bound_and_retried(
+    tmp_path, device_id
+):
+    store = ConversationGrantStore(
+        tmp_path / "home.sqlite3", configuration=_configuration
+    )
+    handle = store.create_from_decision(
+        _decision("claim-retire"), credential_generation=2
+    )
+    connection = store._connection
+
+    class UnreadableConnection:
+        def execute(self, *_args):
+            raise sqlite3.OperationalError("simulated read failure")
+
+    try:
+        store._connection = UnreadableConnection()
+        with pytest.raises(OSError, match="cannot read"):
+            store.close_claim(handle, device_id, reason="upstream_lost")
+        if device_id == "pixel-6a":
+            assert store.resolve(handle, device_id) is None
+        store._connection = connection
+        if device_id == "pixel-6a":
+            assert store.resolve(handle, device_id) is None
+            assert connection.execute(
+                "SELECT close_reason FROM conversation_claims WHERE handle = ?",
+                (handle,),
+            ).fetchone() == ("upstream_lost",)
+        else:
+            assert store.resolve(handle, device_id) is None
+            assert store.resolve(handle, "pixel-6a") is not None
+    finally:
+        store._connection = connection
+        store.close()

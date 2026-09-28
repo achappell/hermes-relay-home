@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import queue
 import threading
 import time
 from collections.abc import Mapping
@@ -18,6 +19,7 @@ from hermes_home.api.bridge_server import (
 )
 from hermes_home.bridge import (
     AudioFrame,
+    BridgeEvent,
     BridgeStatus,
     BridgeTransportError,
     BridgeTurn,
@@ -432,3 +434,158 @@ def test_bridge_server_rejects_missing_or_ambiguous_device_auth(headers) -> None
         thread.join(timeout=2)
 
     assert created == []
+
+
+@pytest.mark.parametrize("idle", [False, True])
+def test_parked_upstream_failure_is_terminal_through_live_server(monkeypatch, idle):
+    from hermes_home.api.bridge_server import _EndpointParkingLot
+
+    parked = threading.Event()
+    retired = threading.Event()
+    parked_endpoints = []
+    original_park = _EndpointParkingLot.park
+
+    def observe_park(self, endpoint, **kwargs):
+        original_park(self, endpoint, **kwargs)
+        parked_endpoints.append(endpoint)
+        parked.set()
+
+    monkeypatch.setattr(_EndpointParkingLot, "park", observe_park)
+    events = queue.Queue()
+    prompt_calls = []
+    bridges = []
+
+    class FailingBridge(ListenerBridge):
+        def open(self, *, headers, conversation_handle):
+            if retired.is_set():
+                return BridgeStatus(
+                    "unavailable", conversation_handle, "stale_conversation"
+                )
+            return super().open(
+                headers=headers, conversation_handle=conversation_handle
+            )
+
+        def submit_prompt(self, text):
+            prompt_calls.append(text)
+            return BridgeTurn("turn-1", HANDLE)
+
+        def next_event(self):
+            while not self.closed.is_set():
+                try:
+                    event = events.get(timeout=0.01)
+                except queue.Empty:
+                    continue
+                if isinstance(event, Exception):
+                    raise event
+                return event
+            raise ConnectionError("closed")
+
+        def next_audio(self, *, timeout=None):
+            return AudioFrame("unavailable", turn_id="turn-1")
+
+        def retire_failed_upstream(self):
+            retired.set()
+
+    def factory():
+        bridge = FailingBridge()
+        bridges.append(bridge)
+        return bridge
+
+    def request(client, method, **params):
+        client.send(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "schema": 1,
+                    "id": method,
+                    "method": method,
+                    "params": {"conversation_handle": HANDLE, **params},
+                }
+            )
+        )
+        return json.loads(client.recv(timeout=2))["result"]
+
+    server = create_bridge_server(
+        bridge_factory=factory, host="127.0.0.1", port=0, reconnect_grace_seconds=10
+    )
+    thread = _start(server)
+    url = f"ws://127.0.0.1:{server.socket.getsockname()[1]}{BRIDGE_WS_PATH}"
+    headers = {"Authorization": "Device endpoint-secret"}
+    try:
+        with connect(url, additional_headers=headers) as client:
+            assert request(client, "conversation.open")["status"] == "ready"
+            assert (
+                request(client, "prompt.submit", text="Only once")["status"]
+                == "submitted"
+            )
+        assert parked.wait(2)
+        if idle:
+            events.put(
+                BridgeEvent(
+                    conversation_handle=HANDLE,
+                    type="message.complete",
+                    turn_id="turn-1",
+                    payload={"status": "completed"},
+                )
+            )
+            deadline = time.monotonic() + 2
+            while parked_endpoints[0].has_active_turn and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert not parked_endpoints[0].has_active_turn
+        events.put(BridgeTransportError("dead while parked"))
+        assert retired.wait(2)
+        assert bridges[0].closed.wait(2)
+        for _ in range(5):
+            with connect(url, additional_headers=headers) as client:
+                result = request(client, "conversation.reconnect")
+                assert result["status"] == "unavailable"
+                assert result["reason"] == "stale_conversation"
+        assert len(parked_endpoints) == 1
+        assert prompt_calls == ["Only once"]
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+        for bridge in bridges:
+            bridge.close()
+
+
+def test_healthy_idle_background_disconnect_uses_fresh_bridge_on_return(caplog):
+    bridges = []
+
+    class IdleBridge(ListenerBridge):
+        retired = False
+
+        def retire_failed_upstream(self):
+            self.retired = True
+
+    def factory():
+        bridge = IdleBridge()
+        bridges.append(bridge)
+        return bridge
+
+    server = create_bridge_server(bridge_factory=factory, host="127.0.0.1", port=0)
+    thread = _start(server)
+    url = f"ws://127.0.0.1:{server.socket.getsockname()[1]}{BRIDGE_WS_PATH}"
+    headers = {"Authorization": "Device endpoint-secret"}
+    try:
+        for method in ("conversation.open", "conversation.reconnect"):
+            with connect(url, additional_headers=headers) as client:
+                client.send(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "schema": 1,
+                            "id": method,
+                            "method": method,
+                            "params": {"conversation_handle": HANDLE},
+                        }
+                    )
+                )
+                assert json.loads(client.recv(timeout=2))["result"]["status"] == "ready"
+            assert bridges[-1].closed.wait(2)
+        assert len(bridges) == 2
+        assert all(not bridge.retired for bridge in bridges)
+        assert "Home upstream unavailable" not in caplog.text
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
