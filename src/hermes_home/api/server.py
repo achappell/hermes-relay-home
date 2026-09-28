@@ -10,6 +10,7 @@ from hermes_home.api.application import (
     HomeApplication,
     HTTPResponse,
 )
+from hermes_home.observability.client_reports import MAX_BODY
 
 
 class _HomeRequestHandler(BaseHTTPRequestHandler):
@@ -31,7 +32,10 @@ class _HomeRequestHandler(BaseHTTPRequestHandler):
             content_length = int(content_length_header)
         except TypeError, ValueError:
             content_length = -1
-        if content_length < 0 or content_length > MAX_REQUEST_BODY_BYTES:
+        body_limit = (
+            MAX_BODY if path == "/api/v1/client-diagnostics" else MAX_REQUEST_BODY_BYTES
+        )
+        if content_length < 0 or content_length > body_limit:
             self.close_connection = True
             response = HTTPResponse(
                 400,

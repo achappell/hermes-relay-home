@@ -138,6 +138,13 @@ fieldset.profiles { border: 0; padding: 8px 0; margin: 0; }
       <p class="muted" id="no-devices">No devices are paired yet.</p>
       <div id="devices"></div>
     </section>
+    <section>
+      <h2>Connection reports</h2>
+      <p class="muted">Reports from devices with automatic diagnostics enabled. No conversations or audio. Kept for seven days.</p>
+      <button id="load-reports" type="button">Refresh reports</button>
+      <div id="client-reports" aria-live="polite"></div>
+      <details><summary>Recent Home events</summary><div id="home-events"></div></details>
+    </section>
     <p class="error" id="app-error" role="alert"></p>
   </div>
 </main>
@@ -145,7 +152,7 @@ fieldset.profiles { border: 0; padding: 8px 0; margin: 0; }
 (() => {
   const $ = (id) => document.getElementById(id);
   let state = null, offerExpires = 0, poll = null, clockSkew = 0;
-  let copyFeedbackTimer = null;
+  let copyFeedbackTimer = null, reportReviewGeneration = 0;
   // Profile choices survive the 2-second refresh, keyed by request.
   const choicesByRequest = new Map();
 
@@ -237,6 +244,7 @@ fieldset.profiles { border: 0; padding: 8px 0; margin: 0; }
     $("app").hidden = !signedIn;
     if (signedIn && !poll) { refresh(); poll = setInterval(refresh, 2000); }
     if (!signedIn && poll) { clearInterval(poll); poll = null; }
+    if (!signedIn) { reportReviewGeneration += 1; $("client-reports").replaceChildren(); $("home-events").replaceChildren(); }
   }
 
   function fail(error) {
@@ -369,6 +377,33 @@ fieldset.profiles { border: 0; padding: 8px 0; margin: 0; }
     catch (error) { $("signin-error").textContent = error.status === 401 ? "That token was not accepted." : "Sign-in failed: " + error.message; }
   });
   $("signout").addEventListener("click", async () => { try { await api("/pair/api/logout", {}); } catch (error) {} showApp(false); });
+  $("load-reports").addEventListener("click", async () => {
+    const button = $("load-reports"); button.disabled = true;
+    const generation = reportReviewGeneration;
+    try {
+      const data = await api("/pair/api/client-diagnostics", {});
+      if (generation !== reportReviewGeneration) return;
+      const reports = $("client-reports"); reports.replaceChildren();
+      if (!data.reports.length) reports.append(el("p", "No connection reports yet.", "muted"));
+      for (const item of data.reports) {
+        const report = item.report;
+        const device = (state?.devices || []).find((d) => d.device_id === item.device_id);
+        const detail = el("details", undefined, "item");
+        detail.append(el("summary", (device?.label || item.device_id) + " · " + new Date(report.created_at * 1000).toLocaleString()));
+        detail.append(el("p", report.platform + " " + report.os_version + " · " + report.model + " · app " + report.app_version + " (" + report.build + ")", "muted"));
+        for (const event of report.events) {
+          detail.append(el("div", new Date(event.time * 1000).toLocaleString() + " · " + event.name + (event.phase ? " · " + event.phase : "") + (event.uncertain === true ? " · outcome uncertain" : "") + (event.code ? " · " + event.code : "") + (event.duration_ms !== undefined ? " · " + event.duration_ms + " ms" : "") + " · launch " + event.launch_id.slice(0, 8)));
+        }
+        reports.append(detail);
+      }
+      const home = $("home-events"); home.replaceChildren();
+      if (!data.home_events.length) home.append(el("p", "No recent Home events.", "muted"));
+      for (const event of data.home_events) {
+        home.append(el("div", new Date(event.occurred_at * 1000).toLocaleString() + " · " + event.phase + " · " + event.outcome + (event.failure_code ? " · " + event.failure_code : "")));
+      }
+    } catch (error) { fail(error); }
+    finally { button.disabled = false; }
+  });
   $("copy-link").addEventListener("click", copyPairingLink);
   async function createOffer(profiles) {
     try {

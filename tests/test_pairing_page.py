@@ -404,3 +404,83 @@ def test_page_sessions_expire_and_the_oldest_is_evicted() -> None:
     assert surface._signed_in({"Cookie": "hermes_home_pair=session-1"})
     clock[0] += pairing.SESSION_SECONDS
     assert not surface._signed_in({"Cookie": "hermes_home_pair=session-1"})
+
+
+def test_connection_reports_require_signed_in_same_origin_page(page):
+    path = "/pair/api/client-diagnostics"
+    assert page.call("POST", path, {}).status == 401
+    page.sign_in()
+    assert page.call("POST", path, {}, origin="https://evil.example").status == 403
+    response = page.call("POST", path, {})
+    assert response.status == 200
+    assert response.body["reports"] == []
+    assert "home_events" in response.body
+    assert dict(response.headers)["Cache-Control"] == "no-store"
+
+
+def test_paired_device_report_uses_credential_identity_and_revocation(page):
+    import time
+    import uuid
+
+    page.sign_in()
+    paired = _paired(page, ["spark"])
+    now = time.time()
+    report = {
+        "schema": 1,
+        "report_id": str(uuid.uuid4()),
+        "created_at": now,
+        "app_version": "0.5.0",
+        "build": "1",
+        "platform": "ios",
+        "os_version": "26.6.2",
+        "model": "iPhone18,1",
+        "events": [
+            {"time": now, "name": "connection_lost", "launch_id": str(uuid.uuid4())}
+        ],
+    }
+    response = page.call(
+        "POST",
+        "/api/v1/client-diagnostics",
+        report,
+        device=paired["credential"],
+        cookie=False,
+    )
+    assert response.status == 200
+    view = page.call("POST", "/pair/api/client-diagnostics", {})
+    assert view.body["reports"][0]["device_id"] == paired["device_id"]
+    assert view.body["reports"][0]["report"]["report_id"] == report["report_id"]
+    assert (
+        page.call(
+            "POST",
+            "/pair/api/client-diagnostics",
+            {},
+            device=paired["credential"],
+            cookie=False,
+        ).status
+        == 401
+    )
+    revoked = page.call("POST", f"/pair/api/devices/{paired['device_id']}/revoke", {})
+    assert revoked.status == 200
+    assert (
+        page.call(
+            "POST",
+            "/api/v1/client-diagnostics",
+            report,
+            device=paired["credential"],
+            cookie=False,
+        ).status
+        == 401
+    )
+
+
+def test_connection_report_review_reports_storage_failure(page):
+    import sqlite3
+
+    def unavailable():
+        raise sqlite3.OperationalError("fixture unavailable")
+
+    page.app._pairing._client_reports = unavailable
+    page.sign_in()
+    response = page.call("POST", "/pair/api/client-diagnostics", {})
+    assert response.status == 503
+    assert "fixture unavailable" not in str(response.body)

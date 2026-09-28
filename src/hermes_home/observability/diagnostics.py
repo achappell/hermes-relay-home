@@ -454,6 +454,8 @@ class DiagnosticsStore(Protocol):
         before: float,
     ) -> tuple[DiagnosticEvent, ...]: ...
 
+    def recent_events(self, *, before: float) -> tuple[DiagnosticEvent, ...]: ...
+
     def pending_events(
         self, *, limit: int, before: float
     ) -> tuple[DiagnosticEvent, ...]: ...
@@ -563,6 +565,15 @@ class InMemoryDiagnosticsStore:
                     ),
                     key=lambda event: event.occurred_at,
                 )
+            )
+
+    def recent_events(self, *, before: float) -> tuple[DiagnosticEvent, ...]:
+        with self._lock:
+            self._purge_expired(before)
+            return tuple(
+                sorted(self._events, key=lambda event: event.occurred_at, reverse=True)[
+                    :100
+                ]
             )
 
     def pending_events(
@@ -759,6 +770,10 @@ class DiagnosticsRecorder:
                 self._metric_inc_safely("hermes_home_diagnostics_events_dropped_total")
             self._refresh_status_metrics_safely()
         return True
+
+    def recent(self) -> tuple[DiagnosticEvent, ...]:
+        with self._lock:
+            return self._store.recent_events(before=self._clock_now())
 
     def timeline(self, correlation_id: str) -> tuple[DiagnosticEvent, ...]:
         _require_opaque_id(correlation_id, "correlation_id", prefix="corr-")

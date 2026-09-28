@@ -201,6 +201,17 @@ class SQLiteDiagnosticsStore:
                 "diagnostics database cannot be updated"
             ) from error
 
+    def recent_events(self, *, before: float) -> tuple[DiagnosticEvent, ...]:
+        self.purge_expired(before=before)
+        try:
+            with self._lock:
+                rows = self._connection.execute(
+                    "SELECT payload FROM diagnostic_events ORDER BY occurred_at DESC, rowid DESC LIMIT 100"
+                ).fetchall()
+        except sqlite3.Error as error:
+            raise DiagnosticStoreError("diagnostics database cannot be read") from error
+        return tuple(_decode_event(row[0]) for row in rows)
+
     def events(
         self,
         *,

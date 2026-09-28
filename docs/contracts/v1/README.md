@@ -528,3 +528,13 @@ Initial codes are:
 - `admin_local_only` — an admin-token route was called through a proxy; use
   the pairing page or loopback;
 - `service_unavailable` — the service cannot safely answer the request.
+
+## Automatic client connection reports
+
+`POST /api/v1/client-diagnostics` accepts `Authorization: Device <credential>` from an active paired device. The device identity is derived from that credential, never from the body. This endpoint does not accept an admin token and exposes no device-readable report route. The client must obtain explicit per-Home opt-in before using it.
+
+Schema 1 has exactly these fields: `schema` (1), `report_id` (UUID), `created_at` (Unix seconds), `app_version`, `build`, `platform` (`ios`/`macos`), `os_version`, `model`, and `events`. Version values are numeric dot-separated components; model values are Apple model identifiers, simulator architecture, or `unknown`. A report contains 1–100 events, each with Unix `time`, UUID `launch_id`, and `name`: `launch`, `active`, `inactive`, `background`, `connection_ready`, `connection_failed`, `connection_lost`, `request_started`, `request_completed`, or `request_failed`. Optional fields are an allowlisted `code`, integer `duration_ms` (0–86,400,000), `phase` (`open`, `reconnect`, `submission`, `lifecycle`), and Boolean `uncertain`. Unknown fields, arbitrary text, prompts, audio, credentials, and conversation handles are rejected. Client timestamps must fall within the last seven days or at most five minutes ahead of Home.
+
+Success is HTTP 200 with `{"schema":1,"report_id":"<same UUID>"}`. Retrying the same report ID for the same authenticated device is idempotent, including after a restart. Failures use the usual error envelope: 400 invalid payload, 401 unauthorized, 429 rate limited, or 503 storage unavailable. The client retains a report until it receives the matching acknowledgment and retries at a bounded foreground cadence; it never retries a conversation as part of reporting.
+
+Requests are capped at 64 KiB. Home accepts at most one new report per device per 30 seconds, stores at most 100 reports per device and 1,000 total, and expires reports seven days after receipt (pruned on read/write). The signed-in `/pair` page reviews the latest 50 reports through same-origin `POST /pair/api/client-diagnostics` and displays the latest 100 safe Home events alongside them. Times can be compared, but this slice does not establish per-turn correlation between client reports and Home events. Automatic connection reports are separate from content-bearing incident capture.

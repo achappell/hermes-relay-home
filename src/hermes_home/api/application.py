@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 from collections.abc import Callable, Iterable, Mapping
 from threading import RLock
@@ -48,6 +49,10 @@ from hermes_home.domain.watch import (
     activity_summary,
     serialize_watch_route,
 )
+from hermes_home.observability.client_reports import (
+    ClientReportStore,
+    ReportRateLimited,
+)
 from hermes_home.observability.diagnostics import (
     DiagnosticEvent,
     DiagnosticsRecorder,
@@ -88,6 +93,7 @@ class HomeApplication:
         metrics: MetricsRegistry | None = None,
         diagnostics: DiagnosticsRecorder | None = None,
         session_directory=None,
+        client_reports: ClientReportStore | None = None,
     ) -> None:
         self._configuration_store = configuration_store
         self._session_directory = session_directory
@@ -113,11 +119,13 @@ class HomeApplication:
             )
         self._clock = clock
         self._sleeper = sleeper
+        self._client_reports = client_reports or ClientReportStore()
         self._pairing = PairingSurface(
             authenticate_admin=self._authenticator.authenticate_admin,
             credential_service=credential_service,
             configuration=configuration_store.read,
             close_grant_claims=self._close_grant_claims,
+            client_reports=self._review_client_diagnostics,
         )
         self._metrics = metrics or MetricsRegistry()
         self._diagnostics = diagnostics or DiagnosticsRecorder(
@@ -200,6 +208,8 @@ class HomeApplication:
             # The signed-in pairing page is the only published admin surface.
             # This only ever denies; it never grants.
             return _error(403, "admin_local_only")
+        if path == "/api/v1/client-diagnostics" and method == "POST":
+            return self._post_client_diagnostics(headers, body)
         if path == "/api/v1/configuration":
             if method == "GET":
                 return self._get_configuration(headers)
@@ -1000,6 +1010,27 @@ class HomeApplication:
             self._metrics.render(),
             content_type="text/plain; version=0.0.4; charset=utf-8",
         )
+
+    def _review_client_diagnostics(self) -> dict:
+        result = self._client_reports.recent()
+        result["home_events"] = [
+            event.to_dict() for event in self._diagnostics.recent()
+        ]
+        return result
+
+    def _post_client_diagnostics(self, headers, body) -> HTTPResponse:
+        device = self._authenticator.authenticate_device(headers)
+        if device is None:
+            return _error(401, "unauthorized")
+        try:
+            report_id = self._client_reports.receive(device, body)
+        except ReportRateLimited:
+            return _error(429, "rate_limited")
+        except ValueError, TypeError, KeyError, OverflowError:
+            return _error(400, "invalid_request")
+        except sqlite3.Error:
+            return _error(503, "service_unavailable")
+        return HTTPResponse(200, {"schema": 1, "report_id": report_id})
 
     def _get_diagnostics_status(
         self,
@@ -1864,7 +1895,11 @@ class HomeApplication:
         started: float,
         response: HTTPResponse | None = None,
     ) -> None:
-        if path == "/metrics" or path.startswith("/api/v1/diagnostics/"):
+        if path in {
+            "/metrics",
+            "/api/v1/client-diagnostics",
+            "/pair/api/client-diagnostics",
+        } or path.startswith("/api/v1/diagnostics/"):
             return
         if 200 <= status < 300:
             outcome = "completed"
