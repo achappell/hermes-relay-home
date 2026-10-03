@@ -428,12 +428,13 @@ receive it is a recorded bootstrap, and every later grant is
 
 `session` is optional: `{"mode": "new"}` (the default), `{"mode":
 "most_recent"}`, or `{"mode": "resume", "session_ref": ...}`. The response adds
-the opaque handle and the chosen session:
+the opaque handle, a `claim_ref` (HOME-NW-18), and the chosen session:
 
 ```json
 {
   "schema": 1,
   "claim_id": "client-01J...",
+  "claim_ref": "cref-3q2_7wK...",
   "decision": "granted",
   "configuration_revision": 13,
   "conversation_handle": "opaque-home-claim-01J...",
@@ -485,6 +486,62 @@ resume that conversation later with `{"mode": "resume", "session_ref": ...}`. A
 new claim has no session until its first accepted turn, so `session_ref` is
 `null` until then. A handle that is not an active client claim of the calling
 device returns `404 not_found`; grant denials match the client-claim route.
+
+### `GET /api/v1/client-claims` (HOME-NW-18)
+
+Device-authenticated, no body. Lists the caller's own active client claims,
+newest first; the count is the count the per-device limit checks.
+
+```json
+{"schema": 1, "max_claims": 8, "claims": [
+  {"claim_ref": "cref-3q2_7wK...", "grant_id": "grant-01J...",
+   "profile_label": "Spark", "session_ref": "sref-01J...",
+   "created_at": 1727398071, "opened_at": 1727398072, "state": "idle"}
+]}
+```
+
+`state` is `connecting` (never opened), `idle`, `replying` (a turn, capture or
+playback in progress), or `waiting_to_reconnect`. A claim waits to reconnect
+from the moment its client socket drops (the endpoint is parked) until it
+reconnects or the store's reconnect grace ends, so a dropped claim can hold its
+slot for up to two grace periods (about 240 s by default). `created_at` and
+`opened_at` are wall-clock seconds; `opened_at` is the first successful open,
+`null` while connecting. `profile_label` is `null` when configuration can't be
+read, and `session_ref` is `null` before the first accepted turn. The list never
+calls Standard, so it carries no titles: join `session_ref` against
+`client-sessions/list` for a title, which may be absent.
+
+### `POST /api/v1/client-claims/close` (HOME-NW-18)
+
+```json
+{"schema": 1, "claim_refs": ["cref-9xk...", "cref-a71..."]}
+```
+
+```json
+{"schema": 1, "results": [
+  {"claim_ref": "cref-9xk...", "result": "closed"},
+  {"claim_ref": "cref-a71...", "result": "not_open"}
+]}
+```
+
+Closes an explicit set of 1–64 unique refs ("Close all others" is every listed
+ref but the current one). `closed` means it was an active client claim of the
+caller and is now closed with reason `client_closed`; `not_open` covers every
+other case, including another device's refs, so repeating a close is safe.
+Invalid bodies get `400 invalid_request`; the routes otherwise share the
+client-claim denials (`401 unauthorized`, `403 client_claim_unavailable`,
+`503 service_unavailable`). Closing keeps the Hermes Session: it stays in
+`client-sessions/list` with `active: false` and can be resumed.
+
+The closed claim's client sees a terminal result: a live socket gets
+`session.interrupt` upstream, becomes unavailable with reason
+`stale_conversation`, and closes with code 1000; a parked or later
+`conversation.open`/`conversation.reconnect` answers `stale_conversation`.
+A close may wait for an in-flight open on that claim; use a timeout of at least
+15 s. Prefer `conversation.close` for the claim a socket is bound to.
+
+A client detects these routes from `claim_ref` in the create response; older
+Home answers both with `404 not_found`.
 
 ### Profile grants
 
