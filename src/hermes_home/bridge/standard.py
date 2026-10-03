@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 import math
 import time
@@ -117,6 +118,13 @@ class BridgeAuthorizationError(RuntimeError):
     def __init__(self, reason: str) -> None:
         self.code = reason
         super().__init__(f"home bridge authorization failed: {reason}")
+
+
+class BridgeClaimClosed(BridgeAuthorizationError):
+    """Home closed the bound claim; the conversation is over for this client."""
+
+    def __init__(self) -> None:
+        super().__init__("stale_conversation")
 
 
 class BridgeProtocolError(BridgeTransportError):
@@ -840,8 +848,9 @@ class HomeBridge:
         self._conversation_disconnector = conversation_disconnector
         self._revocation_registrar = revocation_registrar
         self._revocation_unregistrar = revocation_unregistrar
-        self._revocation_handler = self._on_claim_revoked
         self._registered_handle: str | None = None
+        self._registered_handler: Callable[[str], None] | None = None
+        self._claim_closed = False
         self._request_id_factory = request_id_factory
         self._turn_id_factory = turn_id_factory or (lambda index: f"home-turn-{index}")
         self._audio_timeout = _validate_timeout(audio_timeout, "audio timeout")
@@ -1040,7 +1049,13 @@ class HomeBridge:
         if self._conversation_opener is not None:
             try:
                 self._conversation_opener(grant.handle, grant.device_id)
-            except OSError, RuntimeError, TypeError, ValueError:
+            except ValueError:
+                # The claim closed (or expired) while Standard was opening.
+                self._interrupt_created_session(gateway, runtime_session_id)
+                return self._failed_open(
+                    grant, conversation_handle, "stale_conversation"
+                )
+            except OSError, RuntimeError, TypeError:
                 self._interrupt_created_session(gateway, runtime_session_id)
                 return self._failed_open(
                     grant, conversation_handle, "authorization_unavailable"
@@ -1091,6 +1106,7 @@ class HomeBridge:
             self._audio_pcm_remainder = b""
             self._unresolved_turn = None
             self._last_terminal_event_seq = None
+            self._claim_closed = False
             self._state = "ready"
         if (old_handle, old_device_id) != (conversation_handle, device_id):
             self._mark_disconnected(old_handle, old_device_id)
@@ -1319,7 +1335,11 @@ class HomeBridge:
         if self._conversation_opener is not None:
             try:
                 self._conversation_opener(handle, device_id)
-            except OSError, RuntimeError, TypeError, ValueError:
+            except ValueError:
+                self._interrupt_created_session(gateway, runtime_session_id)
+                self._close_claim(handle, device_id, reason="authorization_revoked")
+                return self._reconnect_failure(handle, "stale_conversation")
+            except OSError, RuntimeError, TypeError:
                 self._interrupt_created_session(gateway, runtime_session_id)
                 self._close_claim(handle, device_id, reason="authorization_revoked")
                 return self._reconnect_failure(handle, "authorization_unavailable")
@@ -1385,6 +1405,8 @@ class HomeBridge:
                 or self._gateway is None
                 or self._runtime_session_id is None
             ):
+                if self._claim_closed:
+                    raise BridgeClaimClosed()
                 raise RuntimeError("home bridge is not ready")
             gateway = self._gateway
             runtime_session_id = self._runtime_session_id
@@ -1569,24 +1591,30 @@ class HomeBridge:
         registrar = self._revocation_registrar
         if registrar is None:
             return True
+        # One handler per handle: a revocation for any other claim must never
+        # tear down this bridge's current conversation.
+        handler = functools.partial(self._on_claim_revoked, handle)
         try:
-            registered = registrar(handle, self._revocation_handler)
+            registered = registrar(handle, handler)
         except Exception:  # noqa: BLE001 - fail closed before opening Standard
             return False
         if not registered:
             return False
         self._registered_handle = handle
+        self._registered_handler = handler
         return True
 
     def _unregister_revocation_handler(self, handle: str) -> None:
         if self._registered_handle != handle:
             return
+        handler = self._registered_handler
         self._registered_handle = None
+        self._registered_handler = None
         unregistrar = self._revocation_unregistrar
-        if unregistrar is None:
+        if unregistrar is None or handler is None:
             return
         try:
-            unregistrar(handle, self._revocation_handler)
+            unregistrar(handle, handler)
         except Exception:
             LOGGER.warning(
                 "could not unregister conversation revocation handler", exc_info=True
@@ -1609,13 +1637,18 @@ class HomeBridge:
             )
         gateway.close()
 
-    def _on_claim_revoked(self, reason: str) -> None:
+    def _on_claim_revoked(self, revoked_handle: str, reason: str) -> None:
         """Stop a live Standard Session after its durable claim is revoked."""
 
         del reason
         with self._lifecycle_lock:
             with self._state_lock:
                 handle = self._conversation_handle
+                if handle != revoked_handle:
+                    return
+                # Set before the gateway closes, so the reader that sees the
+                # close reports a closed claim instead of an upstream failure.
+                self._claim_closed = True
                 gateway = self._gateway
                 runtime_session_id = self._runtime_session_id
             if gateway is not None and runtime_session_id is not None:
@@ -2181,6 +2214,8 @@ class HomeBridge:
                 or self._gateway is None
                 or self._runtime_session_id is None
             ):
+                if self._claim_closed:
+                    raise BridgeClaimClosed()
                 raise RuntimeError("home bridge is not ready")
             gateway = self._gateway
             runtime_session_id = self._runtime_session_id
@@ -2190,11 +2225,15 @@ class HomeBridge:
             try:
                 raw = gateway.next_event(timeout=0.25 if revalidate_claim else None)
             except BridgeProtocolError as error:
+                if self._claim_closed:
+                    raise BridgeClaimClosed() from error
                 self._mark_transport_loss(gateway=gateway)
                 raise BridgeProtocolError(
                     f"home bridge received an invalid event: {error}"
                 ) from error
             except BridgeTimeoutError:
+                if self._claim_closed:
+                    raise BridgeClaimClosed() from None
                 # next_event() has a bounded queue wait. A quiet but still-open
                 # websocket is an idle poll, not evidence that the transport died.
                 if revalidate_claim or gateway.is_open:
@@ -2209,6 +2248,8 @@ class HomeBridge:
                 TypeError,
                 ValueError,
             ) as error:
+                if self._claim_closed:
+                    raise BridgeClaimClosed() from error
                 self._mark_transport_loss(gateway=gateway)
                 raise BridgeTransportError(
                     "home bridge transport is disconnected"

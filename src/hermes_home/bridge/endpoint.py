@@ -295,6 +295,7 @@ class BridgeEndpoint:
         self._close_requested = False
         self._upstream_generation = 0
         self._rebuilding_upstream = False
+        self._claim_closed = False
         self._adopted_transport = False
         self._awaiting_adoption = False
         self._adoption_ack_pending = False
@@ -522,10 +523,13 @@ class BridgeEndpoint:
                 bridge.close()
             except Exception as error:  # noqa: BLE001 - cleanup must continue
                 del error
-        self._close_connection(
-            code=1011 if self._upstream_failed else 1000,
-            reason="upstream unavailable" if self._upstream_failed else "",
-        )
+        if self._upstream_failed:
+            close_code, close_reason = 1011, "upstream unavailable"
+        elif self._claim_closed:
+            close_code, close_reason = 1000, "stale_conversation"
+        else:
+            close_code, close_reason = 1000, ""
+        self._close_connection(code=close_code, reason=close_reason)
         current = threading.current_thread()
         for thread in (event_thread, audio_thread):
             if thread is not None and thread is not current:
@@ -1246,6 +1250,16 @@ class BridgeEndpoint:
             self._availability_reason = _normalize_code(reason)
         self._readiness_changed.set()
 
+    def _end_closed_conversation(self) -> None:
+        """Report a claim Home closed as terminal and close normally (1000)."""
+        with self._state_lock:
+            self._claim_closed = True
+            self._recovery_pending = False
+            self._active_turn_id = None
+            self._audio_turn_id = None
+        self._mark_unavailable("stale_conversation")
+        self.close()
+
     def _start_event_pump(self) -> None:
         with self._state_lock:
             thread = self._event_thread
@@ -1336,6 +1350,24 @@ class BridgeEndpoint:
                 self._mark_unavailable("protocol_error")
                 self.close()
                 return
+            except BridgeAuthorizationError as error:
+                with self._state_lock:
+                    if (
+                        self._conversation_closing
+                        or self._stop.is_set()
+                        or self._rebuilding_upstream
+                        or generation != self._upstream_generation
+                    ):
+                        continue
+                    if error.code != "stale_conversation":
+                        self._retiring_upstream = True
+                if error.code == "stale_conversation":
+                    # Home closed this claim. That is terminal, not an
+                    # upstream failure: no recovery, no upstream log line.
+                    self._end_closed_conversation()
+                    return
+                self._retire_failed_upstream(error)
+                continue
             except (
                 BridgeTimeoutError,
                 TimeoutError,

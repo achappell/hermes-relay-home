@@ -69,6 +69,8 @@ from hermes_home.storage.sqlite import (
 )
 
 MAX_REQUEST_BODY_BYTES = 1_048_576
+# The store's per-device limit tops out at 64, so no device holds more refs.
+MAX_CLOSE_CLAIM_REFS = 64
 
 __all__ = ["MAX_REQUEST_BODY_BYTES", "HTTPResponse", "HomeApplication"]
 
@@ -221,6 +223,10 @@ class HomeApplication:
             return self._post_touch_claim(headers, body)
         elif path == "/api/v1/client-claims" and method == "POST":
             return self._post_client_claim(headers, body)
+        elif path == "/api/v1/client-claims" and method == "GET":
+            return self._get_client_claims(headers)
+        elif path == "/api/v1/client-claims/close" and method == "POST":
+            return self._post_client_claim_close(headers, body)
         elif path == "/api/v1/client-sessions/list" and method == "POST":
             return self._post_client_session_list(headers, body)
         elif path == "/api/v1/client-claims/session" and method == "POST":
@@ -1455,14 +1461,16 @@ class HomeApplication:
             return _error(503, "service_unavailable")
 
         try:
-            conversation_handle = self._conversation_claim_store.create_client_claim(
-                claim_id=claim_id,
-                device_id=context.device_id,
-                grant_id=grant.grant_id,
-                profile_id=grant.profile_id,
-                configuration_revision=configuration_revision,
-                credential_generation=context.generation,
-                session_id=session_id,
+            conversation_handle, claim_ref = (
+                self._conversation_claim_store.create_client_claim(
+                    claim_id=claim_id,
+                    device_id=context.device_id,
+                    grant_id=grant.grant_id,
+                    profile_id=grant.profile_id,
+                    configuration_revision=configuration_revision,
+                    credential_generation=context.generation,
+                    session_id=session_id,
+                )
             )
         except ConversationClaimConflict as error:
             reason = getattr(error, "reason", "conversation_active")
@@ -1512,6 +1520,7 @@ class HomeApplication:
             {
                 "schema": 1,
                 "claim_id": claim_id,
+                "claim_ref": claim_ref,
                 "decision": "granted",
                 "configuration_revision": configuration_revision,
                 "conversation_handle": conversation_handle,
@@ -1560,6 +1569,95 @@ class HomeApplication:
         except OSError, RuntimeError, TypeError, ValueError:
             return _error(503, "service_unavailable")
         return HTTPResponse(200, {"schema": 1, "session_ref": ref})
+
+    def _get_client_claims(self, headers: Mapping[str, str]) -> HTTPResponse:
+        """List the caller's own active client claims (HOME-NW-18).
+
+        Never calls Standard. Labels and session refs degrade to null on
+        failure; only a claim store failure is a 503.
+        """
+        context, failure = self._client_context(headers)
+        if failure is not None:
+            return failure
+        store = self._conversation_claim_store
+        if store is None or not hasattr(store, "client_claims"):
+            return _error(503, "service_unavailable")
+        try:
+            views = store.client_claims(context.device_id)
+            max_claims = store.max_client_claims
+        except OSError, RuntimeError, TypeError, ValueError:
+            return _error(503, "service_unavailable")
+        try:
+            labels = _profile_labels(self._configuration_store.read())
+        except KeyError, OSError, RuntimeError, TypeError, ValueError:
+            labels = None
+        claims: list[dict[str, object]] = []
+        for view in views:
+            session_ref = None
+            if view.session_id is not None and view.grant_id is not None:
+                try:
+                    session_ref = store.session_ref(view.grant_id, view.session_id)
+                except OSError, RuntimeError, TypeError, ValueError:
+                    session_ref = None
+            label = None
+            if labels is not None:
+                label = labels.get(view.profile_id, (None, False))[0]
+            claims.append(
+                {
+                    "claim_ref": view.claim_ref,
+                    "grant_id": view.grant_id,
+                    "profile_label": label,
+                    "session_ref": session_ref,
+                    "created_at": _whole_seconds(view.created_at),
+                    "opened_at": _whole_seconds(view.opened_at),
+                    "state": view.state,
+                }
+            )
+        return HTTPResponse(
+            200, {"schema": 1, "max_claims": max_claims, "claims": claims}
+        )
+
+    def _post_client_claim_close(
+        self,
+        headers: Mapping[str, str],
+        body: bytes | str,
+    ) -> HTTPResponse:
+        """Close an explicit set of the caller's own client claims by ref."""
+        context, failure = self._client_context(headers)
+        if failure is not None:
+            return failure
+        try:
+            request = self._json_request(headers, body, {"schema", "claim_refs"})
+            refs = request["claim_refs"]
+            if (
+                not isinstance(refs, list)
+                or not 1 <= len(refs) <= MAX_CLOSE_CLAIM_REFS
+                or any(type(ref) is not str or not 1 <= len(ref) <= 128 for ref in refs)
+                or len(set(refs)) != len(refs)
+            ):
+                raise ValueError("claim_refs is invalid")
+        except TypeError, ValueError, json.JSONDecodeError:
+            return _error(400, "invalid_request")
+        store = self._conversation_claim_store
+        if store is None or not hasattr(store, "close_client_claims"):
+            return _error(503, "service_unavailable")
+        try:
+            closed = store.close_client_claims(context.device_id, refs)
+        except OSError, RuntimeError, TypeError, ValueError:
+            return _error(503, "service_unavailable")
+        return HTTPResponse(
+            200,
+            {
+                "schema": 1,
+                "results": [
+                    {
+                        "claim_ref": ref,
+                        "result": "closed" if ref in closed else "not_open",
+                    }
+                    for ref in refs
+                ],
+            },
+        )
 
     def _post_client_session_list(
         self,
@@ -1908,6 +2006,8 @@ class HomeApplication:
         else:
             outcome = "rejected"
         failure_code = None if response is None else _response_error_code(response)
+        if failure_code is not None and path.startswith("/api/v1/client-"):
+            failure_code = _DIAGNOSTIC_CODE_ALIASES.get(failure_code, failure_code)
         try:
             self._diagnostics.record(
                 DiagnosticEvent.create(
@@ -2392,6 +2492,23 @@ def _error(status: int, code: str) -> HTTPResponse:
     return HTTPResponse(status, {"schema": 1, "error": {"code": code}})
 
 
+def _whole_seconds(value: float | None) -> int | None:
+    return None if value is None else round(value)
+
+
+# Client-claim denial codes, mapped onto the diagnostics failure-code allowlist.
+_DIAGNOSTIC_CODE_ALIASES = {
+    "client_claim_unavailable": "forbidden",
+    "claim_limit": "claim_denied",
+    "grant_pending": "claim_denied",
+    "session_busy": "claim_denied",
+    "session_unavailable": "not_found",
+    "profile_unavailable": "claim_denied",
+    "stale_configuration": "conflict",
+    "duplicate_claim": "conflict",
+}
+
+
 def _watch_unavailable(
     reason: str,
     target: Mapping[str, object],
@@ -2512,6 +2629,7 @@ def _metric_route(path: str) -> str:
         "/api/v1/client-claims": "client_claims",
         "/api/v1/client-sessions/list": "client_sessions",
         "/api/v1/client-claims/session": "client_sessions",
+        "/api/v1/client-claims/close": "client_claim_close",
         "/api/v1/devices": "device_configuration",
         "/metrics": "metrics",
         "/api/v1/diagnostics/status": "diagnostics_status",

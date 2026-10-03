@@ -49,7 +49,14 @@ class FakeDirectory:
 
 
 class Home:
-    def __init__(self, tmp_path) -> None:
+    def __init__(
+        self,
+        tmp_path,
+        *,
+        claims_per_device: int = 2,
+        credential_clock=None,
+        **store_kwargs,
+    ) -> None:
         ids = itertools.count(1)
         tokens = itertools.count(1)
         handles = itertools.count(1)
@@ -61,12 +68,13 @@ class Home:
             configuration=self.configuration.read,
             handle_factory=lambda: f"handle-{next(handles)}",
             session_ref_factory=lambda: f"sref-{next(refs)}",
-            client_claims_per_device=2,
+            client_claims_per_device=claims_per_device,
+            **store_kwargs,
         )
         self.service = CredentialService(
             store=SQLiteCredentialStore(tmp_path / "home.sqlite3"),
             root_secret=b"r" * 32,
-            clock=lambda: 1_000.0,
+            clock=credential_clock or (lambda: 1_000.0),
             id_factory=lambda: f"id-{next(ids)}",
             token_factory=lambda: f"token-{next(tokens)}",
             confirmation_factory=lambda: "ABCD2345",

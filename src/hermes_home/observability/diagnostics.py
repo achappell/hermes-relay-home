@@ -149,6 +149,9 @@ _CAPTURE_AUDIT_ALLOWED_OUTCOMES = {
 _SAFE_ROUTE_IDS = frozenset(
     {
         "bridge",
+        "client_claim_close",
+        "client_claims",
+        "client_sessions",
         "configuration",
         "device_health",
         "device_watch",
