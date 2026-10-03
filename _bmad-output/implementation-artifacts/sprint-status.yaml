@@ -1,7 +1,7 @@
 # Active epic parents are in story-index.yaml; numeric story prefixes remain historical.
 schema_version: 1
 generated: 2026-09-12
-last_updated: '2026-09-28'
+last_updated: '2026-10-03'
 project: hermes-relay-home
 tracking_system: file-system
 status_authority: local
@@ -14,6 +14,7 @@ development_status:
   home-nw-03-approved-local-bridge-route: done
   home-nw-04-route-roaming-identity-proof: done
   home-nw-17-client-pairing-and-direct-admission: done
+  home-nw-18-client-claim-list-and-close: ready-for-dev
   epic-3: in-progress
   home-nw-05-profile-mappings-conversation-claims: done
   home-nw-13-custom-wake-phrases: backlog
