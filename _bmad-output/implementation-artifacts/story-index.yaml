@@ -83,6 +83,7 @@ stories:
     title: List and close a personal client's open Home conversations
     kind: next-wave
     spec: _bmad-output/implementation-artifacts/spec-home-nw-18-client-claim-list-and-close.md
+    validation: _bmad-output/implementation-artifacts/validation-home-nw-18.md
     unblocks: iOS IOS-HOME-03 slices B and C
     tracker_key: home-nw-18-client-claim-list-and-close
     product_epic: 1

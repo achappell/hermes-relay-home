@@ -2,7 +2,7 @@
 title: 'HOME-NW-18 — List and close a personal client''s open Home conversations'
 type: 'feature'
 created: '2026-10-03'
-status: 'ready-for-dev'
+status: 'review'
 baseline_commit: '07de094'
 route: 'dispatch'
 review_loop_iteration: 1
@@ -273,4 +273,4 @@ There is no per-ref `404`. An unknown ref is a `not_open` result. On a Home with
 
 ## Verification
 
-Not implemented. At implementation time, record focused test results and `ruff check src tests` / `ruff format --check src tests` in `_bmad-output/implementation-artifacts/validation-home-nw-18.md`.
+Implemented on `feat/home-nw-18-client-claim-list-close` (`59fc9ee`). See [`validation-home-nw-18.md`](validation-home-nw-18.md): focused suites 341 passed, full suite 798 passed, `ruff check` and `ruff format --check` clean. Implementation deviations from this text are listed there. Status `review`; not deployed.
