@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from http.server import ThreadingHTTPServer
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from threading import Thread
 
+import websockets
 from websockets.sync.server import Server
 
 from hermes_home.api.application import HomeApplication
@@ -21,11 +24,15 @@ from hermes_home.domain.arbitration import ArbitrationEngine
 from hermes_home.domain.credentials import CredentialService
 from hermes_home.domain.health import HealthProbeResult
 from hermes_home.observability.client_reports import ClientReportStore
-from hermes_home.observability.diagnostics import DiagnosticsRecorder
+from hermes_home.observability.diagnostics import (
+    DiagnosticsRecorder,
+    QueuedDiagnosticsRecorder,
+)
 from hermes_home.observability.metrics import MetricsRegistry
 from hermes_home.storage.credentials import SQLiteCredentialStore
 from hermes_home.storage.diagnostics import SQLiteDiagnosticsStore
 from hermes_home.storage.sqlite import SQLiteConfigurationStore
+from hermes_home_diagnostics import OperationalDiagnostics, SafeTransportLogHandler
 
 
 class RuntimeConfigurationError(ValueError):
@@ -55,6 +62,8 @@ class RuntimeSettings:
     conversation_idle_timeout_seconds: float = 8.0
     client_claims_per_device: int = 8
     client_reconnect_grace_seconds: float = 120.0
+    diagnostics_dir: Path | None = None
+    diagnostics_proxy_link: bool = False
 
     @property
     def auth_mode(self) -> str:
@@ -73,11 +82,15 @@ class HomeRuntime:
     store: SQLiteConfigurationStore
     client_reports: ClientReportStore
     diagnostics_store: SQLiteDiagnosticsStore
-    diagnostics: DiagnosticsRecorder
+    diagnostics: QueuedDiagnosticsRecorder
+    operational_diagnostics: OperationalDiagnostics
     credential_store: SQLiteCredentialStore | None = None
     conversation_store: object | None = field(default=None, repr=False)
     bridge_server: Server | None = None
     bridge_thread: Thread | None = field(default=None, repr=False)
+    transport_log_handler: SafeTransportLogHandler | None = field(
+        default=None, repr=False
+    )
     _closed: bool = field(default=False, init=False, repr=False)
 
     def close(self) -> None:
@@ -92,6 +105,11 @@ class HomeRuntime:
         if self.bridge_thread is not None:
             self.bridge_thread.join(timeout=2)
         self.server.server_close()
+        if self.transport_log_handler is not None:
+            logging.getLogger("websockets").removeHandler(self.transport_log_handler)
+            self.transport_log_handler.close()
+        self.diagnostics.close(timeout=0.1)
+        self.operational_diagnostics.close(timeout=0.1)
         if self.credential_store is not None:
             self.credential_store.close()
         if self.conversation_store is not None:
@@ -110,6 +128,16 @@ def load_settings(
         values.get("HERMES_HOME_DATA_DIR"),
         default=Path.home() / ".hermes-home",
         name="data directory",
+    )
+    diagnostics_dir_value = values.get("HERMES_HOME_DIAGNOSTICS_DIR")
+    diagnostics_dir = (
+        _path_value(
+            diagnostics_dir_value,
+            default=data_dir / "logs",
+            name="diagnostics directory",
+        )
+        if diagnostics_dir_value is not None and diagnostics_dir_value.strip()
+        else data_dir / "logs"
     )
     database_path = _path_value(
         values.get("HERMES_HOME_DATABASE"),
@@ -171,6 +199,15 @@ def load_settings(
         raise RuntimeConfigurationError(
             "Standard bridge settings require gateway URL and token file"
         )
+
+    proxy_link_value = values.get("HERMES_HOME_PROXY_DIAGNOSTIC_LINK", "0").strip()
+    if proxy_link_value not in {"0", "1"}:
+        raise RuntimeConfigurationError("proxy diagnostic link setting must be 0 or 1")
+    diagnostics_proxy_link = proxy_link_value == "1"
+    if diagnostics_proxy_link and not standard_configured:
+        raise RuntimeConfigurationError(
+            "proxy diagnostic link requires a configured local proxy gateway"
+        )
     conversation_idle_timeout_seconds = _positive_seconds_value(
         values.get("HERMES_HOME_CONVERSATION_IDLE_TIMEOUT_SECONDS", "8")
     )
@@ -226,6 +263,8 @@ def load_settings(
         conversation_idle_timeout_seconds=conversation_idle_timeout_seconds,
         client_claims_per_device=client_claims_per_device,
         client_reconnect_grace_seconds=client_reconnect_grace_seconds,
+        diagnostics_dir=diagnostics_dir,
+        diagnostics_proxy_link=diagnostics_proxy_link,
     )
 
 
@@ -252,11 +291,14 @@ def create_runtime(
     store = SQLiteConfigurationStore(settings.database_path)
     client_reports: ClientReportStore | None = None
     diagnostics_store: SQLiteDiagnosticsStore | None = None
+    diagnostics: QueuedDiagnosticsRecorder | None = None
     credential_store = None
     conversation_store = None
-    credential_service: CredentialService | None = None
+    operational_diagnostics: OperationalDiagnostics | None = None
+    transport_log_handler: SafeTransportLogHandler | None = None
     server: ThreadingHTTPServer | None = None
     bridge_server = None
+    credential_service: CredentialService | None = None
     bridge_thread = None
     bridge_thread_started = False
     bridge_runtime_state: dict[str, object] = {
@@ -295,10 +337,29 @@ def create_runtime(
         diagnostics_store = SQLiteDiagnosticsStore(settings.database_path)
         client_reports = ClientReportStore(settings.database_path)
         metrics = MetricsRegistry()
-        diagnostics = DiagnosticsRecorder(
+        source_root = Path(__file__).parent.parent
+        try:
+            app_version = version("hermes-relay-home")
+        except PackageNotFoundError:
+            app_version = None
+        operational_diagnostics = OperationalDiagnostics(
+            component="home",
+            directory=settings.diagnostics_dir or settings.data_dir / "logs",
+            source_files=tuple(Path(__file__).parent.rglob("*.py"))
+            + (source_root / "hermes_home_diagnostics.py",),
+            app_version=app_version,
+            websocket_version=websockets.__version__,
+        )
+        transport_log_handler = SafeTransportLogHandler(
+            operational_diagnostics,
+            leg="home_proxy",
+        )
+        logging.getLogger("websockets").addHandler(transport_log_handler)
+        recorder = DiagnosticsRecorder(
             store=diagnostics_store,
             metrics=metrics,
         )
+        diagnostics = QueuedDiagnosticsRecorder(recorder)
 
         def resolve_credential_scope(device_id: str, generation: int):
             if credential_service is None:
@@ -368,6 +429,10 @@ def create_runtime(
             session_directory=session_directory,
             client_reports=client_reports,
         )
+        if settings.diagnostics_proxy_link and bridge_factory is not None:
+            raise RuntimeConfigurationError(
+                "proxy diagnostic link requires the built-in Standard bridge"
+            )
         if bridge_factory is None and settings.standard_gateway_url is not None:
             if settings.standard_token is None or conversation_store is None:
                 raise RuntimeConfigurationError(
@@ -380,6 +445,7 @@ def create_runtime(
                 hermes_token=settings.standard_token,
                 conversation_store=conversation_store,
                 device_authenticator=application.device_authenticator,
+                diagnostics_proxy_link=settings.diagnostics_proxy_link,
             )
         bridge_runtime_state["factory"] = bridge_factory
         server = create_server(
@@ -394,6 +460,8 @@ def create_runtime(
             host=settings.bridge_bind_host or settings.bind_host,
             port=settings.bridge_port,
             diagnostics=diagnostics,
+            operational_diagnostics=operational_diagnostics,
+            client_reports=client_reports,
             reconnect_grace_seconds=settings.client_reconnect_grace_seconds,
             claim_store=conversation_store,
         )
@@ -416,6 +484,13 @@ def create_runtime(
             bridge_thread.join(timeout=2)
         if server is not None:
             server.server_close()
+        if transport_log_handler is not None:
+            logging.getLogger("websockets").removeHandler(transport_log_handler)
+            transport_log_handler.close()
+        if diagnostics is not None:
+            diagnostics.close(timeout=0.1)
+        if operational_diagnostics is not None:
+            operational_diagnostics.close(timeout=0.1)
         if credential_store is not None:
             credential_store.close()
         if conversation_store is not None:
@@ -427,16 +502,20 @@ def create_runtime(
         store.close()
         raise
     assert diagnostics_store is not None
+    assert diagnostics is not None
+    assert operational_diagnostics is not None
     return HomeRuntime(
         server=server,
         store=store,
         diagnostics_store=diagnostics_store,
         client_reports=client_reports,
         diagnostics=diagnostics,
+        operational_diagnostics=operational_diagnostics,
         credential_store=credential_store,
         conversation_store=conversation_store,
         bridge_server=bridge_server,
         bridge_thread=bridge_thread,
+        transport_log_handler=transport_log_handler,
     )
 
 

@@ -385,21 +385,31 @@ fieldset.profiles { border: 0; padding: 8px 0; margin: 0; }
       if (generation !== reportReviewGeneration) return;
       const reports = $("client-reports"); reports.replaceChildren();
       if (!data.reports.length) reports.append(el("p", "No connection reports yet.", "muted"));
+      reports.append(el("p", "Association losses (bounded local evidence): " + JSON.stringify(data.association_losses || {}), "muted"));
       for (const item of data.reports) {
         const report = item.report;
         const device = (state?.devices || []).find((d) => d.device_id === item.device_id);
         const detail = el("details", undefined, "item");
         detail.append(el("summary", (device?.label || item.device_id) + " · " + new Date(report.created_at * 1000).toLocaleString()));
-        detail.append(el("p", report.platform + " " + report.os_version + " · " + report.model + " · app " + report.app_version + " (" + report.build + ")", "muted"));
-        for (const event of report.events) {
-          detail.append(el("div", new Date(event.time * 1000).toLocaleString() + " · " + event.name + (event.phase ? " · " + event.phase : "") + (event.uncertain === true ? " · outcome uncertain" : "") + (event.code ? " · " + event.code : "") + (event.duration_ms !== undefined ? " · " + event.duration_ms + " ms" : "") + " · launch " + event.launch_id.slice(0, 8)));
+        detail.append(el("p", "Assembly metadata · " + report.platform + " " + report.os_version + " · " + report.model + " · app " + report.app_version + " (" + report.build + ") · received " + new Date(item.received_at * 1000).toLocaleString(), "muted"));
+        detail.append(el("p", "Client-reported observations are not Home delivery proof. A linked association proves only that Home observed the request.", "muted"));
+        for (const [index, event] of report.events.entries()) {
+          detail.append(el("div", new Date(event.time * 1000).toLocaleString() + " · " + event.name + (event.phase ? " · " + event.phase : "") + (event.uncertain === true ? " · outcome uncertain" : "") + (event.code ? " · " + event.code : "") + (event.duration_ms !== undefined ? " · " + event.duration_ms + " ms" : "") + " · launch " + event.launch_id));
+          const origin = report.schema === 2 ? report.origins.find((o) => o.launch_id.toLowerCase() === event.launch_id.toLowerCase()) : null;
+          detail.append(el("div", origin ? "Generating origin · app " + (origin.app_version ?? "unavailable") + " (" + (origin.build_number ?? "unavailable") + ") · OS " + (origin.os_version ?? "unavailable") + " · source " + (origin.source_revision ?? "unavailable") + " · artifact " + (origin.artifact_sha256 ?? "unavailable") + " · provenance " + origin.provenance_status : "Generating origin unavailable (legacy schema 1).", "muted"));
+          if (report.schema === 2) {
+            detail.append(el("div", "Client assertion · event " + event.event_id + " · sequence " + event.sequence + " · connection " + (event.connection_id ?? "unavailable") + " · Home socket " + (event.home_connection_id ?? "unavailable") + " · request " + (event.request_id ?? "unavailable") + " · correlation " + (event.correlation_id ?? "unavailable") + " · state " + (event.correlation_state ?? "unavailable") + " · pending " + (event.pending_state ?? "unavailable") + " · response " + (event.response_kind ?? "unavailable"), "muted"));
+            detail.append(el("div", "Close observations · sent " + (event.sent_close_code ?? "unavailable") + " · received " + (event.received_close_code ?? "unavailable") + " · local status " + (event.observed_status_code ?? "unavailable"), "muted"));
+          }
+          const association = item.associations?.[index] || { state: "unavailable" };
+          detail.append(el("div", "Home-scoped association · " + association.state + (association.state === "linked" ? " · " + association.correlation_id + " · " + association.process_id + " · observed " + new Date(association.observed_at * 1000).toLocaleString() : ""), "muted"));
         }
         reports.append(detail);
       }
       const home = $("home-events"); home.replaceChildren();
       if (!data.home_events.length) home.append(el("p", "No recent Home events.", "muted"));
       for (const event of data.home_events) {
-        home.append(el("div", new Date(event.occurred_at * 1000).toLocaleString() + " · " + event.phase + " · " + event.outcome + (event.failure_code ? " · " + event.failure_code : "")));
+        home.append(el("div", new Date(event.occurred_at * 1000).toLocaleString() + " · " + event.phase + " · " + event.outcome + (event.correlation_id ? " · " + event.correlation_id : "") + (event.failure_code ? " · " + event.failure_code : "")));
       }
     } catch (error) { fail(error); }
     finally { button.disabled = false; }

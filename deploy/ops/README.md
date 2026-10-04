@@ -39,18 +39,49 @@ mkdir -p ~/.hermes/hermes-home-standard-pilot ~/Library/LaunchAgents
 chmod 700 ~/.hermes/hermes-home-standard-pilot
 cp deploy/ops/hermes-standard-home-pilot.sh ~/.hermes/hermes-home-standard-pilot/run.sh
 cp deploy/ops/hermes-standard-home-pilot-proxy.py ~/.hermes/hermes-home-standard-pilot/proxy.py
+cp src/hermes_home_diagnostics.py ~/.hermes/hermes-home-standard-pilot/hermes_home_diagnostics.py
 cp deploy/ops/hermes-standard-home-pilot-proxy.sh ~/.hermes/hermes-home-standard-pilot/proxy.sh
 cp deploy/ops/com.hermes.home-standard-pilot.plist ~/Library/LaunchAgents/
 cp deploy/ops/com.hermes.home-standard-pilot-proxy.plist ~/Library/LaunchAgents/
 chmod 700 ~/.hermes/hermes-home-standard-pilot/run.sh
 chmod 700 ~/.hermes/hermes-home-standard-pilot/proxy.sh
 chmod 700 ~/.hermes/hermes-home-standard-pilot/proxy.py
+chmod 700 ~/.hermes/hermes-home-standard-pilot/hermes_home_diagnostics.py
 chmod 600 ~/.hermes/hermes-home-standard-pilot/standard-token
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hermes.home-standard-pilot.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hermes.home-standard-pilot-proxy.plist
 launchctl kickstart -k gui/$(id -u)/com.hermes.home-standard-pilot
 launchctl kickstart -k gui/$(id -u)/com.hermes.home-standard-pilot-proxy
 ```
+
+## Proxy diagnostic records
+
+`hermes_home_diagnostics.py` must be copied from the same checkout as
+`proxy.py`; the standard-library helper supports CPython 3.9+. Continue using
+the existing Hermes Agent Python environment (CPython 3.9+ with
+`websockets.sync` available); this adds no agent venv or dependency
+installation.
+The wrapper sets `HERMES_HOME_PROXY_LOG_DIR` to
+`~/.hermes/hermes-home-standard-pilot/logs` unless that variable is already
+configured. The sink creates an owner-only directory and files; keep the
+service account as the writer and give only authorized operators read access.
+
+The active `proxy.jsonl` is bounded to 10 MiB with four rotated backups and
+14-day expiry (50 MiB maximum for this process). Records are at most 2 KiB;
+the nonblocking queue holds 1,024 records and drops newest when full. Loss
+counters are process-local status; the sink emits best-effort JSONL loss
+snapshots at most once per minute after losses accumulate. A total sink failure
+or crash may leave counters unavailable, and sink failures do not block the
+relay. A crash can leave only the final line incomplete. Retrieve JSONL locally
+as the service owner or an authorized operator, for example:
+
+```sh
+jq -c . ~/.hermes/hermes-home-standard-pilot/logs/proxy.jsonl
+```
+
+These files are not served or uploaded. The wrapper no longer appends a second
+stdout/stderr copy to `proxy.log`; any older `proxy.log` is not used by the
+new runner.
 
 Confirm the process emits `gateway.ready` on a loopback handshake before
 adding the tailnet route. Then add only the versioned Standard path to the

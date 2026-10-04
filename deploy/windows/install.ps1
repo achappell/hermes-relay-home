@@ -68,6 +68,37 @@ function Set-SecretFileAcl {
     Set-Acl -LiteralPath $Path -AclObject $acl
 }
 
+function Set-DiagnosticsDirectoryAcl {
+    param([string] $Path)
+
+    $acl = Get-Acl -LiteralPath $Path
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($rule in @($acl.Access)) {
+        [void] $acl.RemoveAccessRule($rule)
+    }
+    $inheritance = (
+        [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+        [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+    )
+    $systemRule = New-Object -TypeName System.Security.AccessControl.FileSystemAccessRule -ArgumentList @(
+        'NT AUTHORITY\SYSTEM',
+        [System.Security.AccessControl.FileSystemRights]::Modify,
+        $inheritance,
+        [System.Security.AccessControl.PropagationFlags]::None,
+        [System.Security.AccessControl.AccessControlType]::Allow
+    )
+    $adminRule = New-Object -TypeName System.Security.AccessControl.FileSystemAccessRule -ArgumentList @(
+        'BUILTIN\Administrators',
+        [System.Security.AccessControl.FileSystemRights]::Read,
+        $inheritance,
+        [System.Security.AccessControl.PropagationFlags]::None,
+        [System.Security.AccessControl.AccessControlType]::Allow
+    )
+    [void] $acl.AddAccessRule($systemRule)
+    [void] $acl.AddAccessRule($adminRule)
+    Set-Acl -LiteralPath $Path -AclObject $acl
+}
+
 function Ensure-AdminToken {
     param([string] $Path)
 
@@ -228,6 +259,7 @@ $appRoot = Join-Path $root 'app'
 $pythonRoot = Join-Path $root 'python'
 $venvRoot = Join-Path $root 'venv'
 $secretRoot = Join-Path $root 'secrets'
+$logRoot = Join-Path $root 'logs'
 $tokenPath = Join-Path $secretRoot 'admin-token'
 $runnerSource = Join-Path $PSScriptRoot 'run.ps1'
 $runnerPath = Join-Path $root 'run.ps1'
@@ -281,7 +313,8 @@ $existingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyConti
 $taskWasRunning = $null -ne $existingTask -and $existingTask.State -eq 'Running'
 try {
     $null = Stop-ExistingHermesHomeTask -Name $TaskName
-    New-Item -ItemType Directory -Path $root, $appRoot, $secretRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $root, $appRoot, $secretRoot, $logRoot -Force | Out-Null
+    Set-DiagnosticsDirectoryAcl -Path $logRoot
     Copy-Item -LiteralPath $runnerSource -Destination $runnerPath -Force
 
     $uv = Resolve-UvPath -RequestedPath $UvPath
@@ -306,6 +339,7 @@ try {
 
     $token = Ensure-AdminToken -Path $tokenPath
     [Environment]::SetEnvironmentVariable('HERMES_HOME_DATA_DIR', $root, 'Machine')
+    [Environment]::SetEnvironmentVariable('HERMES_HOME_DIAGNOSTICS_DIR', $logRoot, 'Machine')
     [Environment]::SetEnvironmentVariable('HERMES_HOME_BIND_HOST', $BindHost, 'Machine')
     [Environment]::SetEnvironmentVariable('HERMES_HOME_PORT', [string] $Port, 'Machine')
     [Environment]::SetEnvironmentVariable('HERMES_HOME_BRIDGE_BIND_HOST', $BridgeBindHost, 'Machine')

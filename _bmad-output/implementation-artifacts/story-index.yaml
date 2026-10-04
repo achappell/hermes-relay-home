@@ -281,6 +281,18 @@ stories:
     release_scope: later
     depends_on:
       - home:HOME-NW-06
+  - id: HOME-NW-06-connection-diagnostics
+    title: Add Home and pilot proxy connection failure evidence
+    kind: local
+    spec: _bmad-output/implementation-artifacts/spec-home-nw-06-connection-failure-diagnostics.md
+    validation: _bmad-output/implementation-artifacts/validation-home-nw-06-connection-failure-diagnostics.md
+    github_issue: https://github.com/achappell/hermes-relay-home/issues/16
+    tracker_key: home-nw-06-connection-diagnostics
+    product_epic: 6
+    owner: hermes-relay-home
+    release_scope: later
+    depends_on:
+      - home:HOME-NW-06
 epic_scheme: hermes-home-2026-09-23
 epics:
   1: Connect personal clients through HomeBridge

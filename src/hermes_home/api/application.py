@@ -154,6 +154,11 @@ class HomeApplication:
 
         return self._authenticator
 
+    @property
+    def client_reports(self) -> ClientReportStore:
+        """Return the protected report/association store shared with the bridge."""
+        return self._client_reports
+
     def handle(
         self,
         method: str,

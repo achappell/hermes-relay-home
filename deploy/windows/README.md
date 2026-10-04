@@ -85,6 +85,18 @@ root secret on CaticornQueen, and pass the gateway and token settings together:
   -StandardTokenFile C:\ProgramData\HermesHome\secrets\standard-token
 ```
 
+`HERMES_HOME_PROXY_DIAGNOSTIC_LINK=1` is an explicit Home opt-in and is disabled
+by default. Leave it unset for a direct Standard destination such as the
+`wss://media-server.<tailnet>/api/ws` target above; direct Standard receives no
+diagnostic correlation header. Set it to `1` only when Home connects to the
+local proxy at exactly `ws://127.0.0.1:9121/api/ws`. On Windows, set this in the
+machine environment and restart the Hermes Home task for it to take effect:
+
+```powershell
+[Environment]::SetEnvironmentVariable('HERMES_HOME_PROXY_DIAGNOSTIC_LINK', '1', 'Machine')
+```
+
+
 The Standard token file is read by the Home process and never placed in an
 endpoint response. Home checks the paired Device credential and the exact
 Wake Mapping grant, then opens an independent Standard Session for the resolved
@@ -105,6 +117,32 @@ The resulting process is managed by the `Hermes Home` scheduled task. Its data,
 logs, virtual environment, and secret live beneath
 `C:\ProgramData\HermesHome`. The installer waits for both `/metrics` and an
 `up{job="hermes-home"}` Prometheus result before returning success.
+
+The operational log directory is `C:\ProgramData\HermesHome\logs` by default
+(or `<InstallRoot>\logs` when `-InstallRoot` is changed); the installer passes
+it to Home as `HERMES_HOME_DIAGNOSTICS_DIR`. Its ACL permits SYSTEM to modify
+logs and Administrators to read them. The single JSONL sink writes
+`home.jsonl` plus four rotated backups (10 MiB active, 50 MiB maximum) and
+expires files after 14 days. Records are limited to 2 KiB and a nonblocking
+1,024-record queue drops newest when full. Loss counters are process-local
+status; best-effort JSONL loss snapshots are emitted at most once per minute
+after losses accumulate. Total sink failure or a crash can leave counters
+unavailable. A partial final line is a gap, not complete evidence.
+
+Operational JSONL files are local-only; no file-serving or upload route is
+added. Existing authorized Home diagnostics review and opted-in client-report
+paths are unchanged. Authorized operators can read the files locally, for
+example:
+
+```powershell
+Get-Content C:\ProgramData\HermesHome\logs\home.jsonl
+```
+
+`run.ps1` does not append stdout/stderr to a second unbounded log. It launches
+Home with native stderr isolated from PowerShell's terminating error handling
+and propagates the process exit code; operational records go only to the
+bounded JSONL sink.
+
 
 ## Personal-client pairing (HOME-NW-17)
 

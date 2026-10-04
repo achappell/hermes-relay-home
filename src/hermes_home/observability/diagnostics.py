@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import queue
 import re
 import secrets
+import threading
 import time
 import uuid
 from collections import deque
@@ -2092,3 +2094,91 @@ def _require_timestamp(value: object, name: str) -> None:
 def _require_count(value: object, name: str) -> None:
     if type(value) is not int or not 0 <= value <= MAX_SAFE_COUNT:
         raise DiagnosticValidationError(f"{name} must be a non-negative integer")
+
+
+class QueuedDiagnosticsRecorder:
+    """Move durable recorder writes off WebSocket and stream callbacks."""
+
+    def __init__(
+        self,
+        recorder: DiagnosticsRecorder,
+        *,
+        capacity: int = 1024,
+    ) -> None:
+        if type(capacity) is not int or capacity < 1:
+            raise ValueError("diagnostics queue capacity must be positive")
+        self._recorder = recorder
+        self._queue: queue.Queue[DiagnosticEvent | None] = queue.Queue(capacity)
+        self._dropped = 0
+        self._lock = RLock()
+        self._closing = False
+        self._worker = threading.Thread(
+            target=self._run,
+            name="hermes-home-diagnostics-writer",
+            daemon=True,
+        )
+        self._worker.start()
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._recorder, name)
+
+    def record(self, event: DiagnosticEvent | Mapping[str, object]) -> bool:
+        try:
+            safe_event = (
+                event
+                if isinstance(event, DiagnosticEvent)
+                else DiagnosticEvent.from_mapping(event)
+            )
+        except DiagnosticValidationError:
+            self._drop()
+            return False
+        if self._closing:
+            self._drop()
+            return False
+        try:
+            self._queue.put_nowait(safe_event)
+            return True
+        except queue.Full:
+            self._drop()
+            return False
+
+    def status(self) -> DiagnosticsStatus:
+        status = self._recorder.status()
+        with self._lock:
+            dropped = self._dropped
+        return replace(
+            status,
+            dropped_event_count=min(
+                MAX_SAFE_COUNT, status.dropped_event_count + dropped
+            ),
+        )
+
+    def close(self, *, timeout: float = 0.1) -> None:
+        self._closing = True
+        deadline = time.monotonic() + max(0.0, min(timeout, 0.1))
+        while self._queue.unfinished_tasks and time.monotonic() < deadline:
+            time.sleep(min(0.001, max(0.0, deadline - time.monotonic())))
+        if self._queue.unfinished_tasks:
+            with self._lock:
+                self._dropped = min(MAX_SAFE_COUNT, self._dropped + self._queue.qsize())
+        try:
+            self._queue.put_nowait(None)
+        except queue.Full:
+            pass
+        self._worker.join(max(0.0, deadline - time.monotonic()))
+
+    def _drop(self) -> None:
+        with self._lock:
+            self._dropped = min(MAX_SAFE_COUNT, self._dropped + 1)
+
+    def _run(self) -> None:
+        while True:
+            event = self._queue.get()
+            try:
+                if event is None:
+                    return
+                self._recorder.record(event)
+            except Exception:  # noqa: BLE001 - diagnostics failure is counted and dropped
+                self._drop()
+            finally:
+                self._queue.task_done()

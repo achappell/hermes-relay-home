@@ -838,3 +838,182 @@ def test_create_bridge_server_wires_claim_store_for_parking_and_close(
     finally:
         server.shutdown()
         store.close()
+
+
+@pytest.mark.parametrize(
+    ("early_method", "failure_code", "reason", "reject_adoption"),
+    [
+        ("conversation.open", "reconnect_required", "reconnect_required", False),
+        (
+            "conversation.reconnect",
+            "transport_unavailable",
+            "transport_unavailable",
+            True,
+        ),
+    ],
+)
+def test_early_rejections_log_one_socket_identity_without_request_or_handle_data(
+    tmp_path,
+    monkeypatch,
+    early_method,
+    failure_code,
+    reason,
+    reject_adoption,
+) -> None:
+    from hermes_home.api.bridge_server import _EndpointParkingLot
+    from hermes_home.bridge.endpoint import BridgeEndpoint
+    from hermes_home_diagnostics import OperationalDiagnostics
+
+    parked = threading.Event()
+    original_park = _EndpointParkingLot.park
+
+    def observe_park(lot, endpoint, **kwargs):
+        original_park(lot, endpoint, **kwargs)
+        parked.set()
+
+    monkeypatch.setattr(_EndpointParkingLot, "park", observe_park)
+    if reject_adoption:
+
+        def reject(*_args, **_kwargs):
+            raise RuntimeError
+
+        monkeypatch.setattr(BridgeEndpoint, "adopt", reject)
+
+    class RecoverableBridge(ListenerBridge):
+        def submit_prompt(self, text: str) -> BridgeTurn:
+            del text
+            return BridgeTurn("home-turn-1", "HOME-OPAQUE-HANDLE-CANARY")
+
+        def next_audio(self, *, timeout=None):
+            del timeout
+            return AudioFrame("unavailable", turn_id="home-turn-1")
+
+    diagnostics = OperationalDiagnostics(component="home", directory=tmp_path)
+    server = create_bridge_server(
+        bridge_factory=RecoverableBridge,
+        host="127.0.0.1",
+        port=0,
+        operational_diagnostics=diagnostics,
+        reconnect_grace_seconds=2,
+    )
+    thread = _start(server)
+    port = server.socket.getsockname()[1]
+    url = f"ws://127.0.0.1:{port}{BRIDGE_WS_PATH}"
+    headers = {
+        "Authorization": "Device secret-canary",
+        "X-Hermes-Diagnostics-Version": "1",
+    }
+    handle_canary = "HOME-OPAQUE-HANDLE-CANARY"
+    request_canary = "HOME-REQUEST-ID-CANARY"
+
+    def request(client, request_id, method, conversation_handle):
+        client.send(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "schema": 1,
+                    "id": request_id,
+                    "method": method,
+                    "params": {"conversation_handle": conversation_handle},
+                }
+            )
+        )
+        while True:
+            response = json.loads(client.recv(timeout=2))
+            if response.get("id") == request_id:
+                return response
+
+    try:
+        with connect(url, additional_headers=headers) as client:
+            assert (
+                request(client, "open-first", "conversation.open", handle_canary)[
+                    "result"
+                ]["status"]
+                == "ready"
+            )
+            client.send(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "schema": 1,
+                        "id": "prompt-first",
+                        "method": "prompt.submit",
+                        "params": {
+                            "conversation_handle": handle_canary,
+                            "text": "private prompt text",
+                        },
+                    }
+                )
+            )
+            while True:
+                response = json.loads(client.recv(timeout=2))
+                if response.get("id") == "prompt-first":
+                    assert response["result"]["status"] == "submitted"
+                    break
+        assert parked.wait(2)
+
+        with connect(url, additional_headers=headers) as client:
+            response = request(client, request_canary, early_method, handle_canary)
+            assert response["result"]["reason"] == reason
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+        diagnostics.close()
+
+    raw = (tmp_path / "home.jsonl").read_text(encoding="utf-8")
+    assert request_canary not in raw
+    assert handle_canary not in raw
+    assert "secret-canary" not in raw
+    records = [json.loads(line) for line in raw.splitlines()]
+    rejection = next(
+        record
+        for record in records
+        if record["event"] == "rejection_generated"
+        and record["failure_code"] == failure_code
+    )
+    connection_id = rejection["connection_id"]
+    assert connection_id.startswith("conn-")
+    for event in (
+        "connection_opened",
+        "response_write_started",
+        "response_write_outcome",
+        "connection_closed",
+    ):
+        assert any(
+            record["event"] == event and record.get("connection_id") == connection_id
+            for record in records
+        )
+
+
+def test_peer_close_before_first_request_is_observed_without_prose(tmp_path) -> None:
+    from hermes_home_diagnostics import OperationalDiagnostics
+
+    diagnostics = OperationalDiagnostics(component="home", directory=tmp_path)
+    server = create_bridge_server(
+        host="127.0.0.1",
+        port=0,
+        operational_diagnostics=diagnostics,
+    )
+    thread = _start(server)
+    port = server.socket.getsockname()[1]
+    try:
+        with connect(
+            f"ws://127.0.0.1:{port}{BRIDGE_WS_PATH}",
+            additional_headers={"Authorization": "Device close-canary"},
+        ):
+            pass
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+        diagnostics.close()
+
+    raw = (tmp_path / "home.jsonl").read_text(encoding="utf-8")
+    assert "close-canary" not in raw
+    records = [json.loads(line) for line in raw.splitlines()]
+    opened = next(item for item in records if item["event"] == "connection_opened")
+    connection_id = opened["connection_id"]
+    observed = next(item for item in records if item["event"] == "transport_observed")
+    closed = next(item for item in records if item["event"] == "connection_closed")
+    assert observed["connection_id"] == connection_id
+    assert closed["connection_id"] == connection_id
+    assert observed["exception_category"] == "connection_closed_ok"

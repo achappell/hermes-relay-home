@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import secrets
 import sqlite3
 import time
@@ -1396,12 +1397,63 @@ class WebsocketsAudioSocket:
 class WebsocketsJsonSocketFactory:
     """Open bounded synchronous Standard JSON gateway connections."""
 
-    def __init__(self, *, open_timeout: float = 10.0) -> None:
+    def __init__(
+        self,
+        *,
+        open_timeout: float = 10.0,
+        diagnostics_link_enabled: bool = False,
+    ) -> None:
+        if type(diagnostics_link_enabled) is not bool:
+            raise ValueError("diagnostics_link_enabled must be a boolean")
         self._open_timeout = open_timeout
+        self._diagnostics_link_enabled = diagnostics_link_enabled
+        self._diagnostics_connection_id: str | None = None
+        self._diagnostics_lock = RLock()
+
+    def set_diagnostics_connection_id(self, connection_id: str) -> None:
+        if (
+            self._diagnostics_link_enabled
+            and type(connection_id) is str
+            and re.fullmatch(r"conn-[0-9a-f]{32}", connection_id) is not None
+        ):
+            with self._diagnostics_lock:
+                self._diagnostics_connection_id = connection_id
 
     def open(self, url: str) -> JsonSocket:
-        return WebsocketsJsonSocket(
-            connect(url, open_timeout=self._open_timeout, max_size=16 * 1_048_576)
+        with self._diagnostics_lock:
+            connection_id = self._diagnostics_connection_id
+        if connection_id is None:
+            connection = connect(
+                url,
+                open_timeout=self._open_timeout,
+                max_size=16 * 1_048_576,
+            )
+        else:
+            connection = connect(
+                url,
+                open_timeout=self._open_timeout,
+                max_size=16 * 1_048_576,
+                additional_headers={"X-Hermes-Diagnostic-Connection": connection_id},
+            )
+        return WebsocketsJsonSocket(connection)
+
+
+class _DiagnosticLinkHomeBridge(HomeBridge):
+    def __init__(
+        self,
+        *,
+        gateway_socket_factory: WebsocketsJsonSocketFactory,
+        **kwargs: object,
+    ) -> None:
+        super().__init__(
+            gateway_socket_factory=gateway_socket_factory,
+            **kwargs,
+        )
+        self._diagnostic_link_socket_factory = gateway_socket_factory
+
+    def set_diagnostics_connection_id(self, connection_id: str) -> None:
+        self._diagnostic_link_socket_factory.set_diagnostics_connection_id(
+            connection_id
         )
 
 
@@ -1679,17 +1731,28 @@ def create_standard_bridge_factory(
     device_authenticator,
     connect_timeout: float = 10.0,
     audio_timeout: float = 30.0,
+    diagnostics_proxy_link: bool = False,
 ) -> Callable[[], HomeBridge]:
     """Build the production HomeBridge factory for one approved Standard target."""
 
     _validate_gateway_url(gateway_url)
     if not isinstance(hermes_token, str) or not hermes_token.strip():
         raise ValueError("Standard gateway token must be non-empty")
-    gateway_factory = WebsocketsJsonSocketFactory(open_timeout=connect_timeout)
+    if type(diagnostics_proxy_link) is not bool:
+        raise ValueError("diagnostics_proxy_link must be a boolean")
+    if diagnostics_proxy_link:
+        _validate_diagnostics_proxy_target(gateway_url)
     audio_factory = WebsocketsAudioSocketFactory(open_timeout=audio_timeout)
 
     def factory() -> HomeBridge:
-        return HomeBridge(
+        gateway_factory = WebsocketsJsonSocketFactory(
+            open_timeout=connect_timeout,
+            diagnostics_link_enabled=diagnostics_proxy_link,
+        )
+        bridge_type = (
+            _DiagnosticLinkHomeBridge if diagnostics_proxy_link else HomeBridge
+        )
+        return bridge_type(
             gateway_url=gateway_url,
             hermes_token=hermes_token,
             device_authenticator=device_authenticator,
@@ -1707,6 +1770,22 @@ def create_standard_bridge_factory(
         )
 
     return factory
+
+
+def _validate_diagnostics_proxy_target(gateway_url: str) -> None:
+    parts = urlsplit(gateway_url)
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    if (
+        parts.scheme != "ws"
+        or parts.hostname not in {"127.0.0.1", "localhost", "::1"}
+        or port != 9121
+    ):
+        raise ValueError(
+            "diagnostics proxy link requires the local pilot proxy on port 9121"
+        )
 
 
 def _validate_gateway_url(value: str) -> None:

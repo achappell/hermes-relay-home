@@ -4009,3 +4009,77 @@ def test_adopted_transport_receives_no_events_or_audio_before_authorization():
         assert len(candidate.sent) == 2
     finally:
         endpoint.close()
+
+
+def test_upstream_link_id_is_configured_only_after_explicit_client_opt_in(
+    tmp_path,
+) -> None:
+    from hermes_home_diagnostics import OperationalDiagnostics
+
+    class LinkableBridge(FakeBridge):
+        def __init__(self) -> None:
+            super().__init__()
+            self.linked_connection_id = None
+
+        def set_diagnostics_connection_id(self, connection_id: str) -> None:
+            self.linked_connection_id = connection_id
+
+    diagnostics = OperationalDiagnostics(component="home", directory=tmp_path)
+    unopted_bridge = LinkableBridge()
+    unopted = BridgeEndpoint(
+        FakeConnection(),
+        unopted_bridge,
+        operational_diagnostics=diagnostics,
+    )
+    assert unopted_bridge.linked_connection_id is None
+    unopted.close()
+
+    opted_bridge = LinkableBridge()
+    opted = BridgeEndpoint(
+        FakeConnection(),
+        opted_bridge,
+        headers={"X-Hermes-Diagnostics-Version": "1"},
+        operational_diagnostics=diagnostics,
+    )
+    try:
+        assert opted_bridge.linked_connection_id == opted._diagnostic_connection_id
+        assert opted_bridge.linked_connection_id.startswith("conn-")
+    finally:
+        opted.close()
+        diagnostics.close()
+
+
+def test_opted_in_ready_adds_diagnostics_only_to_upstream_capabilities() -> None:
+    headers = {"X-Hermes-Diagnostics-Version": "1"}
+    bridge = FakeBridge()
+    endpoint = BridgeEndpoint(FakeConnection(), bridge, headers=headers)
+    try:
+        response = _open(endpoint)
+        capabilities = response["result"]["capabilities"]
+        assert capabilities["commands"] == ["status"]
+        assert capabilities["timing"] == "absent"
+        assert capabilities["diagnostics_correlation_v1"] is True
+        assert capabilities["client_diagnostic_report_schemas"] == [1, 2]
+        assert response["diagnostics"] == {
+            "version": 1,
+            "home_connection_id": endpoint._diagnostic_connection_id,
+        }
+    finally:
+        endpoint.close()
+
+    bare = FakeBridge()
+    bare.status = BridgeStatus("ready", HANDLE)
+    endpoint = BridgeEndpoint(FakeConnection(), bare, headers=headers)
+    try:
+        response = _open(endpoint)
+        assert response["result"]["status"] == "ready"
+        capabilities = response["result"]["capabilities"]
+        assert capabilities["commands"] == []
+        assert capabilities["timing"] == "absent"
+        assert capabilities["diagnostics_correlation_v1"] is True
+        assert response["diagnostics"] == {
+            "version": 1,
+            "home_connection_id": endpoint._diagnostic_connection_id,
+        }
+    finally:
+        endpoint.close()
