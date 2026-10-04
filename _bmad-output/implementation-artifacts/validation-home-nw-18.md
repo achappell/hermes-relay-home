@@ -45,7 +45,9 @@ deployment. No sibling repository was changed.
 | Ruff lint | `uvx ruff check src tests` | `All checks passed!` |
 | Ruff format | `uvx ruff format --check src tests` | `73 files already formatted` |
 | Lockfile check | `uv lock --check` | `Resolved 17 packages in 9ms` |
-| Disposable loopback runtime smoke | One-shot inline Python with `uv run --python 3.14 --locked --extra dev`; no script file persisted | Actual Home HTTP runtime on loopback; temporary SQLite/credential state removed. Two devices enrolled and authenticated; each created one claim. Device 1 listed only its own ref; close returned `closed`; subsequent list was empty; repeat close returned `not_open`; Device 2 still listed its own claim. A real local `create_bridge_server` WebSocket handshake and message exchange returned JSON-RPC `-32601 invalid_request` for the intentionally invalid method. |
+| Disposable two-device loopback runtime smoke | One-shot inline Python with `uv run --python 3.14 --locked --extra dev`; no script file persisted | Actual Home HTTP runtime on loopback with temporary SQLite/credentials. Two devices enrolled/authenticated and each created a claim. Device 1 listed only its own ref; close returned `closed`; subsequent list was empty; repeat close returned `not_open`; Device 2 continued listing its own claim. Temporary state removed. |
+| Disposable loopback Home/bridge/Standard-peer lifecycle smoke | One-shot inline Python with `uv run --python 3.14 --locked --extra dev`; no script file persisted | Actual Home HTTP and `create_bridge_server` WebSocket listeners, temporary SQLite/credentials, and a controlled local Standard-protocol WebSocket stand-in (not live Hermes). Authorized open=`ready`; one prompt submitted; after disconnect list=`waiting_to_reconnect`; reconnect=`ready`, list=`replying`; HTTP close=`closed`; client WebSocket close=`1000 stale_conversation`; repeat close=`not_open`; session list retained one row with `active:false`, title `Smoke session`. Stand-in observed counts: `commands.catalog=1`, `session.create=1`, `prompt.submit=1`, `session.interrupt=1`, `session.list=1`; `session.resume=0`; no prompt replay. Temporary state removed. |
+| Smoke warning | Inline smoke command | DeprecationWarning: connect() must be used as a context manager; alternatively use websocket = connect(..., legacy=True) to connect directly. |
 | Whitespace/diff | `git diff --check` | Passed; no output |
 
 ## Deviations from the spec text
@@ -77,8 +79,8 @@ deployment. No sibling repository was changed.
 - **D1 — terminal close semantics:** Implemented only for `client_closed`;
   other stale authorization failures retain the pre-existing reconnect/upstream
   behavior. Parameterized bridge tests cover device/grant/Profile revocation and
-  generation/configuration changes. Remaining gap: local WebSocket smoke used an
-  intentionally invalid method, not a live claim close; no live Standard Hermes.
+  generation/configuration changes. A real local WebSocket close was exercised
+  against a controlled protocol stand-in; live Standard Hermes remains unverified.
 - **D2 — close timeout guidance:** Spec and v1 contract now explain serialized
   notification handlers may exceed 15 seconds and clients must re-list after a
   timeout. Household-scale latency was not measured.
@@ -87,9 +89,10 @@ deployment. No sibling repository was changed.
   take, and expiry. No cross-process marker behavior is claimed; markers are
   intentionally process-local.
 - **P2 — runtime/parking integration:** A behavioral test closes a parked claim
-  through the store and confirms the parking entry is evicted. The disposable
-  runtime smoke also exercised the actual local WebSocket listener. A real
-  gateway-backed conversation was not opened.
+  through the store and confirms the parking entry is evicted. Disposable
+  runtime smoke exercised actual HTTP and WebSocket listeners through parking,
+  adoption, bound HTTP close, interrupt, and terminal client disconnect using a
+  controlled local Standard-protocol stand-in. It is not live Hermes.
 - **P3 — close/reopen races:** Tests cover close against open/reconnect and
   `mark_open` on inactive/expired rows. These use controlled fake upstream
   sockets, not live Standard.
@@ -110,6 +113,6 @@ Tailscale Serve, iOS client, deployment, or host-sleep behavior was exercised.
 ## Not verified
 
 Live Standard Hermes interrupt behavior, Tailscale Serve routing, iOS
-consumption, deployment, host-sleep behavior, and gateway-backed claim close
-were not exercised. The local WebSocket smoke verified the real loopback server
-handshake and request/response path with a deliberately invalid method only.
+consumption, deployment, and host-sleep behavior were not exercised. The local
+Standard protocol peer is a controlled stand-in; it does not validate a real
+Hermes gateway's behavior.
