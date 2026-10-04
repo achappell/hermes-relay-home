@@ -272,4 +272,4 @@ There is no per-ref `404`. An unknown ref is a `not_open` result. On a Home with
 
 ## Verification
 
-Implemented on `feat/home-nw-18-client-claim-list-close` (`59fc9ee`). See [`validation-home-nw-18.md`](validation-home-nw-18.md): focused suites 341 passed, full suite 798 passed, `ruff check` and `ruff format --check` clean. Implementation deviations from this text are listed there. Status `review`; not deployed.
+Implementation/review-fix commit: `d043192eaa4022689f59d78b3f3dca164dbb8dfc` on `feat/home-nw-18-client-claim-list-close`. See [`validation-home-nw-18.md`](validation-home-nw-18.md): focused suites 382 passed, full suite 818 passed, Ruff checks and lockfile check passed. A disposable loopback Home runtime smoke passed authenticated create/list/close/isolation checks and exercised the local WebSocket listener. Remaining boundaries are recorded there. Status `review`; not deployed.
