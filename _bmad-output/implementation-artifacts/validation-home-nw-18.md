@@ -28,11 +28,14 @@ wiring. API coverage verifies a closed session is listed inactive and can be
 resumed using its durable session reference.
 
 This validates the Home slice against fake Standard sockets and the production
-SQLite claim store. A disposable runtime also exercised Home HTTP on loopback
-and the real `create_bridge_server` WebSocket handshake/request-response path
-with an intentionally invalid method. It does not claim a gateway-backed claim
-close over real WebSockets, live Standard Hermes, Tailscale Serve, iOS, or
-deployment. No sibling repository was changed.
+SQLite claim store. A disposable runtime exercised actual Home HTTP and
+`create_bridge_server` WebSocket listeners end-to-end against a controlled
+local Standard-protocol WebSocket stand-in: authorized open, prompt submit,
+disconnect/park, reconnect/adopt, HTTP close, terminal
+`stale_conversation`/1000, repeat close, and inactive-but-preserved Session
+listing with no prompt replay. This was not a live Standard Hermes gateway; no
+household traffic, Tailscale Serve, iOS, or deployment was exercised. No
+sibling repository was changed.
 
 ## Observed checks
 
