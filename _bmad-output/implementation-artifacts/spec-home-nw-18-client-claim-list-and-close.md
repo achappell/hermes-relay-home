@@ -2,7 +2,7 @@
 title: 'HOME-NW-18 — List and close a personal client''s open Home conversations'
 type: 'feature'
 created: '2026-10-03'
-status: 'review'
+status: 'done'
 baseline_commit: '07de094'
 route: 'dispatch'
 review_loop_iteration: 1

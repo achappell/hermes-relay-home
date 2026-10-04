@@ -1,6 +1,6 @@
 ---
 story: HOME-NW-18
-status: passed-local
+status: deployed-verified-source
 validated: 2026-10-03
 baseline_commit: b77c830d0c282cee44cdcbbec5008ab754392e01
 implementation_commit: d043192eaa4022689f59d78b3f3dca164dbb8dfc
@@ -119,3 +119,173 @@ Live Standard Hermes interrupt behavior, Tailscale Serve routing, iOS
 consumption, deployment, and host-sleep behavior were not exercised. The local
 Standard protocol peer is a controlled stand-in; it does not validate a real
 Hermes gateway's behavior.
+
+## Deployment to CaticornQueen — preflight (pending host access)
+
+Recorded during the authorized deployment attempt; no remote change has been
+made yet. Secret-safe: paths, hashes and states only.
+
+- **Reviewed revision:** `082e5938615ae4fc037ed6b3a1e791ccda04bd89`
+  (PR #69 merge commit; `git ls-remote origin refs/heads/main` matched it
+  exactly, with no newer commits on `main`). CI and release-please workflows
+  both succeeded on that SHA.
+- **Build:** isolated gitignored worktree `.worktrees/nw18-deploy` pinned to
+  that SHA; `uv build --wheel` produced
+  `/tmp/hermes-home-nw18-082e593/hermes_relay_home-0.1.0-py3-none-any.whl`,
+  SHA-256 `42eecc57e9c655d1eba3ed39b3ad61c5da0264d6d60bbd051777e12eeca9349b`.
+  The wheel packages 33 `hermes_home` source files and contains the NW-18
+  `GET /api/v1/client-claims`, `POST /api/v1/client-claims/close` dispatch,
+  the `claim_ref`/`created_wall_at`/`opened_at` migration, and the startup
+  `service_restart` claim close.
+- **Target:** CaticornQueen (`100.78.105.19`, Windows); Home lives under
+  `C:\ProgramData\HermesHome` and runs as the `Hermes Home` scheduled task.
+- **Service state:** untouched. No authenticated session was established, no
+  wheel was copied or installed, no task was stopped or restarted, and no
+  files were written on the host.
+- **Access prerequisite (blocking):** the dedicated key
+  `~/.ssh/id_ed25519_caticornqueen` (alias `Host caticornqueen`, user `achap`)
+  has not yet completed successful authentication; server-side key
+  installation and permissions remain unverified. The user reported a
+  `too many auth failures` message on the target — recorded as a report, not
+  a diagnosis. Future connections must use
+  a single explicit-identity command:
+  `ssh -o IdentitiesOnly=yes -o IdentityAgent=none -i ~/.ssh/id_ed25519_caticornqueen caticornqueen "<command>"`.
+  No account unlock or sshd change is authorized.
+- **Plan once access works (from `deploy/windows/README.md` and the NW-17 /
+  title-event deployment boundaries):** narrow package-only upgrade — inspect
+  task/settings state, back up the installed package and take a consistent
+  SQLite backup (WAL checkpoint) under `C:\ProgramData\HermesHome\backups\`,
+  `uv pip install --python C:\ProgramData\HermesHome\venv\Scripts\python.exe
+  --no-deps --force-reinstall <wheel>`, restart only the `Hermes Home`
+  scheduled task, then verify hashes, `/pair`, authenticated `/metrics`,
+  Prometheus `up{job="hermes-home"}`, and the new claim routes. Existing
+  root-secret/admin/device/Standard credentials, grace/limit settings,
+  listener and tailnet settings stay untouched; the installer must not be
+  invoked with omitted settings.
+
+## Deployment to CaticornQueen — completed 2026-10-03
+
+This section supersedes the pending-access state above and the earlier
+deployment verification exclusion. The local-test and live-Standard boundaries
+remain distinct. Access succeeded after the user's SSH fix, using the dedicated
+key with `IdentitiesOnly=yes`, `IdentityAgent=none`, and `BatchMode=yes`; no key,
+account, or sshd settings were changed.
+
+### Artifact and preserved runtime
+
+- Deployed **`082e5938615ae4fc037ed6b3a1e791ccda04bd89`**, not a newer `main`.
+  The existing isolated worktree HEAD matched this SHA. Each of the wheel's 33
+  Python source files was byte/hash-compared with `git show <SHA>:src/<path>`.
+- Wheel: `hermes_relay_home-0.1.0-py3-none-any.whl`; local and copied remote
+  SHA-256 both matched
+  `42eecc57e9c655d1eba3ed39b3ad61c5da0264d6d60bbd051777e12eeca9349b`.
+  Remote ZIP integrity passed. After installation, all 33 installed sources
+  and the complete source-file set matched the reviewed wheel exactly.
+- Existing runtime: Python **3.14.7**, distribution version **0.1.0**, SYSTEM
+  scheduled task `Hermes Home`, running the existing
+  `C:\ProgramData\HermesHome\run.ps1`. No installer, dependency upgrade,
+  task re-registration, Prometheus restart, or tailnet route command was used.
+- All **18** `HERMES_HOME*` machine variables and the exported task definition
+  matched the pre-upgrade snapshots. Runner, existing credential files, and
+  Prometheus configuration hashes remained unchanged; the Home configuration
+  API response and installed distribution names/versions also matched.
+  Listeners remain `127.0.0.1:8780` and `127.0.0.1:8766`; claim limit **8**,
+  reconnect grace **120 seconds**, idle timeout **8 seconds**, Standard gateway,
+  and credential paths were preserved.
+- The pre-existing `HERMES_HOME_DEPLOYMENT_REVISION` variable was deliberately
+  preserved with the other settings; it still contains
+  `376583d7273e08a090d7ec33c416e0b32880a343`. It is not proof of this package's
+  revision. The exact installed source comparison and
+  `deployment-receipt.json` identify this deployment.
+
+### Backups and upgrade commands
+
+ACL-protected rollback directory (SYSTEM, Administrators, and the deployment
+account only):
+
+`C:\ProgramData\HermesHome\backups\nw18-082e593-20261003`
+
+- `installed-package.zip`: all **43** prior installed-distribution files,
+  including metadata and console entry points, with venv-relative paths.
+  SHA-256:
+  `2493dabeee2464dd978d0d2abfc64190395a213dc18a8004552006525726ebd7`.
+  `installed-package-manifest.json` records every backed-up file hash.
+- `home-preupgrade.sqlite3`: consistent SQLite online backup made with
+  `sqlite3.Connection.backup`, not a raw database-file copy. This API includes
+  committed WAL contents safely; the live database actually reported
+  `journal_mode=delete`. Backup `PRAGMA integrity_check` returned `ok`.
+  Size **3,190,784 bytes**, SHA-256:
+  `44f9c19dc062f4c1cb3a8f7d82e16d2fbbd7947345a312f6dd108040de00467b`.
+- Retained `task.xml`, `machine-settings.json`, `run.ps1`,
+  `configuration.json`, `preserved-file-hashes.json`,
+  `installed-distributions.json`, the reviewed wheel, and
+  `deployment-receipt.json`. No credentials were printed or copied into this
+  validation note.
+
+After healthy baseline `/pair`, authenticated `/metrics`, and Prometheus
+`up=1`, the package-only cutover used:
+
+```powershell
+Stop-ScheduledTask -TaskName 'Hermes Home'
+# Confirmed both Home listeners released before replacing the package.
+& C:\Users\achap\AppData\Local\Microsoft\WinGet\Links\uv.exe pip install `
+  --python C:\ProgramData\HermesHome\venv\Scripts\python.exe `
+  --no-deps --force-reinstall `
+  C:\ProgramData\HermesHome\backups\nw18-082e593-20261003\hermes_relay_home-0.1.0-py3-none-any.whl
+Start-ScheduledTask -TaskName 'Hermes Home'
+```
+
+Installation and restart commands exited successfully. Only this scheduled
+task was stopped/started. Existing active claims close on service restart by
+design; no real user's claim was separately submitted to the close API.
+
+### Observed live verification
+
+| Check | Observed result |
+| --- | --- |
+| Task/listener stability | `Running`; last start `2026-10-03T20:50:19-05:00`; the same listener PID **18124** and task start time persisted across a **35-second** observation. Last task result **267009** (`0x41301`, task currently running). Both loopback listeners were present. |
+| Pairing page | Local HTTP `GET /pair` returned **200** before and after upgrade. |
+| Authenticated metrics | Local HTTP `GET /metrics` with the existing admin bearer token returned **200**, containing Home metrics. Token read only within the remote process and never emitted. |
+| Home configuration | Authenticated `GET /api/v1/configuration` returned **200**, exactly matching the pre-upgrade configuration. |
+| Prometheus | `/api/v1/targets` reported the `hermes-home` target **up**, empty `lastError`, last scrape `2026-10-03T20:54:36.1635009-05:00`; the `up{job="hermes-home"}` query returned **1**. |
+| Actual NW-18 lifecycle | Through the existing loopback admin enrollment/approval/consume APIs, enrolled **two disposable QA TUI devices**, each granted only an existing available shared Profile. Each created a new, unopened client claim. Authenticated `GET /api/v1/client-claims` returned only that device's own claim, state **connecting**, `max_claims=8`. |
+| Isolation and close | QA device 1 attempting to close QA device 2's ref returned **not_open**. Device 1 closing its own ref returned **closed**; re-list was empty; repeat close returned **not_open**. Device 2's claim remained listed and unchanged, then its own close returned **closed** and re-list was empty. |
+| QA cleanup | Both disposable devices were revoked through the admin API, and each credential subsequently received **401** from claim listing. Both QA claims had already been closed. Credentials existed only in the one-shot remote process; no smoke scripts or credential files were persisted. Revoked enrollment/device and closed-claim audit records remain in SQLite; no direct deletion or household configuration rewrite was performed. |
+
+Final package/configuration/health verification timestamp:
+**2026-10-04T01:54:37.965731Z** (October 3 on the Windows host).
+
+An initial settings-count check used an unsuitable PowerShell collection
+`.Count` expression and stopped with `Environment key count changed` before
+any mutation. Repeating that comparison with
+`@($before.PSObject.Properties).Count` observed **18 before / 18 after** and
+all values equal. This was a verification-script issue, not a settings change.
+
+### Rollback and remaining boundaries
+
+No rollback was needed. A prepared, **not executed** package rollback script is
+retained alongside the assets:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File `
+  C:\ProgramData\HermesHome\backups\nw18-082e593-20261003\rollback-package.ps1
+```
+
+It stops only Home, requires both listeners to release, validates the archived
+package against its manifest, saves a new consistent
+`home-before-rollback-<UTC>.sqlite3`, restores the old Home package/metadata and
+entry points, verifies restored hashes, and starts the unchanged task.
+It deliberately **does not replace the live database** or machine settings:
+post-deployment user data must not be discarded by blindly restoring the older
+SQLite snapshot. Rollback execution/old-code compatibility with the current
+database has not been exercised; after any rollback, verify the task, pairing,
+authenticated metrics, and Prometheus again.
+
+Live feature evidence is the authenticated HTTP create/list/close/isolation
+exercise above, not inference from health. No QA bridge connection, Standard
+Session creation, Hermes prompt, or real user's close request was submitted.
+Live Standard interruption, active/reconnecting WebSocket close behavior,
+tailnet/Tailscale Serve end-to-end routing, iOS consumption, and host sleep were
+not exercised in this deployment. No Vaults/iOS files, commits, or pushes were
+made; the existing worktrees and prior uncommitted validation section were
+preserved.
