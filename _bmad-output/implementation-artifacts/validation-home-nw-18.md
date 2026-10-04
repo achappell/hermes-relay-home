@@ -27,11 +27,12 @@ expiry synchronization, and production `create_bridge_server` claim-store
 wiring. API coverage verifies a closed session is listed inactive and can be
 resumed using its durable session reference.
 
-This validates the Home slice against fake Standard sockets, a fake socket
-connection and the production SQLite claim store. It does not claim live
-Standard Hermes, a real WebSocket server round trip through
-`create_bridge_server`, Tailscale Serve, iOS, or deployment. No sibling
-repository was changed.
+This validates the Home slice against fake Standard sockets and the production
+SQLite claim store. A disposable runtime also exercised Home HTTP on loopback
+and the real `create_bridge_server` WebSocket handshake/request-response path
+with an intentionally invalid method. It does not claim a gateway-backed claim
+close over real WebSockets, live Standard Hermes, Tailscale Serve, iOS, or
+deployment. No sibling repository was changed.
 
 ## Observed checks
 
@@ -39,6 +40,7 @@ repository was changed.
 | --- | --- | --- |
 | Python runtime | `uv run --python 3.14 --locked --extra dev python --version` | `Python 3.14.8` |
 | Focused HOME-NW-18 and adjacent bridge/claim suites | `uv run --python 3.14 --locked --extra dev pytest -q tests/test_client_claim_store.py tests/test_client_claim_list_close_api.py tests/test_client_claim_close_bridge.py tests/test_bridge_server.py tests/test_runtime.py tests/test_client_claims_api.py tests/test_standard_bridge.py tests/test_bridge_endpoint.py` | `382 passed in 11.43s` |
+| Runtime test file after removing forwarding-only assertion | `uv run --python 3.14 --locked --extra dev pytest -q tests/test_runtime.py` | `21 passed in 0.86s` |
 | Full Home test suite | `uv run --python 3.14 --locked --extra dev pytest -q` | `818 passed, 2 warnings in 15.91s` |
 | Ruff lint | `uvx ruff check src tests` | `All checks passed!` |
 | Ruff format | `uvx ruff format --check src tests` | `73 files already formatted` |
