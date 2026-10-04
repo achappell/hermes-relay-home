@@ -146,7 +146,7 @@ paths are unchanged. Authorized operators can read the files locally, for
 example:
 
 ```powershell
-Get-Content C:\ProgramData\HermesHome\logs\home.jsonl
+Get-Content C:\ProgramData\HermesHome\diagnostics\home.jsonl
 ```
 
 `run.ps1` does not append stdout/stderr to a second unbounded log. It launches
