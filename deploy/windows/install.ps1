@@ -260,6 +260,7 @@ $pythonRoot = Join-Path $root 'python'
 $venvRoot = Join-Path $root 'venv'
 $secretRoot = Join-Path $root 'secrets'
 $logRoot = Join-Path $root 'logs'
+$diagnosticsRoot = Join-Path $root 'diagnostics'
 $tokenPath = Join-Path $secretRoot 'admin-token'
 $runnerSource = Join-Path $PSScriptRoot 'run.ps1'
 $runnerPath = Join-Path $root 'run.ps1'
@@ -313,8 +314,8 @@ $existingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyConti
 $taskWasRunning = $null -ne $existingTask -and $existingTask.State -eq 'Running'
 try {
     $null = Stop-ExistingHermesHomeTask -Name $TaskName
-    New-Item -ItemType Directory -Path $root, $appRoot, $secretRoot, $logRoot -Force | Out-Null
-    Set-DiagnosticsDirectoryAcl -Path $logRoot
+    New-Item -ItemType Directory -Path $root, $appRoot, $secretRoot, $logRoot, $diagnosticsRoot -Force | Out-Null
+    Set-DiagnosticsDirectoryAcl -Path $diagnosticsRoot
     Copy-Item -LiteralPath $runnerSource -Destination $runnerPath -Force
 
     $uv = Resolve-UvPath -RequestedPath $UvPath
@@ -339,7 +340,7 @@ try {
 
     $token = Ensure-AdminToken -Path $tokenPath
     [Environment]::SetEnvironmentVariable('HERMES_HOME_DATA_DIR', $root, 'Machine')
-    [Environment]::SetEnvironmentVariable('HERMES_HOME_DIAGNOSTICS_DIR', $logRoot, 'Machine')
+    [Environment]::SetEnvironmentVariable('HERMES_HOME_DIAGNOSTICS_DIR', $diagnosticsRoot, 'Machine')
     [Environment]::SetEnvironmentVariable('HERMES_HOME_BIND_HOST', $BindHost, 'Machine')
     [Environment]::SetEnvironmentVariable('HERMES_HOME_PORT', [string] $Port, 'Machine')
     [Environment]::SetEnvironmentVariable('HERMES_HOME_BRIDGE_BIND_HOST', $BridgeBindHost, 'Machine')

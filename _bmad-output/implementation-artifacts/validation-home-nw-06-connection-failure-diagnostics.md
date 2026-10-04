@@ -101,3 +101,27 @@ capabilities mapping, with a new endpoint regression test.
 `uv run --python 3.14 --extra dev pytest` — 913 passed, four existing warnings in
 22.84s. `uvx ruff check src tests` — all checks passed.
 `uvx ruff format --check src tests` — 74 files already formatted.
+
+## Windows deployment diagnostics directory correction (2026-10-04)
+
+Source correction in `deploy/windows/install.ps1` creates
+`<InstallRoot>\diagnostics`, applies its protected DACL (SYSTEM Modify and
+BUILTIN\Administrators Read), and persists that exact path as the machine
+`HERMES_HOME_DIAGNOSTICS_DIR`. `deploy/windows/run.ps1` applies the same path
+as a per-process override. The existing `logs` directory is kept separate and
+is not the diagnostics sink or the target of the restrictive ACL.
+
+
+Local source gates from the feature worktree:
+
+- `uv run --python 3.14 --extra dev pytest` — 913 passed, 4 existing
+  `websockets.connect()` deprecation warnings in 24.39s.
+- `uvx ruff check src tests` — all checks passed.
+- `uvx ruff format --check src tests` — 74 files already formatted.
+- PowerShell, `pwsh`, and `shellcheck` executables were unavailable, so no
+  parser or Windows script execution gate ran.
+No PowerShell runtime or Windows host was available for local execution, so
+PowerShell parsing, installer/runner execution, and ACL behavior remain
+unverified. No production host was changed, restarted, or otherwise operated.
+This source correction does not establish real-device or deployment
+acceptance.
