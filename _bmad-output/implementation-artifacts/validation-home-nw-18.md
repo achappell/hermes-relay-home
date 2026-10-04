@@ -1,0 +1,121 @@
+---
+story: HOME-NW-18
+status: passed-local
+validated: 2026-10-03
+baseline_commit: b77c830d0c282cee44cdcbbec5008ab754392e01
+implementation_commit: d043192eaa4022689f59d78b3f3dca164dbb8dfc
+---
+
+# HOME-NW-18 validation record
+
+## Verification boundary
+
+Home mints a `claim_ref` for each client claim, lists a device's active
+client claims (`GET /api/v1/client-claims`) and closes an explicit set of them
+(`POST /api/v1/client-claims/close`). Deterministic tests cover the pilot
+claim-leak scenario, active-state mapping, wall-clock timestamps, device
+isolation, `not_open` answers, request validation, proxied requests,
+configuration degradation, absence of Standard calls, credential denials,
+identifier safety in logs/diagnostics, metrics, sticky close reasons,
+concurrent close/create/open/reconnect, and NW-17 to NW-18 migration.
+
+Bridge coverage includes mid-turn client close through a real `HomeBridge` and
+`BridgeEndpoint` using fake Standard sockets (interrupt, close code 1000,
+`stale_conversation`), close races during open/reconnect, the per-handle
+revocation guard, detached-marker activity precedence, parking-lot mark/take/
+expiry synchronization, and production `create_bridge_server` claim-store
+wiring. API coverage verifies a closed session is listed inactive and can be
+resumed using its durable session reference.
+
+This validates the Home slice against fake Standard sockets and the production
+SQLite claim store. A disposable runtime exercised actual Home HTTP and
+`create_bridge_server` WebSocket listeners end-to-end against a controlled
+local Standard-protocol WebSocket stand-in: authorized open, prompt submit,
+disconnect/park, reconnect/adopt, HTTP close, terminal
+`stale_conversation`/1000, repeat close, and inactive-but-preserved Session
+listing with no prompt replay. This was not a live Standard Hermes gateway; no
+household traffic, Tailscale Serve, iOS, or deployment was exercised. No
+sibling repository was changed.
+
+## Observed checks
+
+| Check | Exact command | Result |
+| --- | --- | --- |
+| Python runtime | `uv run --python 3.14 --locked --extra dev python --version` | `Python 3.14.8` |
+| Focused HOME-NW-18 and adjacent bridge/claim suites | `uv run --python 3.14 --locked --extra dev pytest -q tests/test_client_claim_store.py tests/test_client_claim_list_close_api.py tests/test_client_claim_close_bridge.py tests/test_bridge_server.py tests/test_runtime.py tests/test_client_claims_api.py tests/test_standard_bridge.py tests/test_bridge_endpoint.py` | `382 passed in 11.43s` |
+| Runtime test file after removing forwarding-only assertion | `uv run --python 3.14 --locked --extra dev pytest -q tests/test_runtime.py` | `21 passed in 0.86s` |
+| Full Home test suite | `uv run --python 3.14 --locked --extra dev pytest -q` | `818 passed, 2 warnings in 15.91s` |
+| Ruff lint | `uvx ruff check src tests` | `All checks passed!` |
+| Ruff format | `uvx ruff format --check src tests` | `73 files already formatted` |
+| Lockfile check | `uv lock --check` | `Resolved 17 packages in 9ms` |
+| Disposable two-device loopback runtime smoke | One-shot inline Python with `uv run --python 3.14 --locked --extra dev`; no script file persisted | Actual Home HTTP runtime on loopback with temporary SQLite/credentials. Two devices enrolled/authenticated and each created a claim. Device 1 listed only its own ref; close returned `closed`; subsequent list was empty; repeat close returned `not_open`; Device 2 continued listing its own claim. Temporary state removed. |
+| Disposable loopback Home/bridge/Standard-peer lifecycle smoke | One-shot inline Python with `uv run --python 3.14 --locked --extra dev`; no script file persisted | Actual Home HTTP and `create_bridge_server` WebSocket listeners, temporary SQLite/credentials, and a controlled local Standard-protocol WebSocket stand-in (not live Hermes). Authorized open=`ready`; one prompt submitted; after disconnect list=`waiting_to_reconnect`; reconnect=`ready`, list=`replying`; HTTP close=`closed`; client WebSocket close=`1000 stale_conversation`; repeat close=`not_open`; session list retained one row with `active:false`, title `Smoke session`. Stand-in observed counts: `commands.catalog=1`, `session.create=1`, `prompt.submit=1`, `session.interrupt=1`, `session.list=1`; `session.resume=0`; no prompt replay. Temporary state removed. |
+| Smoke warning | Inline smoke command | DeprecationWarning: connect() must be used as a context manager; alternatively use websocket = connect(..., legacy=True) to connect directly. |
+| Whitespace/diff | `git diff --check` | Passed; no output |
+
+## Deviations from the spec text
+
+- The detached marker is set and cleared by the bridge server's parking lot
+  (`park`, `take`, park expiry), not by `BridgeEndpoint.detach`/`adopt`; parking
+  is where "parked" is defined, and the endpoint needs no store reference.
+  `mark_detached` takes only the handle (handles are unique), and parking-lot
+  notifications are serialized with entry insertion/removal.
+- `create_bridge_server` takes an optional `claim_store`; it registers the
+  parking lot's `evict` as a store close listener. Every notifying close
+  (client close, device, grant or Profile revocation) evicts a parked endpoint.
+- Only `client_closed` is terminal in the endpoint. Other stale authorization
+  failures, including device/grant/Profile revocation and generation or
+  configuration changes, retain the existing upstream-failure/reconnect path.
+- `mark_open` refusing an inactive or expired claim yields `stale_conversation`
+  (open and reconnect), matching the close-versus-open row.
+- `create_client_claim` returns `(handle, claim_ref)`.
+- Client-route diagnostic failure codes map onto the existing allowlist
+  (`client_claim_unavailable` → `forbidden`, `claim_limit` and other denials →
+  `claim_denied`, configuration migration → `conflict`); `client_sessions` is
+  also a safe route ID.
+- Close waits for serialized handlers, so it may take longer than 15 seconds;
+  after a client timeout the client must re-list rather than assume the close
+  did not happen.
+
+## Review findings disposition
+
+- **D1 — terminal close semantics:** Implemented only for `client_closed`;
+  other stale authorization failures retain the pre-existing reconnect/upstream
+  behavior. Parameterized bridge tests cover device/grant/Profile revocation and
+  generation/configuration changes. A real local WebSocket close was exercised
+  against a controlled protocol stand-in; live Standard Hermes remains unverified.
+- **D2 — close timeout guidance:** Spec and v1 contract now explain serialized
+  notification handlers may exceed 15 seconds and clients must re-list after a
+  timeout. Household-scale latency was not measured.
+- **P1 — parking marker race:** Marker set/clear callbacks are serialized with
+  parking entry publish/take/expiry. Deterministic gated race tests cover park,
+  take, and expiry. No cross-process marker behavior is claimed; markers are
+  intentionally process-local.
+- **P2 — runtime/parking integration:** A behavioral test closes a parked claim
+  through the store and confirms the parking entry is evicted. Disposable
+  runtime smoke exercised actual HTTP and WebSocket listeners through parking,
+  adoption, bound HTTP close, interrupt, and terminal client disconnect using a
+  controlled local Standard-protocol stand-in. It is not live Hermes.
+- **P3 — close/reopen races:** Tests cover close against open/reconnect and
+  `mark_open` on inactive/expired rows. These use controlled fake upstream
+  sockets, not live Standard.
+- **P4 — diagnostics contracts:** Safe `client_sessions` route ID and diagnostic
+  aliases, including configuration-migration conflict, are pinned by API tests.
+- **P5 — identifier leakage:** Captured logs/diagnostics are checked for private
+  refs/handles/session/grant identifiers in live-close, parked-close, and
+  interrupt-failure cases. This covers observed test output only.
+- **P6 — edge-case coverage:** Tests cover detached-marker precedence for all
+  active activities, Room wake/touch exclusion, API close/list/resume behavior,
+  migration degradation, store failures, and repeated migration. Runtime smoke
+  confirms end-to-end authenticated list/close/isolation behavior for two
+  temporary devices.
+
+Remaining verification boundary: no live household traffic, Standard Hermes,
+Tailscale Serve, iOS client, deployment, or host-sleep behavior was exercised.
+
+## Not verified
+
+Live Standard Hermes interrupt behavior, Tailscale Serve routing, iOS
+consumption, deployment, and host-sleep behavior were not exercised. The local
+Standard protocol peer is a controlled stand-in; it does not validate a real
+Hermes gateway's behavior.

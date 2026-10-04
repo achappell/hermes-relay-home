@@ -360,7 +360,7 @@ def test_removing_a_profile_on_the_page_closes_its_live_claims(page) -> None:
     page.sign_in()
     material = _paired(page, ["amanda"])
     (grant,) = material["client_grants"]
-    handle = page.claims.create_client_claim(
+    handle, _claim_ref = page.claims.create_client_claim(
         claim_id="claim-1",
         device_id=material["device_id"],
         grant_id=grant["grant_id"],

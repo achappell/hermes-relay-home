@@ -395,6 +395,7 @@ def create_runtime(
             port=settings.bridge_port,
             diagnostics=diagnostics,
             reconnect_grace_seconds=settings.client_reconnect_grace_seconds,
+            claim_store=conversation_store,
         )
         bridge_runtime_state["server"] = bridge_server
         bridge_thread = Thread(

@@ -780,3 +780,61 @@ def test_recovery_keeps_original_deadline_and_honors_deferred_close(
         server.shutdown()
         thread.join(timeout=2)
         bridge.close()
+
+
+def test_create_bridge_server_wires_claim_store_for_parking_and_close(
+    tmp_path, monkeypatch
+) -> None:
+    from hermes_home.api import bridge_server
+    from tests.test_client_claim_store import _claim_with_ref, _store
+
+    store = _store(tmp_path)
+    handle, claim_ref = _claim_with_ref(store, "claim-server")
+    store.mark_open(handle, "laptop")
+
+    lots = []
+    original_lot = bridge_server._EndpointParkingLot
+
+    def capture_lot(*args, **kwargs):
+        lot = original_lot(*args, **kwargs)
+        lots.append(lot)
+        return lot
+
+    monkeypatch.setattr(bridge_server, "_EndpointParkingLot", capture_lot)
+
+    class FakeServer:
+        def shutdown(self):
+            return None
+
+    server = create_bridge_server(
+        websocket_serve=lambda *_args, **_kwargs: FakeServer(),
+        claim_store=store,
+    )
+
+    class Parked:
+        conversation_handle = handle
+        has_recoverable_state = True
+
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    parked = Parked()
+    try:
+        (lot,) = lots
+        lot.park(parked)
+        assert [view.state for view in store.client_claims("laptop")] == [
+            "waiting_to_reconnect"
+        ]
+
+        assert store.close_client_claims("laptop", [claim_ref]) == frozenset(
+            {claim_ref}
+        )
+        assert not lot.contains(handle)
+        assert parked.closed
+        assert store.client_claims("laptop") == []
+    finally:
+        server.shutdown()
+        store.close()

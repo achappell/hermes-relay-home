@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 from websockets.sync.client import connect
 
 from hermes_home.bridge.standard import (
+    CLIENT_CLOSED_REASON,
     STANDARD_GATEWAY_PATH,
     AudioSocket,
     BridgeProtocolError,
@@ -76,6 +77,8 @@ class ConversationGrantStore:
         client_reconnect_grace_seconds: float = DEFAULT_CLIENT_RECONNECT_GRACE_SECONDS,
         session_ref_factory: Callable[[], str] | None = None,
         client_grant_checker: Callable[[str, str], bool] | None = None,
+        claim_ref_factory: Callable[[], str] | None = None,
+        wall_clock: Callable[[], float] = time.time,
     ) -> None:
         if (
             type(client_claims_per_device) is not int
@@ -89,6 +92,14 @@ class ConversationGrantStore:
         )
         self._configuration = configuration
         self._client_grant_checker = client_grant_checker
+        self._claim_ref_factory = claim_ref_factory or (
+            lambda: "cref-" + secrets.token_urlsafe(18)
+        )
+        self._wall_clock = wall_clock
+        # Handles whose endpoint is parked after a client socket drop. In
+        # memory only: a restart closes every claim anyway.
+        self._detached: set[str] = set()
+        self._close_listeners: list[Callable[[str], None]] = []
         self._credential_scope_resolver = credential_scope_resolver
         self._clock = clock
         self._idle_timeout = _positive_timeout(idle_timeout_seconds)
@@ -216,6 +227,7 @@ class ConversationGrantStore:
                 if superseded_handle is not None:
                     self._cancel_timer_locked(superseded_handle)
                     self._watch_connected_at.pop(superseded_handle, None)
+                    self._detached.discard(superseded_handle)
                     self._revocation_handlers.pop(superseded_handle, None)
             except sqlite3.IntegrityError as error:
                 self._connection.rollback()
@@ -239,7 +251,7 @@ class ConversationGrantStore:
         configuration_revision: int,
         credential_generation: int | None,
         session_id: str | None = None,
-    ) -> str:
+    ) -> tuple[str, str]:
         """Admit one personal-client conversation for one Profile grant.
 
         Client claims are not Room claims: no Room, arbitration, idle tail, or
@@ -258,6 +270,7 @@ class ConversationGrantStore:
         if session_id is not None:
             session_id = _identifier(session_id, "Standard Session ID")
         now = _finite_time(self._clock())
+        wall_now = _finite_time(self._wall_clock())
         first_open_deadline = now + self._first_open_timeout
         with self._lock:
             self._expire_due_locked(now)
@@ -289,15 +302,17 @@ class ConversationGrantStore:
                         reason="session_busy",
                     )
                 handle = _identifier(self._handle_factory(), "conversation handle")
+                claim_ref = _identifier(self._claim_ref_factory(), "claim reference")
                 self._connection.execute(
                     """
                     INSERT INTO conversation_claims (
                         handle, claim_id, device_id, room_id, wake_mapping_id,
                         profile_id, configuration_revision, credential_generation,
                         session_id, status, activity, idle_deadline, close_reason,
-                        created_at, updated_at, claim_kind, grant_id
+                        created_at, updated_at, claim_kind, grant_id, claim_ref,
+                        created_wall_at
                     ) VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, 'active', 'ready', ?,
-                              NULL, ?, ?, 'client', ?)
+                              NULL, ?, ?, 'client', ?, ?, ?)
                     """,
                     (
                         handle,
@@ -311,6 +326,8 @@ class ConversationGrantStore:
                         now,
                         now,
                         grant_id,
+                        claim_ref,
+                        wall_now,
                     ),
                 )
                 self._connection.commit()
@@ -326,7 +343,7 @@ class ConversationGrantStore:
                 self._connection.rollback()
                 raise OSError("cannot create Home client claim") from error
             self._schedule_timer_locked(handle, first_open_deadline, now)
-        return handle
+        return handle, claim_ref
 
     def session_ref(self, grant_id: str, session_id: str) -> str:
         """Return the stable, grant-scoped opaque reference for a Session."""
@@ -408,6 +425,110 @@ class ConversationGrantStore:
     def close_grant_claims(self, grant_id: str, *, reason: str) -> int:
         """Close every active claim made under one client grant."""
         return self._close_matching_claims("grant_id = ?", (grant_id,), reason)
+
+    @property
+    def max_client_claims(self) -> int:
+        """The per-device client claim limit `create_client_claim` enforces."""
+        return self._client_claims_per_device
+
+    def client_claims(self, device_id: str) -> list[ClientClaimView]:
+        """List the device's active client claims, newest first.
+
+        Runs the same expiry sweep as `create_client_claim`, so the count is
+        the count the per-device limit checks.
+        """
+        device_id = _identifier(device_id, "device ID")
+        now = _finite_time(self._clock())
+        with self._lock:
+            self._expire_due_locked(now)
+            try:
+                rows = self._connection.execute(
+                    "SELECT handle, claim_ref, grant_id, profile_id, session_id, "
+                    "activity, created_wall_at, opened_at "
+                    "FROM conversation_claims WHERE device_id = ? "
+                    "AND claim_kind = 'client' AND status = 'active' "
+                    "AND claim_ref IS NOT NULL",
+                    (device_id,),
+                ).fetchall()
+            except sqlite3.Error as error:
+                raise OSError("cannot read Home client claims") from error
+            detached = set(self._detached)
+        views = [
+            ClientClaimView(
+                claim_ref=claim_ref,
+                grant_id=grant_id,
+                profile_id=profile_id,
+                session_id=session_id,
+                created_at=created_wall_at,
+                opened_at=opened_at,
+                state=_client_claim_state(activity, handle in detached),
+            )
+            for (
+                handle,
+                claim_ref,
+                grant_id,
+                profile_id,
+                session_id,
+                activity,
+                created_wall_at,
+                opened_at,
+            ) in rows
+        ]
+        views.sort(key=lambda view: view.created_at or 0.0, reverse=True)
+        return views
+
+    def close_client_claims(
+        self,
+        device_id: str,
+        claim_refs: Iterable[str],
+        *,
+        reason: str = CLIENT_CLOSED_REASON,
+    ) -> frozenset[str]:
+        """Close the caller's own active client claims named by `claim_ref`.
+
+        Returns the refs this call closed. Revocation handlers run after the
+        store lock is released, so a live bridge interrupts its turn.
+        """
+        device_id = _identifier(device_id, "device ID")
+        refs = tuple(dict.fromkeys(claim_refs))
+        if not refs:
+            return frozenset()
+        with self._lock:
+            self._expire_due_locked(_finite_time(self._clock()))
+        placeholders = ", ".join("?" for _ in refs)
+        closed = self._close_matching_rows(
+            "device_id = ? AND claim_kind = 'client' "
+            f"AND claim_ref IN ({placeholders})",
+            (device_id, *refs),
+            reason,
+        )
+        return frozenset(ref for _handle, ref in closed if ref is not None)
+
+    def add_close_listener(self, listener: Callable[[str], None]) -> None:
+        """Call `listener(handle)` after a notifying close, outside the lock."""
+        self._close_listeners.append(listener)
+
+    def mark_detached(self, handle: str) -> None:
+        """Record that the claim's endpoint is parked after a client drop.
+
+        In memory only and never sets a deadline: adoption does not call
+        `mark_open`, so a deadline could expire a claim whose bridge is live.
+        """
+        with self._lock:
+            try:
+                row = self._connection.execute(
+                    "SELECT 1 FROM conversation_claims WHERE handle = ? "
+                    "AND claim_kind = 'client' AND status = 'active'",
+                    (handle,),
+                ).fetchone()
+            except sqlite3.Error as error:
+                raise OSError("cannot read Home conversation claim") from error
+            if row is not None:
+                self._detached.add(handle)
+
+    def clear_detached(self, handle: str) -> None:
+        with self._lock:
+            self._detached.discard(handle)
 
     def set_client_grant_checker(self, checker: Callable[[str, str], bool]) -> None:
         """Attach the grant check once the credential service exists."""
@@ -589,13 +710,15 @@ class ConversationGrantStore:
                         (reason, now, handle),
                     )
                     self._connection.commit()
+                    self._detached.discard(handle)
                     self._cancel_timer_locked(handle)
                     raise ValueError("conversation claim has expired")
                 self._connection.execute(
                     "UPDATE conversation_claims SET activity = 'open', "
-                    "idle_deadline = NULL, updated_at = ? "
+                    "idle_deadline = NULL, updated_at = ?, "
+                    "opened_at = COALESCE(opened_at, ?) "
                     "WHERE handle = ? AND status = 'active'",
-                    (now, handle),
+                    (now, _finite_time(self._wall_clock()), handle),
                 )
                 self._connection.commit()
             except ValueError:
@@ -607,6 +730,7 @@ class ConversationGrantStore:
                 raise OSError("cannot mark Home conversation open") from error
             self._cancel_timer_locked(handle)
             self._watch_connected_at[handle] = now
+            self._detached.discard(handle)
 
     def mark_disconnected(self, handle: str, device_id: str) -> None:
         """Remove the connected marker; a client claim starts its reconnect grace."""
@@ -666,6 +790,7 @@ class ConversationGrantStore:
                         (reason, now, handle),
                     )
                     self._connection.commit()
+                    self._detached.discard(handle)
                     self._cancel_timer_locked(handle)
                     return False
             except sqlite3.Error as error:
@@ -735,6 +860,7 @@ class ConversationGrantStore:
                     self._connection.rollback()
                     raise OSError("cannot expire Home conversation activity") from error
                 self._cancel_timer_locked(handle)
+                self._detached.discard(handle)
                 raise ValueError("conversation claim has expired")
             if state == "playback_complete" and row[0] not in {
                 "playback",
@@ -952,20 +1078,29 @@ class ConversationGrantStore:
         values: tuple[object, ...],
         reason: str,
     ) -> int:
+        return len(self._close_matching_rows(predicate, values, reason))
+
+    def _close_matching_rows(
+        self,
+        predicate: str,
+        values: tuple[object, ...],
+        reason: str,
+    ) -> list[tuple[str, str | None]]:
+        """Close matching active claims; return their (handle, claim_ref)."""
         now = _finite_time(self._clock())
         notifications: list[tuple[Callable[[str], None], str]] = []
         with self._lock:
             try:
                 self._connection.execute("BEGIN IMMEDIATE")
-                handles = self._connection.execute(
-                    "SELECT handle FROM conversation_claims "
+                rows = self._connection.execute(
+                    "SELECT handle, claim_ref FROM conversation_claims "
                     f"WHERE status = 'active' AND ({predicate})",
                     values,
                 ).fetchall()
-                if not handles:
+                if not rows:
                     self._connection.commit()
-                    return 0
-                cursor = self._connection.execute(
+                    return []
+                self._connection.execute(
                     "UPDATE conversation_claims SET status = 'closed', "
                     "activity = 'closed', idle_deadline = NULL, "
                     "close_reason = ?, updated_at = ? "
@@ -976,18 +1111,25 @@ class ConversationGrantStore:
             except sqlite3.Error as error:
                 self._connection.rollback()
                 raise OSError("cannot revoke Home conversation claims") from error
-            for (handle,) in handles:
+            for handle, _ref in rows:
                 self._cancel_timer_locked(handle)
                 self._watch_connected_at.pop(handle, None)
+                self._detached.discard(handle)
                 for handler in self._revocation_handlers.pop(handle, set()):
                     notifications.append((handler, reason))
-            closed_count = cursor.rowcount
+            listeners = list(self._close_listeners)
         for handler, close_reason in notifications:
             try:
                 handler(close_reason)
             except Exception:
                 LOGGER.exception("conversation claim revocation handler failed")
-        return closed_count
+        for listener in listeners:
+            for handle, _ref in rows:
+                try:
+                    listener(handle)
+                except Exception:
+                    LOGGER.exception("conversation claim close listener failed")
+        return [(handle, ref) for handle, ref in rows]
 
     def _expire(self, handle: str, deadline: float) -> None:
         now = _finite_time(self._clock())
@@ -1006,6 +1148,7 @@ class ConversationGrantStore:
                 return
             self._timers.pop(handle, None)
             self._watch_connected_at.pop(handle, None)
+            self._detached.discard(handle)
 
     def _expire_due_locked(self, now: float) -> None:
         try:
@@ -1027,13 +1170,15 @@ class ConversationGrantStore:
         for (handle,) in rows:
             self._cancel_timer_locked(handle)
             self._watch_connected_at.pop(handle, None)
+            self._detached.discard(handle)
 
     def _close_locked(self, handle: str, reason: str, now: float) -> None:
+        # Only an active row changes: the first close reason is the record.
         try:
             self._connection.execute(
                 "UPDATE conversation_claims SET status = 'closed', activity = 'closed', "
                 "close_reason = ?, idle_deadline = NULL, updated_at = ? "
-                "WHERE handle = ?",
+                "WHERE handle = ? AND status = 'active'",
                 (reason, now, handle),
             )
             self._connection.commit()
@@ -1041,6 +1186,7 @@ class ConversationGrantStore:
             raise OSError("cannot close Home conversation claim") from error
         self._cancel_timer_locked(handle)
         self._watch_connected_at.pop(handle, None)
+        self._detached.discard(handle)
         self._revocation_handlers.pop(handle, None)
 
     def _cancel_timer_locked(self, handle: str) -> None:
@@ -1066,6 +1212,7 @@ class ConversationGrantStore:
             self._timers.clear()
             self._watch_connected_at.clear()
             self._revocation_handlers.clear()
+            self._detached.clear()
             self._connection.close()
 
 
@@ -1087,7 +1234,10 @@ _CLAIMS_TABLE_SQL = """
         created_at REAL NOT NULL,
         updated_at REAL NOT NULL,
         claim_kind TEXT NOT NULL DEFAULT 'room',
-        grant_id TEXT
+        grant_id TEXT,
+        claim_ref TEXT,
+        created_wall_at REAL,
+        opened_at REAL
     )
 """
 _LEGACY_CLAIM_COLUMNS = (
@@ -1097,29 +1247,84 @@ _LEGACY_CLAIM_COLUMNS = (
 )
 
 
+_NW18_CLAIM_COLUMNS = (
+    ("claim_ref", "TEXT"),
+    ("created_wall_at", "REAL"),
+    ("opened_at", "REAL"),
+)
+
+
 def _migrate_claims_table(connection: sqlite3.Connection) -> None:
-    """Rebuild a pre-HOME-NW-17 table so client claims need no Room or mapping."""
+    """Bring an older claims table to the current shape in place.
+
+    Pre-HOME-NW-17 tables are rebuilt so client claims need no Room or
+    mapping; HOME-NW-18 columns are then added whenever missing.
+    """
     columns = {
         row[1] for row in connection.execute("PRAGMA table_info(conversation_claims)")
     }
-    if "claim_kind" in columns:
-        return
     try:
         connection.execute("BEGIN IMMEDIATE")
-        connection.execute("DROP TABLE IF EXISTS conversation_claims_v17")
-        connection.execute(_CLAIMS_TABLE_SQL.format(name="conversation_claims_v17"))
+        if "claim_kind" not in columns:
+            connection.execute("DROP TABLE IF EXISTS conversation_claims_v17")
+            connection.execute(_CLAIMS_TABLE_SQL.format(name="conversation_claims_v17"))
+            connection.execute(
+                f"INSERT INTO conversation_claims_v17 ({_LEGACY_CLAIM_COLUMNS}) "
+                f"SELECT {_LEGACY_CLAIM_COLUMNS} FROM conversation_claims"
+            )
+            connection.execute("DROP TABLE conversation_claims")
+            connection.execute(
+                "ALTER TABLE conversation_claims_v17 RENAME TO conversation_claims"
+            )
+            columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(conversation_claims)")
+            }
+        for name, kind in _NW18_CLAIM_COLUMNS:
+            if name not in columns:
+                connection.execute(
+                    f"ALTER TABLE conversation_claims ADD COLUMN {name} {kind}"
+                )
         connection.execute(
-            f"INSERT INTO conversation_claims_v17 ({_LEGACY_CLAIM_COLUMNS}) "
-            f"SELECT {_LEGACY_CLAIM_COLUMNS} FROM conversation_claims"
-        )
-        connection.execute("DROP TABLE conversation_claims")
-        connection.execute(
-            "ALTER TABLE conversation_claims_v17 RENAME TO conversation_claims"
+            "CREATE UNIQUE INDEX IF NOT EXISTS conversation_claims_claim_ref "
+            "ON conversation_claims(claim_ref) WHERE claim_ref IS NOT NULL"
         )
         connection.commit()
     except sqlite3.Error:
         connection.rollback()
         raise
+
+
+@dataclass(frozen=True, slots=True)
+class ClientClaimView:
+    """One active client claim as the owning device may see it."""
+
+    claim_ref: str
+    grant_id: str | None
+    profile_id: str
+    session_id: str | None
+    created_at: float | None
+    opened_at: float | None
+    state: str
+
+
+_CLIENT_CLAIM_STATES = {
+    "ready": "connecting",
+    "open": "idle",
+    "response_ready": "idle",
+    "idle": "idle",
+    "turn": "replying",
+    "capture": "replying",
+    "playback": "replying",
+    "disconnected": "waiting_to_reconnect",
+}
+
+
+def _client_claim_state(activity: object, detached: bool) -> str:
+    """Map stored activity, plus the parked-endpoint marker, to a list state."""
+    if detached:
+        return "waiting_to_reconnect"
+    return _CLIENT_CLAIM_STATES.get(activity, "idle")
 
 
 def _expiry_reason(activity: object) -> str:
