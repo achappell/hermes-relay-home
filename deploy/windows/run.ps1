@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 
 $root = $PSScriptRoot
 $python = Join-Path $root 'venv\Scripts\python.exe'
-$diagnosticsDirectory = Join-Path $root 'logs'
+$diagnosticsDirectory = Join-Path $root 'diagnostics'
 
 if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
     throw "Hermes Home virtual environment is missing: $python"

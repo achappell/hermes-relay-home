@@ -2,7 +2,7 @@
 
 Date: 2026-10-04. Status: review, not broader story or Epic 6 closure.
 Specification: `spec-home-nw-06-connection-failure-diagnostics.md`.
-Workspace: `.worktrees/home-connection-diagnostics`; branch `feat/home-nw-06-connection-diagnostics`; baseline `144466aa8a1daaed37eb59f7da8bfabfdd4f3897`. No commit, push, or host deployment was performed.
+Workspace: `.worktrees/windows-diagnostics-acl`; branch `fix/windows-diagnostics-acl`. No host deployment or production restart was performed.
 
 ## Observed delivery gate
 
@@ -33,7 +33,13 @@ The integration owner supplied the following observed fast-worker results; these
 
 ## Scope and remaining limits
 
-No PowerShell execution was available. No host deployment, production restart, real-Standard acceptance, iOS/device receive/resolve acceptance, or A11 acceptance was performed. Loopback fixtures establish local transport behavior only. Returned writes do not prove peer receipt. External acceptance remains pending.
+At the time of this earlier validation, PowerShell execution was unavailable.
+No host deployment, production restart, real-Standard acceptance, iOS/device
+receive/resolve acceptance, or A11 acceptance was performed. Loopback fixtures
+establish local transport behavior only. Returned writes do not prove peer
+receipt. External acceptance remains pending. The remote parser-only check
+below validates Windows script syntax only; it does not establish deployment or
+device acceptance.
 
 The supplement is recorded as review in the local tracker, preserving the parent story's existing historical status and Epic 6's in-progress status.
 
@@ -101,3 +107,59 @@ capabilities mapping, with a new endpoint regression test.
 `uv run --python 3.14 --extra dev pytest` — 913 passed, four existing warnings in
 22.84s. `uvx ruff check src tests` — all checks passed.
 `uvx ruff format --check src tests` — 74 files already formatted.
+
+## Windows deployment diagnostics directory correction (2026-10-04)
+
+Source correction in `deploy/windows/install.ps1` creates
+`<InstallRoot>\diagnostics`, applies its protected DACL (SYSTEM Modify and
+BUILTIN\Administrators Read), and persists that exact path as the machine
+`HERMES_HOME_DIAGNOSTICS_DIR`. `deploy/windows/run.ps1` applies the same path
+as a per-process override. The existing `logs` directory is kept separate and
+is not the diagnostics sink or the target of the restrictive ACL. The README
+example reads `C:\ProgramData\HermesHome\diagnostics\home.jsonl`.
+
+PowerShell 5.1 parser-only validation ran remotely on CaticornQueen against the
+exact branch files `deploy/windows/run.ps1` and `deploy/windows/install.ps1`.
+Both full source files were UTF-8/base64-encoded locally and decoded in-memory
+by Windows PowerShell before calling
+`[System.Management.Automation.Language.Parser]::ParseInput(...)`. Neither
+script was invoked; no host files were written and no host state was changed.
+
+Exact remote command (PowerShell script was streamed over stdin; each full file
+was represented by local base64 literal(s), with long literals split into
+short assignments):
+
+```sh
+ssh -T -i ~/.ssh/id_ed25519_caticornqueen \
+  -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes \
+  -o ConnectTimeout=10 caticornqueen \
+  'powershell.exe -NoProfile -NonInteractive -Command -'
+```
+
+The stdin script decoded each base64 source via
+`[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($encoded))`
+and parsed it using
+`[System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$errors)`.
+Observed output:
+
+```text
+run.ps1 error count=0 PowerShell=5.1.26100.9444
+install.ps1 error count=0 PowerShell=5.1.26100.9444
+```
+
+This is syntax validation only; installer/runner execution and ACL behavior
+were not tested. No production host was changed or restarted.
+
+
+Local source gates previously recorded for the diagnostics feature were:
+
+- `uv run --python 3.14 --extra dev pytest` — 913 passed, 4 existing
+  `websockets.connect()` deprecation warnings in 24.39s.
+- `uvx ruff check src tests` — all checks passed.
+- `uvx ruff format --check src tests` — 74 files already formatted.
+
+Those source gates predate this documentation-only correction. Remote parser
+validation above supersedes the prior note that PowerShell was unavailable.
+No production deployment or restart, installer/runner execution, ACL
+acceptance, real-device acceptance, or live Standard/proxy acceptance was
+performed.

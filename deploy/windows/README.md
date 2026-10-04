@@ -118,16 +118,27 @@ logs, virtual environment, and secret live beneath
 `C:\ProgramData\HermesHome`. The installer waits for both `/metrics` and an
 `up{job="hermes-home"}` Prometheus result before returning success.
 
-The operational log directory is `C:\ProgramData\HermesHome\logs` by default
-(or `<InstallRoot>\logs` when `-InstallRoot` is changed); the installer passes
-it to Home as `HERMES_HOME_DIAGNOSTICS_DIR`. Its ACL permits SYSTEM to modify
-logs and Administrators to read them. The single JSONL sink writes
-`home.jsonl` plus four rotated backups (10 MiB active, 50 MiB maximum) and
-expires files after 14 days. Records are limited to 2 KiB and a nonblocking
-1,024-record queue drops newest when full. Loss counters are process-local
-status; best-effort JSONL loss snapshots are emitted at most once per minute
-after losses accumulate. Total sink failure or a crash can leave counters
-unavailable. A partial final line is a gap, not complete evidence.
+The installer preserves the legacy `C:\ProgramData\HermesHome\logs` directory
+(or `<InstallRoot>\logs` when `-InstallRoot` is changed) separately from the
+restricted operational diagnostics directory at
+`C:\ProgramData\HermesHome\diagnostics` (or `<InstallRoot>\diagnostics`). The
+installer creates the diagnostics directory and applies a protected DACL:
+SYSTEM has Modify access and BUILTIN\Administrators have Read access; no
+inherited or other access rules are retained. Existing `logs` contents and ACLs
+are not used for the operational sink or modified by this ACL operation.
+
+The installer persists the diagnostics path as the machine
+`HERMES_HOME_DIAGNOSTICS_DIR` environment variable, and `run.ps1` explicitly
+overrides it for the Home process with the same `<InstallRoot>\diagnostics`
+path. The per-process setting keeps runner behavior aligned with the directory
+whose ACL the installer protects, even if a different machine value was set.
+The single JSONL sink writes `home.jsonl` plus four rotated backups (10 MiB
+active, 50 MiB maximum) and expires files after 14 days. Records are limited
+to 2 KiB and a nonblocking 1,024-record queue drops newest when full. Loss
+counters are process-local status; best-effort JSONL loss snapshots are
+emitted at most once per minute after losses accumulate. Total sink failure or
+a crash can leave counters unavailable. A partial final line is a gap, not
+complete evidence.
 
 Operational JSONL files are local-only; no file-serving or upload route is
 added. Existing authorized Home diagnostics review and opted-in client-report
@@ -135,7 +146,7 @@ paths are unchanged. Authorized operators can read the files locally, for
 example:
 
 ```powershell
-Get-Content C:\ProgramData\HermesHome\logs\home.jsonl
+Get-Content C:\ProgramData\HermesHome\diagnostics\home.jsonl
 ```
 
 `run.ps1` does not append stdout/stderr to a second unbounded log. It launches
