@@ -4047,3 +4047,39 @@ def test_upstream_link_id_is_configured_only_after_explicit_client_opt_in(
     finally:
         opted.close()
         diagnostics.close()
+
+
+def test_opted_in_ready_adds_diagnostics_only_to_upstream_capabilities() -> None:
+    headers = {"X-Hermes-Diagnostics-Version": "1"}
+    bridge = FakeBridge()
+    endpoint = BridgeEndpoint(FakeConnection(), bridge, headers=headers)
+    try:
+        response = _open(endpoint)
+        capabilities = response["result"]["capabilities"]
+        assert capabilities["commands"] == ["status"]
+        assert capabilities["timing"] == "absent"
+        assert capabilities["diagnostics_correlation_v1"] is True
+        assert capabilities["client_diagnostic_report_schemas"] == [1, 2]
+        assert response["diagnostics"] == {
+            "version": 1,
+            "home_connection_id": endpoint._diagnostic_connection_id,
+        }
+    finally:
+        endpoint.close()
+
+    bare = FakeBridge()
+    bare.status = BridgeStatus("ready", HANDLE)
+    endpoint = BridgeEndpoint(FakeConnection(), bare, headers=headers)
+    try:
+        response = _open(endpoint)
+        assert response["result"]["status"] == "ready"
+        capabilities = response["result"]["capabilities"]
+        assert capabilities["commands"] == []
+        assert capabilities["timing"] == "absent"
+        assert capabilities["diagnostics_correlation_v1"] is True
+        assert response["diagnostics"] == {
+            "version": 1,
+            "home_connection_id": endpoint._diagnostic_connection_id,
+        }
+    finally:
+        endpoint.close()

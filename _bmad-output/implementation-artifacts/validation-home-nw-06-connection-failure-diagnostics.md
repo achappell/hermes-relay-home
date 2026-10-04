@@ -89,3 +89,15 @@ Post-fix delivery recheck:
 `uv run --python 3.14 --extra dev pytest && uvx ruff check src tests && uvx ruff format --check src tests`
 — 912 passed, four existing warnings in 22.77s; all lint checks passed;
 74 files already formatted.
+
+## Rebase and D3 recheck (2026-10-04)
+
+The branch was rebased with `git rebase --onto origin/main 144466a`, replaying only
+the NW-06 commit onto squash-merged NW-18 (`a83d478`); it applied without conflicts
+and the PR diff no longer carries NW-18 files. Review item D3 was fixed: opted-in
+ready/reconnect results add diagnostics capability keys only to the existing
+capabilities mapping, with a new endpoint regression test.
+
+`uv run --python 3.14 --extra dev pytest` — 913 passed, four existing warnings in
+22.84s. `uvx ruff check src tests` — all checks passed.
+`uvx ruff format --check src tests` — 74 files already formatted.

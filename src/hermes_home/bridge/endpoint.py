@@ -653,12 +653,13 @@ class BridgeEndpoint:
             result = response.get("result")
             if isinstance(result, dict) and result.get("status") == "ready":
                 capabilities = result.get("capabilities")
-                safe_capabilities = (
-                    dict(capabilities) if isinstance(capabilities, Mapping) else {}
-                )
-                safe_capabilities["diagnostics_correlation_v1"] = True
-                safe_capabilities["client_diagnostic_report_schemas"] = [1, 2]
-                result["capabilities"] = safe_capabilities
+                # Advertise only inside an upstream capabilities mapping;
+                # a synthesized mapping would lack the required wire keys.
+                if isinstance(capabilities, Mapping):
+                    safe_capabilities = dict(capabilities)
+                    safe_capabilities["diagnostics_correlation_v1"] = True
+                    safe_capabilities["client_diagnostic_report_schemas"] = [1, 2]
+                    result["capabilities"] = safe_capabilities
                 response["diagnostics"] = {
                     "version": 1,
                     "home_connection_id": self._diagnostic_connection_id,
