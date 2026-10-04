@@ -92,9 +92,12 @@ class _EndpointParkingLot:
         timer.daemon = True
         with self._lock:
             if self._closed:
-                previous = None
                 close_endpoint = True
+                previous = None
             else:
+                # Serialize the store marker with publish/take/expiry. Without
+                # this, an adoption can clear the marker before this late set.
+                self._notify("mark_detached", handle)
                 previous = self._entries.pop(handle, None)
                 self._entries[handle] = _ParkedEndpoint(endpoint, deadline, timer)
                 close_endpoint = False
@@ -104,25 +107,27 @@ class _EndpointParkingLot:
         if previous is not None:
             previous.timer.cancel()
             previous.endpoint.close()
-        self._notify("mark_detached", handle)
         timer.start()
 
     def close(self) -> None:
         with self._lock:
             self._closed = True
-            entries = list(self._entries.values())
+            entries = list(self._entries.items())
             self._entries.clear()
-        for parked in entries:
+            for handle, _parked in entries:
+                self._notify("clear_detached", handle)
+        for _handle, parked in entries:
             parked.timer.cancel()
             parked.endpoint.close()
 
     def take(self, handle: str) -> _ParkedEndpoint | None:
         with self._lock:
             parked = self._entries.pop(handle, None)
+            if parked is not None:
+                self._notify("clear_detached", handle)
         if parked is None:
             return None
         parked.timer.cancel()
-        self._notify("clear_detached", handle)
         return parked
 
     def evict(self, handle: str) -> None:
@@ -141,8 +146,9 @@ class _EndpointParkingLot:
     def _expire(self, handle: str) -> None:
         with self._lock:
             parked = self._entries.pop(handle, None)
+            if parked is not None:
+                self._notify("clear_detached", handle)
         if parked is not None:
-            self._notify("clear_detached", handle)
             parked.endpoint.close()
 
 

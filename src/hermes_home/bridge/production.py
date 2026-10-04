@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 from websockets.sync.client import connect
 
 from hermes_home.bridge.standard import (
+    CLIENT_CLOSED_REASON,
     STANDARD_GATEWAY_PATH,
     AudioSocket,
     BridgeProtocolError,
@@ -226,6 +227,7 @@ class ConversationGrantStore:
                 if superseded_handle is not None:
                     self._cancel_timer_locked(superseded_handle)
                     self._watch_connected_at.pop(superseded_handle, None)
+                    self._detached.discard(superseded_handle)
                     self._revocation_handlers.pop(superseded_handle, None)
             except sqlite3.IntegrityError as error:
                 self._connection.rollback()
@@ -480,7 +482,7 @@ class ConversationGrantStore:
         device_id: str,
         claim_refs: Iterable[str],
         *,
-        reason: str = "client_closed",
+        reason: str = CLIENT_CLOSED_REASON,
     ) -> frozenset[str]:
         """Close the caller's own active client claims named by `claim_ref`.
 
@@ -516,7 +518,7 @@ class ConversationGrantStore:
             try:
                 row = self._connection.execute(
                     "SELECT 1 FROM conversation_claims WHERE handle = ? "
-                    "AND status = 'active'",
+                    "AND claim_kind = 'client' AND status = 'active'",
                     (handle,),
                 ).fetchone()
             except sqlite3.Error as error:
@@ -708,6 +710,7 @@ class ConversationGrantStore:
                         (reason, now, handle),
                     )
                     self._connection.commit()
+                    self._detached.discard(handle)
                     self._cancel_timer_locked(handle)
                     raise ValueError("conversation claim has expired")
                 self._connection.execute(
@@ -787,6 +790,7 @@ class ConversationGrantStore:
                         (reason, now, handle),
                     )
                     self._connection.commit()
+                    self._detached.discard(handle)
                     self._cancel_timer_locked(handle)
                     return False
             except sqlite3.Error as error:
@@ -856,6 +860,7 @@ class ConversationGrantStore:
                     self._connection.rollback()
                     raise OSError("cannot expire Home conversation activity") from error
                 self._cancel_timer_locked(handle)
+                self._detached.discard(handle)
                 raise ValueError("conversation claim has expired")
             if state == "playback_complete" and row[0] not in {
                 "playback",

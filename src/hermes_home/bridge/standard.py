@@ -120,6 +120,11 @@ class BridgeAuthorizationError(RuntimeError):
         super().__init__(f"home bridge authorization failed: {reason}")
 
 
+# The close reason a personal client's own close records (HOME-NW-18). Only it
+# makes a live bridge end its client's conversation as terminal.
+CLIENT_CLOSED_REASON = "client_closed"
+
+
 class BridgeClaimClosed(BridgeAuthorizationError):
     """Home closed the bound claim; the conversation is over for this client."""
 
@@ -1631,24 +1636,28 @@ class HomeBridge:
                 {"session_id": runtime_session_id},
                 timeout=1.0,
             )
-        except Exception:
+        except Exception as error:  # noqa: BLE001 - interrupt is best effort
+            # Type only: exception text may carry Standard identifiers.
             LOGGER.warning(
-                "could not interrupt unbound Standard session", exc_info=True
+                "could not interrupt unbound Standard session: %s",
+                type(error).__name__,
             )
         gateway.close()
 
     def _on_claim_revoked(self, revoked_handle: str, reason: str) -> None:
         """Stop a live Standard Session after its durable claim is revoked."""
 
-        del reason
         with self._lifecycle_lock:
             with self._state_lock:
                 handle = self._conversation_handle
                 if handle != revoked_handle:
                     return
+                # Only the owning client's own close is terminal for its
+                # socket. Every other revocation keeps the upstream-failure
+                # outcome clients already handle (HOME-NW-18 review D1).
                 # Set before the gateway closes, so the reader that sees the
                 # close reports a closed claim instead of an upstream failure.
-                self._claim_closed = True
+                self._claim_closed = reason == CLIENT_CLOSED_REASON
                 gateway = self._gateway
                 runtime_session_id = self._runtime_session_id
             if gateway is not None and runtime_session_id is not None:
@@ -1658,10 +1667,12 @@ class HomeBridge:
                         {"session_id": runtime_session_id},
                         timeout=1.0,
                     )
-                except Exception:
+                except Exception as error:  # noqa: BLE001 - interrupt is best effort
+                    # Type only: exception text may carry Standard identifiers.
                     LOGGER.warning(
-                        "could not interrupt Standard session after claim revocation",
-                        exc_info=True,
+                        "could not interrupt Standard session after claim "
+                        "revocation: %s",
+                        type(error).__name__,
                     )
             self._close_audio()
             if gateway is not None:

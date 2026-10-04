@@ -10,6 +10,7 @@ import pytest
 
 from hermes_home.api.application import HomeApplication
 from hermes_home.domain.arbitration import ArbitrationEngine
+from hermes_home.domain.configuration import ConfigurationMigrationRequired
 from hermes_home.observability.diagnostics import (
     DiagnosticsRecorder,
     InMemoryDiagnosticsStore,
@@ -114,6 +115,10 @@ def test_pilot_claim_leak_reproduces_then_clears(home) -> None:
     refused = home.claim(material, grant_id, "claim-next")
     assert refused.status == 409
     assert refused.body["error"]["code"] == "claim_limit"
+    assert any(
+        event.route_id == "client_claims" and event.failure_code == "claim_denied"
+        for event in home.diagnostics.accepted
+    )
 
     listed = home.list(material)
     assert listed.status == 200
@@ -280,6 +285,17 @@ def test_list_and_close_never_call_the_session_directory(home) -> None:
     assert home.close(material, [ref]).status == 200
     assert home.directory.requests == []
 
+    class BrokenDirectory:
+        def list_sessions(self, *_args, **_kwargs):
+            raise AssertionError("claim routes must not query Standard")
+
+        def most_recent(self, *_args, **_kwargs):
+            raise AssertionError("claim routes must not query Standard")
+
+    home.app._session_directory = BrokenDirectory()
+    assert home.list(material).status == 200
+    assert home.close(material, [ref]).status == 200
+
 
 def test_revoked_replaced_and_expired_credentials_are_unauthorized(home) -> None:
     revoked = home.pair("revoked", ["amanda"])
@@ -388,3 +404,92 @@ def test_identifiers_never_reach_logs_metrics_or_diagnostics(home, caplog) -> No
     assert 'route="client_claim_close"' in captured
     for secret in (body["claim_ref"], handle, handle[:8], session_ref, grant_id):
         assert secret not in captured
+
+
+def test_migration_required_degrades_list_and_is_recorded_for_create(
+    home, monkeypatch
+) -> None:
+    material = home.pair("laptop", ["amanda"])
+    grant_id = _grant(material, "Amanda")["grant_id"]
+    home.new_claim(material, grant_id, "claim-1")
+
+    def migration_required():
+        raise ConfigurationMigrationRequired(3)
+
+    monkeypatch.setattr(home.configuration, "read", migration_required)
+    listed = home.list(material)
+    assert listed.status == 200
+    assert listed.body["claims"][0]["profile_label"] is None
+
+    refused = home.claim(material, grant_id, "claim-2")
+    assert refused.status == 409
+    assert refused.body["error"]["code"] == "configuration_migration_required"
+    assert any(
+        event.route_id == "client_claims" and event.failure_code == "conflict"
+        for event in home.diagnostics.accepted
+    )
+
+
+def test_client_sessions_route_is_recorded_with_safe_route_id(home) -> None:
+    material = home.pair("laptop", ["amanda"])
+    grant_id = _grant(material, "Amanda")["grant_id"]
+    response = home.call(
+        "POST",
+        "/api/v1/client-sessions/list",
+        {"schema": 1, "grant_id": grant_id, "limit": 10},
+        credential=material["credential"],
+    )
+    assert response.status == 200
+    assert any(
+        event.route_id == "client_sessions" for event in home.diagnostics.accepted
+    )
+
+
+def test_claim_routes_return_503_when_store_operations_fail(home, monkeypatch) -> None:
+    material = home.pair("laptop", ["amanda"])
+
+    def unavailable(*_args, **_kwargs):
+        raise OSError("store unavailable")
+
+    monkeypatch.setattr(home.claims, "client_claims", unavailable)
+    assert home.list(material).body["error"]["code"] == "service_unavailable"
+    monkeypatch.setattr(home.claims, "close_client_claims", unavailable)
+    assert (
+        home.close(material, ["cref-random"]).body["error"]["code"]
+        == "service_unavailable"
+    )
+    home.app._conversation_claim_store = None
+    assert home.list(material).status == 503
+    assert home.close(material, ["cref-random"]).status == 503
+
+
+def test_list_degrades_session_ref_lookup_to_null(home, monkeypatch) -> None:
+    material = home.pair("laptop", ["amanda"])
+    grant_id = _grant(material, "Amanda")["grant_id"]
+    home.claims.create_client_claim(
+        claim_id="claim-session-ref-failure",
+        device_id=material["device_id"],
+        grant_id=grant_id,
+        profile_id="amanda",
+        configuration_revision=1,
+        credential_generation=1,
+        session_id="stored-session",
+    )
+
+    def unavailable(*_args, **_kwargs):
+        raise OSError("session reference unavailable")
+
+    monkeypatch.setattr(home.claims, "session_ref", unavailable)
+    listed = home.list(material)
+    assert listed.status == 200
+    assert listed.body["claims"][0]["session_ref"] is None
+
+
+def test_client_claim_routes_refuse_when_credential_service_is_missing(home) -> None:
+    material = home.pair("laptop", ["amanda"])
+    home.app._credential_service = None
+    assert home.list(material).body["error"]["code"] == "client_claim_unavailable"
+    assert (
+        home.close(material, ["cref-random"]).body["error"]["code"]
+        == "client_claim_unavailable"
+    )

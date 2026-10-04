@@ -243,6 +243,16 @@ def test_pre_client_claim_database_is_migrated_in_place(tmp_path) -> None:
         "SELECT claim_kind, room_id FROM conversation_claims WHERE handle = 'old'"
     ).fetchone()
     assert kind == ("room", "kitchen")
+    columns = {
+        row[1]
+        for row in store._connection.execute("PRAGMA table_info(conversation_claims)")
+    }
+    assert {"claim_ref", "created_wall_at", "opened_at"} <= columns
+    index_sql = store._connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' "
+        "AND name = 'conversation_claims_claim_ref'"
+    ).fetchone()[0]
+    assert index_sql.endswith("WHERE claim_ref IS NOT NULL")
 
 
 # HOME-NW-18: list and close a device's own client claims.
@@ -328,6 +338,47 @@ def test_a_parked_claim_waits_to_reconnect_whatever_its_activity(tmp_path) -> No
     assert _state_of(store, ref) == "idle"
 
 
+def test_detached_marker_overrides_every_active_activity(tmp_path) -> None:
+    store = _store(tmp_path, client_claims_per_device=16)
+    expected = {
+        "ready": "connecting",
+        "open": "idle",
+        "response_ready": "idle",
+        "idle": "idle",
+        "turn": "replying",
+        "capture": "replying",
+        "playback": "replying",
+        "disconnected": "waiting_to_reconnect",
+    }
+    for activity in expected:
+        handle, ref = _claim_with_ref(store, f"detached-{activity}")
+        store._connection.execute(
+            "UPDATE conversation_claims SET activity = ? WHERE handle = ?",
+            (activity, handle),
+        )
+        store._connection.commit()
+        store.mark_detached(handle)
+        assert _state_of(store, ref) == "waiting_to_reconnect"
+    store.close()
+
+
+def test_mark_open_rejects_inactive_and_expired_claims(tmp_path) -> None:
+    clock = Clock()
+    store = _store(tmp_path, clock)
+    inactive_handle, inactive_ref = _claim_with_ref(store, "inactive")
+    store.close_client_claims("laptop", [inactive_ref])
+    with pytest.raises(ValueError, match="no longer active"):
+        store.mark_open(inactive_handle, "laptop")
+    assert _close_reason(store, inactive_handle) == "client_closed"
+
+    expired_handle, _expired_ref = _claim_with_ref(store, "expired")
+    clock.now += 91
+    with pytest.raises(ValueError, match="expired"):
+        store.mark_open(expired_handle, "laptop")
+    assert _close_reason(store, expired_handle) == "first_open_expired"
+    store.close()
+
+
 def test_detached_marker_never_sets_a_deadline(tmp_path) -> None:
     clock = Clock()
     store = _store(tmp_path, clock)
@@ -381,6 +432,48 @@ def test_list_is_device_scoped_and_excludes_room_claims(tmp_path) -> None:
     _claim_with_ref(store, "claim-2", device_id="phone")
 
     assert [view.claim_ref for view in store.client_claims("laptop")] == [own_ref]
+
+
+def test_wake_and_touch_room_claims_are_not_listed_or_closed_by_refs(tmp_path) -> None:
+    store = _store(tmp_path, client_claims_per_device=8)
+    wake = WakeDecision(
+        claim_id="wake-1",
+        decision="granted",
+        arbitration_id="arb-wake",
+        configuration_revision=3,
+        device_id="laptop",
+        room_id="kitchen",
+        wake_mapping_id="hey-hermes",
+        profile_id="amanda",
+    )
+    touch = WakeDecision(
+        claim_id="touch-1",
+        decision="granted",
+        arbitration_id="arb-touch",
+        configuration_revision=3,
+        device_id="laptop",
+        room_id="bedroom",
+        wake_mapping_id="hey-hermes",
+        profile_id="amanda",
+        claim_kind="touch",
+    )
+    wake_handle = store.create_from_decision(wake, credential_generation=1)
+    touch_handle = store.create_from_decision(touch, credential_generation=1)
+
+    store._connection.execute(
+        "UPDATE conversation_claims SET claim_ref = CASE handle "
+        "WHEN ? THEN 'cref-wake' ELSE 'cref-touch' END "
+        "WHERE handle IN (?, ?)",
+        (wake_handle, wake_handle, touch_handle),
+    )
+    store._connection.commit()
+    assert store.client_claims("laptop") == []
+    assert (
+        store.close_client_claims("laptop", ["cref-wake", "cref-touch"]) == frozenset()
+    )
+    assert store.resolve(wake_handle, "laptop") is not None
+    assert store.resolve(touch_handle, "laptop") is not None
+    store.close()
 
 
 def test_list_is_newest_first_and_counts_what_the_limit_counts(tmp_path) -> None:
@@ -534,3 +627,19 @@ def test_nw17_database_gains_claim_refs_in_place(tmp_path) -> None:
         for row in again._connection.execute("PRAGMA table_info(conversation_claims)")
     ]
     assert columns.count("claim_ref") == 1
+    assert {"claim_ref", "created_wall_at", "opened_at"} <= set(columns)
+    index = again._connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' "
+        "AND name = 'conversation_claims_claim_ref'"
+    ).fetchone()
+    assert index is not None
+    assert index[0].endswith("WHERE claim_ref IS NOT NULL")
+    assert again._connection.execute(
+        "SELECT status, close_reason, claim_ref FROM conversation_claims "
+        "WHERE handle = ?",
+        (old_handle,),
+    ).fetchone() == ("closed", "service_restart", None)
+    assert again._connection.execute(
+        "SELECT status, close_reason FROM conversation_claims WHERE handle = ?",
+        (_handle,),
+    ).fetchone() == ("closed", "service_restart")

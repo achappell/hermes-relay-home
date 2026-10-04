@@ -29,6 +29,7 @@ from hermes_home.bridge.standard import (
     AudioFrame,
     BridgeAuthorizationError,
     BridgeCapabilityUnavailable,
+    BridgeClaimClosed,
     BridgeEvent,
     BridgeProtocolError,
     BridgeRequestRejected,
@@ -1350,7 +1351,7 @@ class BridgeEndpoint:
                 self._mark_unavailable("protocol_error")
                 self.close()
                 return
-            except BridgeAuthorizationError as error:
+            except BridgeClaimClosed:
                 with self._state_lock:
                     if (
                         self._conversation_closing
@@ -1359,15 +1360,11 @@ class BridgeEndpoint:
                         or generation != self._upstream_generation
                     ):
                         continue
-                    if error.code != "stale_conversation":
-                        self._retiring_upstream = True
-                if error.code == "stale_conversation":
-                    # Home closed this claim. That is terminal, not an
-                    # upstream failure: no recovery, no upstream log line.
-                    self._end_closed_conversation()
-                    return
-                self._retire_failed_upstream(error)
-                continue
+                # The owning client closed this claim through Home. That is
+                # terminal, not an upstream failure: no recovery, no upstream
+                # log line. Other revocations stay on the path below.
+                self._end_closed_conversation()
+                return
             except (
                 BridgeTimeoutError,
                 TimeoutError,

@@ -537,8 +537,13 @@ The closed claim's client sees a terminal result: a live socket gets
 `session.interrupt` upstream, becomes unavailable with reason
 `stale_conversation`, and closes with code 1000; a parked or later
 `conversation.open`/`conversation.reconnect` answers `stale_conversation`.
-A close may wait for an in-flight open on that claim; use a timeout of at least
-15 s. Prefer `conversation.close` for the claim a socket is bound to.
+A close is committed before notification handlers run, but those handlers run
+serially. Each live handler can wait for an in-flight open or reconnect to
+finish its Standard round trips while holding the bridge lifecycle lock, then
+wait up to one second for `session.interrupt`; latency can therefore grow with
+the number of live claims and exceed 15 seconds. If a close request times out,
+re-list before retrying or assuming which claims remain open. Prefer
+`conversation.close` for the claim a socket is bound to.
 
 A client detects these routes from `claim_ref` in the create response; older
 Home answers both with `404 not_found`.

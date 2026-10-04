@@ -2505,6 +2505,7 @@ _DIAGNOSTIC_CODE_ALIASES = {
     "session_unavailable": "not_found",
     "profile_unavailable": "claim_denied",
     "stale_configuration": "conflict",
+    "configuration_migration_required": "conflict",
     "duplicate_claim": "conflict",
 }
 
