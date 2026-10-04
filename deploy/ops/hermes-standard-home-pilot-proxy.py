@@ -18,14 +18,24 @@ from __future__ import annotations
 import hmac
 import logging
 import os
+import re
 import threading
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+import websockets
 from websockets.exceptions import ConnectionClosed
 from websockets.http11 import Headers, Request, Response
 from websockets.sync.client import ClientConnection, connect
 from websockets.sync.server import ServerConnection, serve
+
+from hermes_home_diagnostics import (
+    OperationalDiagnostics,
+    SafeTransportLogHandler,
+    close_fields,
+    exception_fields,
+    new_connection_id,
+)
 
 LOGGER = logging.getLogger("hermes.standard_home_pilot_proxy")
 
@@ -37,6 +47,9 @@ DEFAULT_PROXY_PORT = 9121
 DEFAULT_UPSTREAM_URI = "ws://127.0.0.1:9120"
 # Session resume includes history; keep the same bounded budget as Home.
 MAX_MESSAGE_SIZE = 16 * 1_048_576
+_HOME_CONNECTION_HEADER = "x-hermes-diagnostic-connection"
+_CONNECTION_ID = re.compile(r"conn-[0-9a-f]{32}\Z")
+
 
 
 def _token_path() -> Path:
@@ -135,35 +148,246 @@ def _upstream_uri(request_path: str, token_path: Path) -> str:
     )
 
 
-def _close_quietly(connection: ServerConnection | ClientConnection | None) -> None:
-    if connection is None:
+def _emit_operational(
+    diagnostics: OperationalDiagnostics | None,
+    event: str,
+    **fields: object,
+) -> None:
+    if diagnostics is None:
         return
     try:
+        diagnostics.emit(event, **fields)
+    except Exception:  # noqa: BLE001 - diagnostics never owns relay behavior
+        return
+
+
+def _home_connection_link(
+    connection: ServerConnection,
+    diagnostics: OperationalDiagnostics | None,
+) -> tuple[str | None, str]:
+    values = [
+        value
+        for name, value in connection.request.headers.raw_items()
+        if name.casefold() == _HOME_CONNECTION_HEADER
+    ]
+    if not values:
+        return None, "unavailable"
+    if len(values) != 1:
+        if diagnostics is not None:
+            diagnostics.add_loss("correlation_conflicts")
+        return None, "ambiguous"
+    if _CONNECTION_ID.fullmatch(values[0]) is None:
+        if diagnostics is not None:
+            diagnostics.add_loss("correlation_conflicts")
+        return None, "unavailable"
+    return values[0], "linked"
+
+
+def _connection_close_projection(
+    diagnostics: OperationalDiagnostics | None,
+    connection: ServerConnection | ClientConnection,
+    *,
+    connection_id: str,
+    peer_connection_id: str | None,
+    home_connection_id: str | None,
+    correlation_state: str,
+    leg: str,
+    error: BaseException | None = None,
+    closing_error: bool = False,
+) -> None:
+    facts = close_fields(connection, error)
+    exception = exception_fields(error)
+    category = exception["exception_category"]
+    cause = exception["cause_category"]
+    sent = facts["sent_close_code"]
+    received = facts["received_close_code"]
+    if closing_error and (category == "timeout" or cause == "timeout"):
+        classification = "timeout_during_close"
+    elif category == "connection_closed_ok" or (
+        sent in {1000, 1001} and received in {1000, 1001}
+    ):
+        classification = "normal_shutdown"
+    elif error is not None or facts["observed_status_code"] == 1006:
+        classification = "transport_error"
+    else:
+        classification = "unknown"
+    order = facts["close_order"]
+    initiator = (
+        "local"
+        if order == "sent_first" or (sent is not None and received is None)
+        else "peer"
+        if order == "received_first" or (received is not None and sent is None)
+        else "unknown"
+    )
+    _emit_operational(
+        diagnostics,
+        "connection_closed",
+        leg=leg,
+        phase="closed",
+        classification=classification,
+        connection_id=connection_id,
+        peer_connection_id=peer_connection_id,
+        home_connection_id=home_connection_id,
+        correlation_state=correlation_state,
+        initiator=initiator,
+        close_trigger=(
+            "counterpart_closed"
+            if initiator == "peer"
+            else "transport_error"
+            if error is not None
+            else "unknown"
+        ),
+        **facts,
+    )
+
+
+def _observe_transport(
+    diagnostics: OperationalDiagnostics | None,
+    connection: ServerConnection | ClientConnection | None,
+    connection_id: str,
+    peer_connection_id: str | None,
+    home_connection_id: str | None,
+    correlation_state: str,
+    leg: str,
+    error: BaseException,
+) -> None:
+    facts = close_fields(connection, error)
+    exception = exception_fields(error)
+    category = exception["exception_category"]
+    cause = exception["cause_category"]
+    sent = facts["sent_close_code"]
+    received = facts["received_close_code"]
+    if category == "connection_closed_ok" and cause == "timeout":
+        classification = "timeout_during_close"
+    elif category == "connection_closed_ok":
+        classification = "normal_shutdown"
+    else:
+        classification = "transport_error"
+    order = facts["close_order"]
+    initiator = (
+        "local"
+        if order == "sent_first" or (sent is not None and received is None)
+        else "peer"
+        if order == "received_first" or (received is not None and sent is None)
+        else "unknown"
+    )
+    _emit_operational(
+        diagnostics,
+        "transport_observed",
+        leg=leg,
+        phase="closing",
+        classification=classification,
+        connection_id=connection_id,
+        peer_connection_id=peer_connection_id,
+        home_connection_id=home_connection_id,
+        correlation_state=correlation_state,
+        initiator=initiator,
+        close_trigger=(
+            "counterpart_closed"
+            if initiator == "peer"
+            else "transport_error"
+        ),
+        **facts,
+    )
+
+
+def _close_quietly(
+    connection: ServerConnection | ClientConnection | None,
+) -> BaseException | None:
+    if connection is None:
+        return None
+    try:
         connection.close()
-    except (ConnectionClosed, OSError, RuntimeError):  # fmt: skip
-        pass
+    except Exception as error:  # noqa: BLE001 - relay cleanup stays best effort
+        return error
+    return None
 
 
 def _pump(
     source: ServerConnection | ClientConnection,
     target: ServerConnection | ClientConnection,
     stopped: threading.Event,
+    *,
+    diagnostics: OperationalDiagnostics | None,
+    source_connection_id: str,
+    target_connection_id: str,
+    home_connection_id: str | None,
+    correlation_state: str,
+    direction: str,
+    target_leg: str,
 ) -> None:
-    try:
-        while not stopped.is_set():
-            target.send(source.recv())
-    except (ConnectionClosed, EOFError, OSError, RuntimeError, TimeoutError):  # fmt: skip
-        pass
-    except Exception:  # pragma: no cover - defensive logging for a live relay
-        LOGGER.exception("Standard pilot WebSocket relay failed")
-    finally:
-        if not stopped.is_set():
-            stopped.set()
-            _close_quietly(target)
+    while not stopped.is_set():
+        try:
+            message = source.recv()
+        except Exception as error:  # noqa: BLE001 - project typed transport facts
+            _observe_transport(
+                diagnostics,
+                source,
+                connection_id=source_connection_id,
+                peer_connection_id=target_connection_id,
+                home_connection_id=home_connection_id,
+                correlation_state=correlation_state,
+                leg=(
+                    "home_proxy"
+                    if direction == "home_to_standard"
+                    else "proxy_standard"
+                ),
+                error=error,
+            )
+            break
+        try:
+            target.send(message)
+        except Exception as error:  # noqa: BLE001 - project typed transport facts
+            _observe_transport(
+                diagnostics,
+                target,
+                connection_id=target_connection_id,
+                peer_connection_id=source_connection_id,
+                home_connection_id=home_connection_id,
+                correlation_state=correlation_state,
+                leg=target_leg,
+                error=error,
+            )
+            break
+        _emit_operational(
+            diagnostics,
+            "proxy_message_write_outcome",
+            connection_id=target_connection_id,
+            peer_connection_id=source_connection_id,
+            home_connection_id=home_connection_id,
+            correlation_state=correlation_state,
+            leg=target_leg,
+            phase="stream",
+            direction=direction,
+            frame_kind="text" if isinstance(message, str) else "binary",
+            outcome="write_returned",
+        )
+    if not stopped.is_set():
+        stopped.set()
+        _close_quietly(target)
 
 
-def _proxy_connection(connection: ServerConnection, *, token_path: Path) -> None:
+def _proxy_connection(
+    connection: ServerConnection,
+    *,
+    token_path: Path,
+    diagnostics: OperationalDiagnostics | None = None,
+) -> None:
+    proxy_connection_id = new_connection_id()
+    home_connection_id, correlation_state = _home_connection_link(
+        connection, diagnostics
+    )
+    _emit_operational(
+        diagnostics,
+        "connection_opened",
+        leg="home_proxy",
+        connection_id=proxy_connection_id,
+        home_connection_id=home_connection_id,
+        correlation_state=correlation_state,
+        phase="open",
+    )
     upstream: ClientConnection | None = None
+    standard_connection_id = new_connection_id()
     try:
         upstream = connect(
             _upstream_uri(connection.request.path, token_path),
@@ -171,16 +395,59 @@ def _proxy_connection(connection: ServerConnection, *, token_path: Path) -> None
             proxy=None,
             max_size=MAX_MESSAGE_SIZE,
         )
+        _emit_operational(
+            diagnostics,
+            "connection_opened",
+            leg="proxy_standard",
+            connection_id=standard_connection_id,
+            peer_connection_id=proxy_connection_id,
+            home_connection_id=home_connection_id,
+            correlation_state=correlation_state,
+            phase="open",
+        )
+        for leg, current_id, peer_id in (
+            ("home_proxy", proxy_connection_id, standard_connection_id),
+            ("proxy_standard", standard_connection_id, proxy_connection_id),
+        ):
+            _emit_operational(
+                diagnostics,
+                "connection_ready",
+                leg=leg,
+                connection_id=current_id,
+                peer_connection_id=peer_id,
+                home_connection_id=home_connection_id,
+                correlation_state=correlation_state,
+                ready_kind="open",
+                phase="open",
+            )
         stopped = threading.Event()
         threads = [
             threading.Thread(
                 target=_pump,
+                kwargs={
+                    "diagnostics": diagnostics,
+                    "source_connection_id": proxy_connection_id,
+                    "target_connection_id": standard_connection_id,
+                    "home_connection_id": home_connection_id,
+                    "correlation_state": correlation_state,
+                    "direction": "home_to_standard",
+                    "target_leg": "proxy_standard",
+                },
                 args=(connection, upstream, stopped),
                 name="standard-pilot-client-to-upstream",
                 daemon=True,
             ),
             threading.Thread(
                 target=_pump,
+                kwargs={
+                    "diagnostics": diagnostics,
+                    "source_connection_id": standard_connection_id,
+                    "target_connection_id": proxy_connection_id,
+                    "home_connection_id": home_connection_id,
+                    "correlation_state": correlation_state,
+                    "direction": "standard_to_home",
+                    "target_leg": "home_proxy",
+                },
                 args=(upstream, connection, stopped),
                 name="standard-pilot-upstream-to-client",
                 daemon=True,
@@ -190,31 +457,99 @@ def _proxy_connection(connection: ServerConnection, *, token_path: Path) -> None
             thread.start()
         for thread in threads:
             thread.join()
-    except (ConnectionClosed, OSError, RuntimeError, TimeoutError, ValueError) as error:
-        LOGGER.warning("Standard pilot upstream unavailable: %s", type(error).__name__)
+    except (
+        ConnectionClosed,
+        OSError,
+        RuntimeError,
+        TimeoutError,
+        ValueError,
+    ) as error:
+        if upstream is None:
+            _observe_transport(
+                diagnostics,
+                None,
+                connection_id=standard_connection_id,
+                peer_connection_id=proxy_connection_id,
+                home_connection_id=home_connection_id,
+                correlation_state=correlation_state,
+                leg="proxy_standard",
+                error=error,
+            )
         _close_quietly(connection)
     finally:
-        _close_quietly(upstream)
-        _close_quietly(connection)
+        upstream_close_error = _close_quietly(upstream)
+        home_close_error = _close_quietly(connection)
+        _connection_close_projection(
+            diagnostics,
+            connection,
+            connection_id=proxy_connection_id,
+            peer_connection_id=standard_connection_id if upstream else None,
+            home_connection_id=home_connection_id,
+            correlation_state=correlation_state,
+            leg="home_proxy",
+            error=home_close_error,
+            closing_error=home_close_error is not None,
+        )
+        if upstream is not None:
+            _connection_close_projection(
+                diagnostics,
+                upstream,
+                connection_id=standard_connection_id,
+                peer_connection_id=proxy_connection_id,
+                home_connection_id=home_connection_id,
+                correlation_state=correlation_state,
+                leg="proxy_standard",
+                error=upstream_close_error,
+                closing_error=upstream_close_error is not None,
+            )
 
 
 def main() -> None:
     token_path = _token_path()
     host = os.environ.get("HERMES_STANDARD_PILOT_PROXY_HOST", DEFAULT_PROXY_HOST)
     port = int(os.environ.get("HERMES_STANDARD_PILOT_PROXY_PORT", DEFAULT_PROXY_PORT))
-    LOGGER.info("Starting Standard pilot relay on %s:%s", host, port)
-    with serve(
-        lambda connection: _proxy_connection(connection, token_path=token_path),
-        host=host,
-        port=port,
-        process_request=lambda connection, request: _process_request(
-            connection, request, token_path=token_path
+    configured_log_dir = os.environ.get("HERMES_HOME_PROXY_LOG_DIR")
+    log_dir = (
+        Path(configured_log_dir).expanduser()
+        if configured_log_dir
+        else Path(__file__).parent / "logs"
+    )
+    diagnostics = OperationalDiagnostics(
+        component="proxy",
+        directory=log_dir,
+        source_files=(
+            Path(__file__),
+            Path(__file__).with_name("hermes_home_diagnostics.py"),
         ),
-        max_size=MAX_MESSAGE_SIZE,
-        server_header="Hermes Standard Home pilot relay",
-    ) as server:
-        server.serve_forever()
-
+        websocket_version=websockets.__version__,
+    )
+    transport_log_handler = SafeTransportLogHandler(
+        diagnostics,
+        leg="home_proxy",
+    )
+    transport_logger = logging.getLogger("websockets")
+    transport_logger.addHandler(transport_log_handler)
+    LOGGER.info("Starting Standard pilot relay on %s:%s", host, port)
+    try:
+        with serve(
+            lambda connection: _proxy_connection(
+                connection,
+                token_path=token_path,
+                diagnostics=diagnostics,
+            ),
+            host=host,
+            port=port,
+            process_request=lambda connection, request: _process_request(
+                connection, request, token_path=token_path
+            ),
+            max_size=MAX_MESSAGE_SIZE,
+            server_header="Hermes Standard Home pilot relay",
+        ) as server:
+            server.serve_forever()
+    finally:
+        transport_logger.removeHandler(transport_log_handler)
+        transport_log_handler.close()
+        diagnostics.close()
 
 if __name__ == "__main__":
     logging.basicConfig(

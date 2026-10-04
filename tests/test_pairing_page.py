@@ -418,6 +418,70 @@ def test_connection_reports_require_signed_in_same_origin_page(page):
     assert dict(response.headers)["Cache-Control"] == "no-store"
 
 
+def test_schema2_review_uses_authenticated_associations_and_safe_labels(page):
+    import time
+
+    from tests.test_client_reports import report_v2
+
+    page.sign_in()
+    paired = _paired(page, ["spark"])
+    report = report_v2(time.time())
+    event = report["events"][0]
+    store = page.app.client_reports
+    correlation = "corr-" + "a" * 32
+    process = "proc-" + "b" * 32
+    store.record_association(
+        paired["device_id"],
+        event["home_connection_id"],
+        event["request_id"],
+        correlation,
+        process,
+    )
+    store.finalize_associations(paired["device_id"], event["home_connection_id"], set())
+    store._association_queue.join()
+    response = page.call(
+        "POST",
+        "/api/v1/client-diagnostics",
+        report,
+        device=paired["credential"],
+        cookie=False,
+    )
+    assert response.status == 200
+    assert (
+        page.call(
+            "POST",
+            "/pair/api/client-diagnostics",
+            {},
+            device=paired["credential"],
+            cookie=False,
+        ).status
+        == 401
+    )
+    assert (
+        page.call(
+            "POST", "/pair/api/client-diagnostics", {}, origin="https://evil.example"
+        ).status
+        == 403
+    )
+    view = page.call("POST", "/pair/api/client-diagnostics", {})
+    item = view.body["reports"][0]
+    assert item["report"] == report
+    assert item["associations"][0]["state"] == "linked"
+    assert item["associations"][0]["correlation_id"] == correlation
+    assert "association_losses" in view.body
+    source = page.call("GET", "/pair").body
+    assert "Assembly metadata" in source
+    assert "Generating origin unavailable (legacy schema 1)" in source
+    assert "Client-reported observations are not Home delivery proof" in source
+    assert "Home-scoped association" in source
+    assert "node.textContent = text" in source
+    review = source.split('$("load-reports").addEventListener', 1)[1].split(
+        '$("copy-link").addEventListener', 1
+    )[0]
+    assert "innerHTML" not in review
+    store.close()
+
+
 def test_paired_device_report_uses_credential_identity_and_revocation(page):
     import time
     import uuid

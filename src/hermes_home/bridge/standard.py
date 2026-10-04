@@ -913,6 +913,12 @@ class HomeBridge:
         with self._state_lock:
             return self._state
 
+    @property
+    def authenticated_device_id(self) -> str | None:
+        """Return the identity already authorized for this bound bridge."""
+        with self._state_lock:
+            return self._device_id if self._state == "ready" else None
+
     def open(
         self,
         *,

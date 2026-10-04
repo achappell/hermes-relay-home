@@ -8,6 +8,7 @@ import pytest
 from hermes_home.auth.static import StaticCredentialAuthenticator
 from hermes_home.bridge.production import (
     ConversationGrantStore,
+    WebsocketsJsonSocketFactory,
     create_standard_bridge_factory,
 )
 from hermes_home.bridge.standard import ConversationGrant, HomeBridge
@@ -703,4 +704,64 @@ def test_failed_upstream_retirement_read_is_device_bound_and_retried(
             assert store.resolve(handle, "pixel-6a") is not None
     finally:
         store._connection = connection
+        store.close()
+
+
+def test_proxy_link_header_is_explicit_and_per_home_bridge(
+    tmp_path, monkeypatch
+) -> None:
+    from hermes_home.bridge import production
+
+    calls = []
+    monkeypatch.setattr(
+        production,
+        "connect",
+        lambda url, **kwargs: calls.append((url, kwargs)) or object(),
+    )
+    connection_id = "conn-" + "a" * 32
+    direct_factory = WebsocketsJsonSocketFactory()
+    direct_factory.set_diagnostics_connection_id(connection_id)
+    direct_factory.open("wss://standard.example/api/ws")
+    assert "additional_headers" not in calls[-1][1]
+
+    store = ConversationGrantStore(
+        tmp_path / "home.sqlite3",
+        configuration=_configuration,
+    )
+    bridge_factory = create_standard_bridge_factory(
+        gateway_url="ws://127.0.0.1:9121/api/ws",
+        hermes_token="server-secret",
+        conversation_store=store,
+        device_authenticator=object(),
+        diagnostics_proxy_link=True,
+    )
+    first = bridge_factory()
+    second = bridge_factory()
+    first.set_diagnostics_connection_id(connection_id)
+    first._diagnostic_link_socket_factory.open("ws://127.0.0.1:9121/api/ws")
+    assert calls[-1][1]["additional_headers"] == {
+        "X-Hermes-Diagnostic-Connection": connection_id
+    }
+    second._diagnostic_link_socket_factory.open("ws://127.0.0.1:9121/api/ws")
+    assert "additional_headers" not in calls[-1][1]
+    first.close()
+    second.close()
+    store.close()
+
+
+def test_proxy_link_configuration_rejects_direct_standard_target(tmp_path) -> None:
+    store = ConversationGrantStore(
+        tmp_path / "home.sqlite3",
+        configuration=_configuration,
+    )
+    try:
+        with pytest.raises(ValueError, match="local pilot proxy"):
+            create_standard_bridge_factory(
+                gateway_url="wss://standard.example/api/ws",
+                hermes_token="server-secret",
+                conversation_store=store,
+                device_authenticator=object(),
+                diagnostics_proxy_link=True,
+            )
+    finally:
         store.close()

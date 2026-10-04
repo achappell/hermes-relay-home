@@ -26,6 +26,7 @@ def test_load_settings_reads_file_backed_credentials(tmp_path) -> None:
         encoding="utf-8",
     )
 
+    diagnostic_dir = tmp_path / "private-logs"
     settings = load_settings(
         {
             "HERMES_HOME_DATA_DIR": str(data_dir),
@@ -33,8 +34,11 @@ def test_load_settings_reads_file_backed_credentials(tmp_path) -> None:
             "HERMES_HOME_PORT": "8780",
             "HERMES_HOME_ADMIN_TOKEN_FILE": str(admin_token_file),
             "HERMES_HOME_DEVICE_CREDENTIALS_FILE": str(device_credentials_file),
+            "HERMES_HOME_DIAGNOSTICS_DIR": str(diagnostic_dir),
         }
     )
+    assert settings.diagnostics_dir == diagnostic_dir
+    assert not settings.diagnostics_proxy_link
 
     assert settings.data_dir == data_dir
     assert settings.database_path == data_dir / "home.sqlite3"

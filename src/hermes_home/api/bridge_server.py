@@ -7,6 +7,7 @@ import logging
 import math
 import threading
 import time
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Protocol
@@ -23,6 +24,11 @@ from hermes_home.bridge.endpoint import (
     BridgeRoute,
 )
 from hermes_home.observability.diagnostics import DiagnosticsRecorder
+from hermes_home_diagnostics import (
+    close_fields,
+    exception_fields,
+    new_connection_id,
+)
 
 __all__ = [
     "BRIDGE_WS_PATH",
@@ -160,6 +166,8 @@ def create_bridge_server(
     port: int = 8766,
     websocket_serve: Callable[..., Server] | None = None,
     diagnostics: DiagnosticsRecorder | None = None,
+    operational_diagnostics: object | None = None,
+    client_reports: object | None = None,
     reconnect_grace_seconds: float = DEFAULT_RECONNECT_GRACE_SECONDS,
     claim_store: ClaimParkingObserver | None = None,
 ) -> Server:
@@ -190,12 +198,170 @@ def create_bridge_server(
             return _rejection(401, "Unauthorized")
         return None
 
+    def early_rejection(
+        connection: ServerConnection,
+        connection_id: str,
+        response: dict[str, object],
+        *,
+        failure_code: str,
+        compact: bool,
+    ) -> None:
+        correlation_id = f"corr-{uuid.uuid4().hex}"
+        _emit_operational(
+            operational_diagnostics,
+            "rejection_generated",
+            correlation_id=correlation_id,
+            connection_id=connection_id,
+            phase="response",
+            failure_code=failure_code,
+            origin="readiness_gate",
+            unavailable_latch=False,
+        )
+        started = time.monotonic()
+        try:
+            if compact:
+                message = json.dumps(response, separators=(",", ":"))
+            else:
+                message = json.dumps(response)
+            _emit_operational(
+                operational_diagnostics,
+                "response_write_started",
+                correlation_id=correlation_id,
+                connection_id=connection_id,
+                phase="response",
+                response_kind="rejection",
+            )
+            started = time.monotonic()
+            connection.send(message)
+        except Exception as error:  # preserve transport behavior
+            _emit_operational(
+                operational_diagnostics,
+                "response_write_outcome",
+                correlation_id=correlation_id,
+                connection_id=connection_id,
+                phase="response",
+                response_kind="rejection",
+                outcome="failed",
+                failure_code="transport_unavailable",
+                exception_category=exception_fields(error)["exception_category"],
+                duration_ms=min(
+                    2**63 - 1,
+                    max(0, int((time.monotonic() - started) * 1000)),
+                ),
+            )
+            raise
+        _emit_operational(
+            operational_diagnostics,
+            "response_write_outcome",
+            correlation_id=correlation_id,
+            connection_id=connection_id,
+            phase="response",
+            response_kind="rejection",
+            outcome="write_returned",
+            duration_ms=min(
+                2**63 - 1,
+                max(0, int((time.monotonic() - started) * 1000)),
+            ),
+        )
+
     def handler(connection: ServerConnection) -> None:
-        headers = dict(connection.request.headers.raw_items())
+        raw_header_items = list(connection.request.headers.raw_items())
+        headers = dict(raw_header_items)
+        connection_id = new_connection_id()
+        diagnostics_opted_in = _diagnostics_opted_in(raw_header_items)
+        _emit_operational(
+            operational_diagnostics,
+            "connection_opened",
+            leg="client_home",
+            connection_id=connection_id,
+            correlation_state="local_only",
+            phase="open",
+        )
+        transport_error: BaseException | None = None
+        try:
+            _handle_connection(
+                connection,
+                headers,
+                connection_id,
+                diagnostics_opted_in,
+            )
+        except Exception as error:
+            transport_error = error
+            raise
+        finally:
+            facts = close_fields(connection, transport_error)
+            received = facts["received_close_code"]
+            sent = facts["sent_close_code"]
+            initiator = (
+                "peer"
+                if received is not None
+                else "local"
+                if sent is not None
+                else "unknown"
+            )
+            close_trigger = (
+                "counterpart_closed"
+                if initiator == "peer"
+                else "transport_error"
+                if transport_error is not None
+                else "unknown"
+            )
+            category = facts["exception_category"]
+            if transport_error is not None and category == "timeout":
+                classification = "transport_error"
+            elif category == "connection_closed_ok" or (
+                sent in {1000, 1001} and received in {1000, 1001}
+            ):
+                classification = "normal_shutdown"
+            elif transport_error is not None or facts["observed_status_code"] == 1006:
+                classification = "transport_error"
+            else:
+                classification = "unknown"
+            _emit_operational(
+                operational_diagnostics,
+                "connection_closed",
+                leg="client_home",
+                connection_id=connection_id,
+                correlation_state="local_only",
+                phase="closed",
+                initiator=initiator,
+                close_trigger=close_trigger,
+                classification=classification,
+                **facts,
+            )
+
+    def _handle_connection(
+        connection: ServerConnection,
+        headers: Mapping[str, str],
+        connection_id: str,
+        diagnostics_opted_in: bool,
+    ) -> None:
         try:
             first_message = connection.recv()
-        except Exception:  # noqa: BLE001 - peer vanished before a request
+        except Exception as error:  # noqa: BLE001 - peer vanished before a request
+            facts = close_fields(connection, error)
+            received = facts["received_close_code"]
+            classification = (
+                "normal_shutdown"
+                if facts["exception_category"] == "connection_closed_ok"
+                else "transport_error"
+            )
+            _emit_operational(
+                operational_diagnostics,
+                "transport_observed",
+                leg="client_home",
+                phase="closing",
+                classification=classification,
+                connection_id=connection_id,
+                correlation_state="local_only",
+                initiator="peer" if received is not None else "unknown",
+                close_trigger="counterpart_closed"
+                if received is not None
+                else "transport_error",
+                **facts,
+            )
             return
+
         request = _initial_request(first_message)
         if request is None:
             bridge = _new_bridge(bridge_factory)
@@ -206,25 +372,30 @@ def create_bridge_server(
                 route=safe_route,
                 max_message_size=MAX_BRIDGE_MESSAGE_BYTES,
                 diagnostics=diagnostics,
+                operational_diagnostics=operational_diagnostics,
+                client_reports=client_reports,
+                diagnostics_connection_id=connection_id,
+                diagnostics_opted_in=diagnostics_opted_in,
             ).run(first_message=first_message)
             return
         method, handle, request_id = request
         if method == "conversation.open" and parking_lot.contains(handle):
-            connection.send(
-                json.dumps(
-                    {
-                        "jsonrpc": "2.0",
+            early_rejection(
+                connection,
+                connection_id,
+                {
+                    "jsonrpc": "2.0",
+                    "schema": 1,
+                    "id": request_id,
+                    "result": {
                         "schema": 1,
-                        "id": request_id,
-                        "result": {
-                            "schema": 1,
-                            "status": "unavailable",
-                            "conversation_handle": handle,
-                            "reason": "reconnect_required",
-                        },
+                        "status": "unavailable",
+                        "conversation_handle": handle,
+                        "reason": "reconnect_required",
                     },
-                    separators=(",", ":"),
-                )
+                },
+                failure_code="reconnect_required",
+                compact=True,
             )
             connection.close()
             return
@@ -240,25 +411,32 @@ def create_bridge_server(
             recovery_timer.daemon = True
             recovery_timer.start()
             try:
-                endpoint.adopt(connection, headers=headers)
+                endpoint.adopt(
+                    connection,
+                    headers=headers,
+                    diagnostics_connection_id=connection_id,
+                    diagnostics_opted_in=diagnostics_opted_in,
+                )
             except RuntimeError:
                 recovery_timer.cancel()
                 if endpoint.has_recoverable_state:
                     parking_lot.park(endpoint, expires_at=parked.expires_at)
-                    connection.send(
-                        json.dumps(
-                            {
-                                "jsonrpc": "2.0",
+                    early_rejection(
+                        connection,
+                        connection_id,
+                        {
+                            "jsonrpc": "2.0",
+                            "schema": 1,
+                            "id": request_id,
+                            "result": {
                                 "schema": 1,
-                                "id": request_id,
-                                "result": {
-                                    "schema": 1,
-                                    "status": "unavailable",
-                                    "conversation_handle": handle,
-                                    "reason": "transport_unavailable",
-                                },
-                            }
-                        )
+                                "status": "unavailable",
+                                "conversation_handle": handle,
+                                "reason": "transport_unavailable",
+                            },
+                        },
+                        failure_code="transport_unavailable",
+                        compact=False,
                     )
                     connection.close()
                     return
@@ -274,6 +452,10 @@ def create_bridge_server(
                 route=safe_route,
                 max_message_size=MAX_BRIDGE_MESSAGE_BYTES,
                 diagnostics=diagnostics,
+                operational_diagnostics=operational_diagnostics,
+                client_reports=client_reports,
+                diagnostics_connection_id=connection_id,
+                diagnostics_opted_in=diagnostics_opted_in,
             )
         if parked is not None:
             try:
@@ -308,6 +490,28 @@ def create_bridge_server(
 
         server.shutdown = shutdown_with_cleanup
     return server
+
+
+def _emit_operational(
+    diagnostics: object | None,
+    event: str,
+    **fields: object,
+) -> None:
+    emit = getattr(diagnostics, "emit", None)
+    if callable(emit):
+        try:
+            emit(event, **fields)
+        except Exception:  # noqa: BLE001 - diagnostics never owns transport behavior
+            return
+
+
+def _diagnostics_opted_in(raw_header_items: list[tuple[str, str]]) -> bool:
+    versions = [
+        value
+        for name, value in raw_header_items
+        if name.casefold() == "x-hermes-diagnostics-version"
+    ]
+    return len(versions) == 1 and versions[0] == "1"
 
 
 def _new_bridge(bridge_factory: Callable[[], object] | None) -> object | None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import secrets
 import threading
 import time
@@ -42,6 +43,12 @@ from hermes_home.bridge.standard import (
     safe_failure_diagnostic,
 )
 from hermes_home.observability.diagnostics import DiagnosticEvent, DiagnosticsRecorder
+from hermes_home_diagnostics import (
+    OperationalDiagnostics,
+    close_fields,
+    exception_fields,
+    new_connection_id,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -269,6 +276,10 @@ class BridgeEndpoint:
         route: Mapping[str, object] | BridgeRoute | None = None,
         max_message_size: int = MAX_BRIDGE_MESSAGE_BYTES,
         diagnostics: DiagnosticsRecorder | None = None,
+        operational_diagnostics: OperationalDiagnostics | None = None,
+        client_reports: object | None = None,
+        diagnostics_connection_id: str | None = None,
+        diagnostics_opted_in: bool | None = None,
         choice_clock: Callable[[], float] = time.monotonic,
         choice_token_factory: Callable[[], str] | None = None,
     ) -> None:
@@ -277,9 +288,40 @@ class BridgeEndpoint:
         self._connection: WebSocketConnection | None = connection
         self._bridge = bridge
         self._headers = dict(headers or {})
+        self._client_reports = client_reports
         self._route = _safe_route(route)
         self._max_message_size = max_message_size
         self._diagnostics = diagnostics
+        self._operational_diagnostics = operational_diagnostics
+        self._diagnostics_opted_in = (
+            diagnostics_opted_in
+            if type(diagnostics_opted_in) is bool
+            else _header_value(self._headers, "X-Hermes-Diagnostics-Version") == "1"
+        )
+        valid_socket_id = (
+            type(diagnostics_connection_id) is str
+            and re.fullmatch(r"conn-[0-9a-f]{32}", diagnostics_connection_id)
+            is not None
+        )
+        self._diagnostic_connection_id = (
+            diagnostics_connection_id if valid_socket_id else new_connection_id()
+        )
+        self._server_managed_connection = valid_socket_id
+        self._diagnostic_device_id: str | None = None
+        self._diagnostic_request_ids: set[str] = set()
+        self._diagnostic_ambiguous_ids: set[str] = set()
+        if self._operational_diagnostics is not None and not valid_socket_id:
+            self._operational_diagnostics.emit(
+                "connection_opened",
+                leg="client_home",
+                connection_id=self._diagnostic_connection_id,
+                correlation_state="local_only",
+                phase="open",
+            )
+        self._diagnostic_associations_finalized = False
+        self._configure_upstream_diagnostic_link()
+        self._active_diagnostic_request_id: str | None = None
+        self._active_diagnostic_correlation_id: str | None = None
         self._choice_authority = ChoiceAuthority(
             clock=choice_clock,
             token_factory=choice_token_factory or (lambda: secrets.token_urlsafe(24)),
@@ -324,6 +366,14 @@ class BridgeEndpoint:
         self._audio_thread: threading.Thread | None = None
         self._audio_turn_id: str | None = None
         self._turn_correlations: dict[str, str] = {}
+        if self._operational_diagnostics is not None:
+            self._operational_diagnostics.emit(
+                "connection_opened",
+                leg="client_home",
+                connection_id=self._diagnostic_connection_id,
+                correlation_state="local_only",
+                phase="open",
+            )
 
     @property
     def conversation_handle(self) -> str | None:
@@ -376,6 +426,7 @@ class BridgeEndpoint:
         park_on_disconnect: bool = False,
     ) -> None:
         """Serve requests until the peer closes the WebSocket."""
+        transport_error: BaseException | None = None
         try:
             if first_message is not None:
                 self.handle_message(first_message)
@@ -388,30 +439,125 @@ class BridgeEndpoint:
                 if message is None:
                     break
                 self.handle_message(message)
-        except Exception:  # noqa: BLE001 - peer close is transport cleanup
-            # The WebSocket server owns the peer-facing close handshake.  A
-            # receive failure is transport state, not a reason to expose a
-            # Python exception or its message to the endpoint.
-            return
+        except Exception as error:  # noqa: BLE001 - project transport facts only
+            transport_error = error
+            connection = self._connection
+            facts = close_fields(connection, error)
+            category = facts["exception_category"]
+            received = facts["received_close_code"]
+            sent = facts["sent_close_code"]
+            classification = (
+                "normal_shutdown"
+                if category == "connection_closed_ok"
+                else "transport_error"
+            )
+            initiator = (
+                "peer"
+                if received is not None
+                else "local"
+                if sent is not None
+                else "unknown"
+            )
+            close_trigger = (
+                "counterpart_closed" if initiator == "peer" else "transport_error"
+            )
+            pending_count = len(self._pending_prompts)
+            if self._operational_diagnostics is not None:
+                self._operational_diagnostics.emit(
+                    "transport_observed",
+                    leg="client_home",
+                    phase="closing",
+                    classification=classification,
+                    connection_id=self._diagnostic_connection_id,
+                    correlation_state="local_only",
+                    initiator=initiator,
+                    close_trigger=close_trigger,
+                    pending_count=min(65535, pending_count),
+                    pending_saturated=pending_count > 65535,
+                    pending_state="unknown" if pending_count else "none",
+                    **facts,
+                )
         finally:
+            connection = self._connection
+            facts = close_fields(connection, transport_error)
+            received = facts["received_close_code"]
+            sent = facts["sent_close_code"]
+            initiator = (
+                "peer"
+                if received is not None
+                else "local"
+                if sent is not None
+                else "unknown"
+            )
+            close_trigger = (
+                "counterpart_closed"
+                if initiator == "peer"
+                else "transport_error"
+                if transport_error is not None
+                else "unknown"
+            )
             if park_on_disconnect and self.has_recoverable_state:
-                self.detach()
+                self.detach(
+                    transport_error=transport_error,
+                    initiator=initiator,
+                    close_trigger=close_trigger,
+                )
             else:
-                self.close()
+                self.close(
+                    transport_error=transport_error,
+                    initiator=initiator,
+                    close_trigger=close_trigger,
+                )
 
     serve = run
 
-    def detach(self) -> None:
+    def detach(
+        self,
+        *,
+        transport_error: BaseException | None = None,
+        initiator: str = "unknown",
+        close_trigger: str = "unknown",
+    ) -> None:
         """Detach a failed endpoint transport while the Hermes turn continues."""
 
         with self._send_lock:
+            connection = self._connection
+            self._finalize_client_associations()
             self._connection = None
+        if connection is not None and self._operational_diagnostics is not None:
+            facts = close_fields(connection, transport_error)
+            category = facts["exception_category"]
+            classification = (
+                "normal_shutdown"
+                if category == "connection_closed_ok"
+                else "transport_error"
+                if transport_error is not None or facts["observed_status_code"] == 1006
+                else "unknown"
+            )
+            if not self._server_managed_connection:
+                pending_count = len(self._pending_prompts)
+                self._operational_diagnostics.emit(
+                    "connection_closed",
+                    leg="client_home",
+                    connection_id=self._diagnostic_connection_id,
+                    correlation_state="local_only",
+                    phase="closed",
+                    initiator=initiator,
+                    close_trigger=close_trigger,
+                    classification=classification,
+                    pending_count=min(65535, pending_count),
+                    pending_saturated=pending_count > 65535,
+                    pending_state="unknown" if pending_count else "none",
+                    **facts,
+                )
 
     def adopt(
         self,
         connection: WebSocketConnection,
         *,
         headers: Mapping[str, str],
+        diagnostics_connection_id: str | None = None,
+        diagnostics_opted_in: bool | None = None,
     ) -> None:
         """Attach a candidate reconnect; buffered events wait for reauthorization."""
 
@@ -423,18 +569,47 @@ class BridgeEndpoint:
                 or self._connection is not None
             ):
                 raise RuntimeError("Home bridge endpoint is not parked")
+            self._finalize_client_associations()
             self._awaiting_adoption = True
             self._connection = connection
             self._headers = dict(headers)
+            self._diagnostic_device_id = None
             self._adopted_transport = True
+            self._diagnostics_opted_in = (
+                diagnostics_opted_in
+                if type(diagnostics_opted_in) is bool
+                else _header_value(self._headers, "X-Hermes-Diagnostics-Version") == "1"
+            )
+            valid_socket_id = (
+                type(diagnostics_connection_id) is str
+                and re.fullmatch(r"conn-[0-9a-f]{32}", diagnostics_connection_id)
+                is not None
+            )
+            self._diagnostic_connection_id = (
+                diagnostics_connection_id if valid_socket_id else new_connection_id()
+            )
+            self._server_managed_connection = valid_socket_id
+            self._configure_upstream_diagnostic_link()
+            self._diagnostic_request_ids.clear()
+            self._diagnostic_ambiguous_ids.clear()
+            self._diagnostic_associations_finalized = False
+            if self._operational_diagnostics is not None and not valid_socket_id:
+                self._operational_diagnostics.emit(
+                    "connection_opened",
+                    leg="client_home",
+                    connection_id=self._diagnostic_connection_id,
+                    correlation_state="local_only",
+                    phase="reconnect",
+                )
         with self._state_lock:
             self._adoption_ack_pending = True
             self._adoption_acknowledged = False
 
     def handle_message(self, message: object) -> dict[str, object] | None:
-        """Validate and handle one inbound JSON-RPC message."""
+        self._active_diagnostic_request_id = None
+        self._active_diagnostic_correlation_id = None
         try:
-            request_id, method, params = _parse_request(
+            request_id, method, params, document = _parse_request(
                 message, max_message_size=self._max_message_size
             )
         except _RequestError as error:
@@ -451,9 +626,13 @@ class BridgeEndpoint:
             ):
                 self._close_connection(code=1009, reason="message too large")
             return response
+        diagnostic_request_id, ambiguous = self._diagnostic_metadata(document)
+        self._active_diagnostic_request_id = diagnostic_request_id
 
         try:
-            result = self._dispatch(method, params, request_id)
+            result = self._dispatch(
+                method, params, request_id, diagnostic_request_id=diagnostic_request_id
+            )
             response = _success_response(request_id, result)
         except _RequestError as error:
             response = _error_response(
@@ -463,15 +642,53 @@ class BridgeEndpoint:
                 rpc_code=error.rpc_code,
             )
         except Exception:  # noqa: BLE001 - never expose injected exception text
-            # Keep an unexpected adapter defect typed and credential-free.  A
-            # malformed bridge result must never become an endpoint payload.
             self._mark_unavailable("protocol_error")
             response = _error_response(
-                request_id,
-                "protocol_error",
-                delivery="uncertain",
+                request_id, "protocol_error", delivery="uncertain"
             )
-        response_sent = self._send_json(response)
+        if self._diagnostics_opted_in and method in {
+            "conversation.open",
+            "conversation.reconnect",
+        }:
+            result = response.get("result")
+            if isinstance(result, dict) and result.get("status") == "ready":
+                capabilities = result.get("capabilities")
+                safe_capabilities = (
+                    dict(capabilities) if isinstance(capabilities, Mapping) else {}
+                )
+                safe_capabilities["diagnostics_correlation_v1"] = True
+                safe_capabilities["client_diagnostic_report_schemas"] = [1, 2]
+                result["capabilities"] = safe_capabilities
+                response["diagnostics"] = {
+                    "version": 1,
+                    "home_connection_id": self._diagnostic_connection_id,
+                }
+        elif (
+            self._diagnostics_opted_in
+            and method == "prompt.submit"
+            and diagnostic_request_id is not None
+            and self._active_diagnostic_correlation_id is not None
+            and not ambiguous
+        ):
+            response["diagnostics"] = {
+                "version": 1,
+                "request_id": diagnostic_request_id,
+                "correlation_id": self._active_diagnostic_correlation_id,
+            }
+        correlation_id = self._active_diagnostic_correlation_id
+        if correlation_id is not None and self._operational_diagnostics is not None:
+            response_sent = self._send_json(
+                response,
+                diagnostic_correlation_id=correlation_id,
+                diagnostic_request_id=(
+                    diagnostic_request_id if not ambiguous else None
+                ),
+                diagnostic_response_kind=(
+                    "accepted" if "result" in response else "rejection"
+                ),
+            )
+        else:
+            response_sent = self._send_json(response)
         with self._state_lock:
             if self._adoption_ack_pending:
                 result = response.get("result")
@@ -492,11 +709,151 @@ class BridgeEndpoint:
             self._disconnect_after_response = False
         if disconnect_after_response:
             self._close_connection()
+        self._active_diagnostic_request_id = None
         return response
+
+    def _diagnostic_metadata(self, document: object) -> tuple[str | None, bool]:
+        if not isinstance(document, dict) or "diagnostics" not in document:
+            return None, False
+        metadata = document["diagnostics"]
+        if not self._diagnostics_opted_in:
+            self._record_diagnostic_loss("schema_rejected")
+            return None, False
+        if (
+            not isinstance(metadata, dict)
+            or set(metadata) != {"version", "request_id"}
+            or type(metadata.get("version")) is not int
+            or metadata["version"] != 1
+            or type(metadata.get("request_id")) is not str
+            or re.fullmatch(r"req-[0-9a-f]{32}", metadata["request_id"]) is None
+        ):
+            self._record_diagnostic_loss("schema_rejected")
+            return None, False
+        request_id = metadata["request_id"]
+        if request_id in self._diagnostic_request_ids:
+            self._diagnostic_ambiguous_ids.add(request_id)
+            self._record_diagnostic_loss("correlation_conflicts")
+            return request_id, True
+        if len(self._diagnostic_request_ids) >= 4096:
+            self._record_diagnostic_loss("schema_rejected")
+            return None, False
+        self._diagnostic_request_ids.add(request_id)
+        return request_id, False
+
+    def _record_diagnostic_loss(self, counter: str) -> None:
+        if self._operational_diagnostics is not None:
+            self._operational_diagnostics.add_loss(counter)
+
+    def _configure_upstream_diagnostic_link(self) -> None:
+        if not self._diagnostics_opted_in:
+            return
+        configure = getattr(self._bridge, "set_diagnostics_connection_id", None)
+        if not callable(configure):
+            return
+        try:
+            configure(self._diagnostic_connection_id)
+        except Exception:  # noqa: BLE001 - linking cannot control bridge behavior
+            self._record_diagnostic_loss("sink_failed")
+
+    def _capture_authenticated_device_id(self) -> None:
+        try:
+            device_id = getattr(self._bridge, "authenticated_device_id", None)
+        except Exception:  # noqa: BLE001 - diagnostics cannot break the bridge
+            return
+        self._diagnostic_device_id = (
+            device_id if type(device_id) is str and device_id else None
+        )
+
+    def _record_client_association(
+        self,
+        request_id: str | None,
+        correlation_id: str,
+        *,
+        ambiguous: bool,
+    ) -> None:
+        if (
+            request_id is None
+            or not self._diagnostics_opted_in
+            or self._diagnostic_device_id is None
+            or self._operational_diagnostics is None
+            or self._client_reports is None
+        ):
+            return
+        record = getattr(self._client_reports, "record_association", None)
+        if not callable(record):
+            return
+        try:
+            record(
+                self._diagnostic_device_id,
+                self._diagnostic_connection_id,
+                request_id,
+                correlation_id,
+                self._operational_diagnostics.process_id,
+                ambiguous=ambiguous,
+            )
+        except Exception:  # noqa: BLE001 - diagnostics cannot break the bridge
+            self._record_diagnostic_loss("sink_failed")
+
+    def _finalize_client_associations(self) -> None:
+        if self._diagnostic_associations_finalized:
+            return
+        self._diagnostic_associations_finalized = True
+        if not self._diagnostic_request_ids and not self._diagnostic_ambiguous_ids:
+            return
+        if (
+            not self._diagnostics_opted_in
+            or self._diagnostic_device_id is None
+            or self._client_reports is None
+        ):
+            return
+        finalize = getattr(self._client_reports, "finalize_associations", None)
+        if not callable(finalize):
+            return
+        try:
+            finalize(
+                self._diagnostic_device_id,
+                self._diagnostic_connection_id,
+                frozenset(self._diagnostic_ambiguous_ids),
+            )
+        except Exception:  # noqa: BLE001 - diagnostics cannot break the bridge
+            self._record_diagnostic_loss("sink_failed")
+
+    def _record_response_write_outcome(
+        self,
+        correlation_id: str,
+        request_id: str | None,
+        response_kind: str,
+        outcome: str,
+        *,
+        duration_ms: int,
+        error: BaseException | None = None,
+    ) -> None:
+        if self._operational_diagnostics is None:
+            return
+        fields: dict[str, object] = {
+            "correlation_id": correlation_id,
+            "connection_id": self._diagnostic_connection_id,
+            "phase": "response",
+            "response_kind": response_kind,
+            "outcome": outcome,
+            "duration_ms": min(2**63 - 1, max(0, duration_ms)),
+        }
+        if request_id is not None:
+            fields["request_id"] = request_id
+        if error is not None:
+            fields["failure_code"] = "transport_unavailable"
+            fields["exception_category"] = exception_fields(error)["exception_category"]
+        self._operational_diagnostics.emit("response_write_outcome", **fields)
 
     handle = handle_message
 
-    def close(self) -> None:
+    def close(
+        self,
+        *,
+        close_trigger: str = "unknown",
+        transport_error: BaseException | None = None,
+        initiator: str = "local",
+    ) -> None:
         """Close the bridge and socket exactly once."""
         with self._state_lock:
             if self._retiring_upstream:
@@ -524,13 +881,20 @@ class BridgeEndpoint:
                 bridge.close()
             except Exception as error:  # noqa: BLE001 - cleanup must continue
                 del error
+        self._finalize_client_associations()
         if self._upstream_failed:
             close_code, close_reason = 1011, "upstream unavailable"
         elif self._claim_closed:
             close_code, close_reason = 1000, "stale_conversation"
         else:
             close_code, close_reason = 1000, ""
-        self._close_connection(code=close_code, reason=close_reason)
+        self._close_connection(
+            code=close_code,
+            reason=close_reason,
+            close_trigger=close_trigger,
+            transport_error=transport_error,
+            initiator=initiator,
+        )
         current = threading.current_thread()
         for thread in (event_thread, audio_thread):
             if thread is not None and thread is not current:
@@ -541,6 +905,8 @@ class BridgeEndpoint:
         method: str,
         params: dict[str, object],
         request_id: object,
+        *,
+        diagnostic_request_id: str | None = None,
     ) -> dict[str, object]:
         del request_id
         if method == "conversation.open":
@@ -552,7 +918,9 @@ class BridgeEndpoint:
         if method == "conversation.close":
             return self._conversation_close(params)
         if method == "prompt.submit":
-            return self._prompt_submit(params)
+            return self._prompt_submit(
+                params, diagnostic_request_id=diagnostic_request_id
+            )
         if method == "prompt.respond":
             return self._prompt_respond(params)
         if method == "session.interrupt":
@@ -762,17 +1130,46 @@ class BridgeEndpoint:
             "status": "closed",
         }
 
-    def _prompt_submit(self, params: dict[str, object]) -> dict[str, object]:
+    def _prompt_submit(
+        self,
+        params: dict[str, object],
+        *,
+        diagnostic_request_id: str | None = None,
+    ) -> dict[str, object]:
         _require_param_shape(params, required={"conversation_handle", "text"})
-        handle = self._require_bound_handle(params["conversation_handle"])
-        text = params["text"]
-        if type(text) is not str or not text.strip():
-            raise _RequestError("invalid_request", rpc_code=-32602)
         correlation_id = (
             self._diagnostics.new_correlation_id()
             if self._diagnostics is not None
             else f"corr-{uuid.uuid4().hex}"
         )
+        self._active_diagnostic_correlation_id = correlation_id
+        if self._operational_diagnostics is not None:
+            state = (
+                "ambiguous"
+                if diagnostic_request_id in self._diagnostic_ambiguous_ids
+                else "linked"
+                if diagnostic_request_id is not None
+                else "local_only"
+            )
+            self._operational_diagnostics.emit(
+                "request_observed",
+                correlation_id=correlation_id,
+                request_id=diagnostic_request_id,
+                connection_id=self._diagnostic_connection_id,
+                phase="submission",
+                operation="prompt_submit",
+                trigger="explicit",
+                correlation_state=state,
+            )
+            self._record_client_association(
+                diagnostic_request_id,
+                correlation_id,
+                ambiguous=state == "ambiguous",
+            )
+        handle = self._require_bound_handle(params["conversation_handle"])
+        text = params["text"]
+        if type(text) is not str or not text.strip():
+            raise _RequestError("invalid_request", rpc_code=-32602)
         try:
             self._require_ready()
         except _RequestError as error:
@@ -783,6 +1180,16 @@ class BridgeEndpoint:
                     phase="turn",
                     outcome="unavailable",
                     failure_code=error.code,
+                )
+            if self._operational_diagnostics is not None:
+                self._operational_diagnostics.emit(
+                    "rejection_generated",
+                    correlation_id=correlation_id,
+                    connection_id=self._diagnostic_connection_id,
+                    phase="submission",
+                    failure_code=error.code,
+                    origin="readiness_gate",
+                    unavailable_latch=error.code == "hermes_unavailable",
                 )
             raise
         self._wait_for_stale_audio()
@@ -802,8 +1209,27 @@ class BridgeEndpoint:
                 phase="turn",
                 outcome="started",
             )
+        started_at = time.monotonic()
+        if self._operational_diagnostics is not None:
+            self._operational_diagnostics.emit(
+                "upstream_submit_started",
+                correlation_id=correlation_id,
+                connection_id=self._diagnostic_connection_id,
+                leg="home_proxy",
+                phase="submission",
+            )
         try:
             turn = bridge.submit_prompt(text)
+            if self._operational_diagnostics is not None:
+                self._operational_diagnostics.emit(
+                    "upstream_submit_outcome",
+                    correlation_id=correlation_id,
+                    connection_id=self._diagnostic_connection_id,
+                    leg="home_proxy",
+                    phase="submission",
+                    outcome="accepted",
+                    duration_ms=max(0, int((time.monotonic() - started_at) * 1000)),
+                )
         except Exception as error:  # noqa: BLE001 - injected bridge is untrusted
             if correlation_id is not None:
                 self._record_diagnostic(
@@ -812,6 +1238,19 @@ class BridgeEndpoint:
                     phase="turn",
                     outcome="failed",
                     failure_code=_normalize_code(_bridge_error(error)[0]),
+                )
+            if self._operational_diagnostics is not None:
+                failure_code = _normalize_code(_bridge_error(error)[0])
+                self._operational_diagnostics.emit(
+                    "upstream_submit_outcome",
+                    correlation_id=correlation_id,
+                    connection_id=self._diagnostic_connection_id,
+                    leg="home_proxy",
+                    phase="submission",
+                    outcome="unavailable",
+                    failure_code=failure_code,
+                    duration_ms=max(0, int((time.monotonic() - started_at) * 1000)),
+                    exception_category=exception_fields(error)["exception_category"],
                 )
             self._raise_bridge_error(error)
         finally:
@@ -1196,6 +1635,16 @@ class BridgeEndpoint:
             ):
                 audio_thread_to_join.join(timeout=1)
             self._start_event_pump()
+            self._capture_authenticated_device_id()
+            if self._operational_diagnostics is not None:
+                self._operational_diagnostics.emit(
+                    "connection_ready",
+                    leg="client_home",
+                    connection_id=self._diagnostic_connection_id,
+                    correlation_state="local_only",
+                    ready_kind="reconnect" if reconnect else "open",
+                    phase="reconnect" if reconnect else "open",
+                )
         elif not preserve_on_unavailable:
             with self._state_lock:
                 self._choice_authority.revoke_all()
@@ -1944,7 +2393,14 @@ class BridgeEndpoint:
             allow_nan=False,
         )
 
-    def _send_json(self, payload: dict[str, object]) -> bool:
+    def _send_json(
+        self,
+        payload: dict[str, object],
+        *,
+        diagnostic_correlation_id: str | None = None,
+        diagnostic_request_id: str | None = None,
+        diagnostic_response_kind: str | None = None,
+    ) -> bool:
         message = json.dumps(
             payload,
             ensure_ascii=False,
@@ -1959,8 +2415,21 @@ class BridgeEndpoint:
         overflow = False
         failed_connection: WebSocketConnection | None = None
         sent_or_queued = False
+        diagnostic_enabled = (
+            diagnostic_correlation_id is not None
+            and diagnostic_response_kind is not None
+            and self._operational_diagnostics is not None
+        )
         with self._send_lock:
             if self._closed:
+                if diagnostic_enabled:
+                    self._record_response_write_outcome(
+                        diagnostic_correlation_id,
+                        diagnostic_request_id,
+                        diagnostic_response_kind,
+                        "skipped_closed",
+                        duration_ms=0,
+                    )
                 return False
             connection = self._connection
             if self._awaiting_adoption and "id" not in payload:
@@ -1977,15 +2446,44 @@ class BridgeEndpoint:
                         self._parked_events.append(message)
                         self._parked_event_bytes += message_bytes
                         sent_or_queued = True
+                elif diagnostic_enabled:
+                    self._record_response_write_outcome(
+                        diagnostic_correlation_id,
+                        diagnostic_request_id,
+                        diagnostic_response_kind,
+                        "skipped_closed",
+                        duration_ms=0,
+                    )
             else:
                 if payload.get("method") == "event":
                     message = self._prepare_choice_delivery(message)
+                send_started = time.monotonic() if diagnostic_enabled else None
+                if diagnostic_enabled:
+                    self._operational_diagnostics.emit(
+                        "response_write_started",
+                        correlation_id=diagnostic_correlation_id,
+                        connection_id=self._diagnostic_connection_id,
+                        phase="response",
+                        response_kind=diagnostic_response_kind,
+                        request_id=diagnostic_request_id,
+                    )
                 try:
                     connection.send(message)
                     sent_or_queued = True
-                except Exception:  # noqa: BLE001 - detach a failed endpoint socket
+                except Exception as error:  # noqa: BLE001 - detach a failed endpoint socket
                     self._connection = None
                     failed_connection = connection
+                    if diagnostic_enabled:
+                        self._record_response_write_outcome(
+                            diagnostic_correlation_id,
+                            diagnostic_request_id,
+                            diagnostic_response_kind,
+                            "failed",
+                            duration_ms=max(
+                                0, int((time.monotonic() - send_started) * 1000)
+                            ),
+                            error=error,
+                        )
                     if payload.get("method") == "event":
                         message_bytes = len(message.encode("utf-8"))
                         if (
@@ -1997,6 +2495,17 @@ class BridgeEndpoint:
                             self._parked_events.append(message)
                             self._parked_event_bytes += message_bytes
                             sent_or_queued = True
+                else:
+                    if diagnostic_enabled:
+                        self._record_response_write_outcome(
+                            diagnostic_correlation_id,
+                            diagnostic_request_id,
+                            diagnostic_response_kind,
+                            "write_returned",
+                            duration_ms=max(
+                                0, int((time.monotonic() - send_started) * 1000)
+                            ),
+                        )
         if failed_connection is not None:
             _close_connection_quietly(failed_connection)
         if overflow:
@@ -2047,21 +2556,66 @@ class BridgeEndpoint:
         if failed_connection is not None:
             _close_connection_quietly(failed_connection)
 
-    def _close_connection(self, *, code: int = 1000, reason: str = "") -> None:
+    def _close_connection(
+        self,
+        *,
+        code: int = 1000,
+        reason: str = "",
+        close_trigger: str = "unknown",
+        transport_error: BaseException | None = None,
+        initiator: str = "local",
+    ) -> None:
         with self._send_lock:
             connection = self._connection
             self._connection = None
         if connection is None:
             return
+        close_error: BaseException | None = None
         try:
             connection.close(code=code, reason=reason)
         except TypeError:
             try:
                 connection.close()
             except Exception as error:  # noqa: BLE001 - close is best effort
-                del error
+                close_error = error
         except Exception as error:  # noqa: BLE001 - close is best effort
-            del error
+            close_error = error
+        observed_error = close_error or transport_error
+        facts = close_fields(connection, error=observed_error)
+        exception = exception_fields(observed_error) if observed_error else {}
+        cause = exception.get("cause_category")
+        category = exception.get("exception_category")
+        sent_code = facts.get("sent_close_code")
+        received_code = facts.get("received_close_code")
+        if close_error is not None and (category == "timeout" or cause == "timeout"):
+            classification = "timeout_during_close"
+        elif category == "connection_closed_ok" or (
+            sent_code in {1000, 1001} and received_code in {1000, 1001}
+        ):
+            classification = "normal_shutdown"
+        elif observed_error is not None or facts.get("observed_status_code") == 1006:
+            classification = "transport_error"
+        else:
+            classification = "unknown"
+        if (
+            self._operational_diagnostics is not None
+            and not self._server_managed_connection
+        ):
+            pending_count = len(self._pending_prompts)
+            self._operational_diagnostics.emit(
+                "connection_closed",
+                leg="client_home",
+                connection_id=self._diagnostic_connection_id,
+                correlation_state="local_only",
+                phase="closed",
+                initiator=initiator,
+                close_trigger=close_trigger,
+                classification=classification,
+                pending_count=min(65535, pending_count),
+                pending_saturated=pending_count > 65535,
+                pending_state="unknown" if pending_count else "none",
+                **facts,
+            )
 
 
 def _close_connection_quietly(connection: WebSocketConnection) -> None:
@@ -2076,7 +2630,7 @@ HomeBridgeEndpoint = BridgeEndpoint
 
 def _parse_request(
     message: object, *, max_message_size: int
-) -> tuple[object, str, dict[str, object]]:
+) -> tuple[object, str, dict[str, object], dict[str, object]]:
     size = _message_size(message)
     if size > max_message_size:
         raise _RequestError("invalid_request", rpc_code=-32600)
@@ -2103,7 +2657,15 @@ def _parse_request(
     params = document.get("params", {})
     if not isinstance(params, dict) or any(type(key) is not str for key in params):
         raise _RequestError("invalid_request", rpc_code=-32602)
-    return request_id, method, dict(params)
+    return request_id, method, dict(params), document
+
+
+def _header_value(headers: Mapping[str, str], name: str) -> str | None:
+    lowered = name.lower()
+    return next(
+        (value for key, value in headers.items() if key.lower() == lowered),
+        None,
+    )
 
 
 def _valid_request_id(value: object) -> bool:
