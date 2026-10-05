@@ -69,6 +69,10 @@ requested (renamed `..._once_speech_is_requested`).
 ## Not verified / deployment
 
 Not deployed. CaticornQueen runs `hermes_home.runtime` from
-`C:\ProgramData\HermesHome` (deployment revision `376583d…`, which is not in this
-clone). The phone benefits only after this change is deployed there and the
-Hermes Home scheduled task restarts. No live Standard or device test was run.
+`C:\ProgramData\HermesHome`; the installed wheel/source is the merged revision
+`a45f7efe318e91bde7edf4c23c62973d7fb86e96` per the 2026-10-04 deployment
+record in `validation-home-nw-06-connection-failure-diagnostics.md`. (The
+stale `HERMES_HOME_DEPLOYMENT_REVISION` machine variable still reads
+`376583d…`, a pre-upgrade identifier that exists in no repository.) The phone
+benefits only after this change is deployed there and the Hermes Home
+scheduled task restarts. No live Standard or device test was run.
