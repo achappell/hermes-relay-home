@@ -2,7 +2,7 @@
 
 Date: 2026-10-04. Status: review, not broader story or Epic 6 closure.
 Specification: `spec-home-nw-06-connection-failure-diagnostics.md`.
-Workspace: `.worktrees/windows-diagnostics-acl`; branch `fix/windows-diagnostics-acl`. No host deployment or production restart was performed.
+Workspace: `.worktrees/home-connection-diagnostics`; branch `feat/home-nw-06-connection-diagnostics`; baseline `144466aa8a1daaed37eb59f7da8bfabfdd4f3897`. At the time this local validation was recorded, no host deployment had been performed; the later deployment is documented in the supplement below.
 
 ## Observed delivery gate
 
@@ -180,3 +180,57 @@ performed.
   diagnostics on the duplicate response, ambiguous association, and the
   `correlation_conflicts` counter.
 - Known limit: real Standard/phone network drop during a pending request is not exercised on device (owner accepted).
+
+## CaticornQueen deployment supplement — 2026-10-04
+
+The merged revision `a45f7efe318e91bde7edf4c23c62973d7fb86e96` was deployed
+to CaticornQueen from an isolated `.worktrees/` checkout. This supplements the
+local validation above; it does not complete real-device acceptance.
+
+- Wheel: `hermes_relay_home-0.1.0-py3-none-any.whl`, SHA-256
+  `dc28b3c1e71a763fa9eb6ae1ffb698c2a2c217e6bbf592cd25d0c5f11e0af016`.
+  The 39-member archive contains 33 `hermes_home` Python files and top-level
+  `hermes_home_diagnostics.py`.
+- Host: CPython 3.14.7. `Hermes Home` task Running as SYSTEM
+  (last result `267009`, current-running code); loopback listeners on
+  `127.0.0.1:8780` and `127.0.0.1:8766` belonged to one Home process.
+  `/pair`, authenticated `/api/v1/diagnostics/status`, and authenticated
+  `/api/v1/configuration` returned 200. Prometheus
+  `up{job="hermes-home"}` returned `1`.
+- Dedicated operational JSONL directory:
+  `C:\ProgramData\HermesHome\diagnostics`. Its protected ACL has exactly two
+  entries: SYSTEM Modify and BUILTIN\Administrators Read; no Users or
+  deployment-account write access. The old user-writable legacy log directory
+  was preserved as `C:\ProgramData\HermesHome\diagnostics-legacy`.
+- Benign `/pair` requests and the queued writer produced two parseable
+  `home.jsonl` JSON records: `provenance_header` and `process_started`, both
+  `component=home`, `phase=startup`. Zero invalid records; scans found no
+  authorization or credential markers, prompt, transcript, or other inspected
+  secret/content indicators. No synthetic client report or incident was
+  submitted.
+- The final installed runner SHA-256 is
+  `52b9316aac157fcc3095373cd8231083841b1c864c0eb7b6e88135484985cc55`; it
+  directs `HERMES_HOME_DIAGNOSTICS_DIR` to the dedicated directory. Task
+  action, SYSTEM principal, working directory, and task settings were
+  preserved. No Prometheus or Standard setting was changed.
+- **Runner provenance:** the deployed `run.ps1` intentionally differs from the
+  current merged main runner (`logs` → `diagnostics`, with the comment updated).
+  This deployment-specific adjustment was necessary because the old `logs`
+  ACL granted BUILTIN\Users Write. It is not represented in the merged source
+  and remains pending a source PR; do not treat repo main's runner as identical
+  to production.
+- Rollback assets are in
+  `C:\ProgramData\HermesHome\backups\home-nw06-a45f7ef-20261004`. The prior
+  package archive SHA-256 is
+  `2493dabeee2464dd978d0d2abfc64190395a213dc18a8004552006525726ebd7`;
+  its 43-file manifest was checked against archive bytes. A task-specific
+  rollback script was parsed with Windows PowerShell 5.1; it restores the
+  verified old package, runner, and task XML without reverting live SQLite or
+  machine settings. No rollback was needed.
+- No proxy process was running. The disabled
+  `\Microsoft\Windows\Autochk\Proxy` task is an unrelated Windows Autochk task;
+  it was not changed and no pilot proxy was started.
+
+Real phone schema-2 upload and end-to-end phone/Home correlation remain
+unverified and pending. This deployment supplement is operational evidence,
+not those missing acceptance observations.
