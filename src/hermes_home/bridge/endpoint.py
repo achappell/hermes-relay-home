@@ -2115,8 +2115,11 @@ class BridgeEndpoint:
                         continue
                     try:
                         connection.send(message)
-                    except Exception:  # noqa: BLE001 - other paths own transport failure
-                        continue
+                    except Exception as error:  # noqa: BLE001 - other paths own transport failure
+                        LOGGER.debug(
+                            "Home turn keep-alive send skipped: %s",
+                            type(error).__name__,
+                        )
 
     def _audio_loop(self, turn_id: str) -> None:
         started = False

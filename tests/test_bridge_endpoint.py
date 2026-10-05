@@ -4155,7 +4155,7 @@ def _close_keepalive(endpoint: BridgeEndpoint, ticks: _KeepaliveTicks) -> None:
 
 def test_turn_keepalive_is_advertised_only_to_opted_in_clients() -> None:
     for opt_in in (True, False):
-        connection, _bridge, endpoint, ticks = _keepalive_endpoint(opt_in=opt_in)
+        _connection, _bridge, endpoint, ticks = _keepalive_endpoint(opt_in=opt_in)
         try:
             capabilities = _open(endpoint)["result"]["capabilities"]
             expected = {"commands": ["status"], "heartbeat": True, "timing": "absent"}
