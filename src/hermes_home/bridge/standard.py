@@ -69,6 +69,9 @@ _NONTERMINAL_MESSAGE_STATUSES = frozenset(
     }
 )
 _AUDIO_FRAME_TYPES = frozenset({"start", "end", "fallback"})
+# Before speech is requested the audio wait is unbounded (the agent may still
+# be thinking); poll in short slices so a replaced or closed sidecar is noticed.
+_PRE_SPEECH_AUDIO_POLL_SECONDS = 1.0
 _PROMPT_EXPIRY_TYPES = {
     "approval.expire": "approval.request",
     "clarify.expire": "clarify.request",
@@ -292,6 +295,9 @@ class _ActiveTurn:
     interrupt_requested: bool = False
     rendered_preview: str = ""
     audio_text_sent: str = ""
+    # Monotonic time speech was first requested from the sidecar (first text,
+    # finish, or stop). The response-audio timeout counts only from here.
+    audio_requested_at: float | None = None
     pending_prompt_type: str | None = None
     pending_prompt_id: str | None = None
     pending_choice_revision: tuple[str, str] | None = field(default=None, repr=False)
@@ -839,6 +845,7 @@ class HomeBridge:
         request_id_factory: Callable[[int], str] | None = None,
         turn_id_factory: Callable[[int], str] | None = None,
         audio_timeout: float | None = 30.0,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._gateway_url = gateway_url
         self._hermes_token = hermes_token
@@ -859,6 +866,7 @@ class HomeBridge:
         self._request_id_factory = request_id_factory
         self._turn_id_factory = turn_id_factory or (lambda index: f"home-turn-{index}")
         self._audio_timeout = _validate_timeout(audio_timeout, "audio timeout")
+        self._monotonic = monotonic
         self._lifecycle_lock = RLock()
         self._state_lock = RLock()
         self._event_processing_lock = Lock()
@@ -2648,14 +2656,21 @@ class HomeBridge:
             return self._next_audio(timeout=timeout)
 
     def _next_audio(self, *, timeout: float | None = None) -> AudioFrame:
-        """Read one frame from the separate Standard response-audio socket."""
+        """Read one frame from the separate Standard response-audio socket.
+
+        The response-audio timeout counts only once speech has been requested
+        from the sidecar (first text, finish, or stop). Before that the agent
+        may still be thinking, so the wait is bounded by the turn and the
+        sidecar's lifetime instead.
+        """
 
         audio_timeout = (
             self._audio_timeout
             if timeout is None
             else _validate_timeout(timeout, "audio timeout")
         )
-        deadline = None if audio_timeout is None else time.monotonic() + audio_timeout
+        called_at = self._monotonic()
+        deadline: float | None = None
 
         with self._state_lock:
             active = self._active_turn
@@ -2669,12 +2684,34 @@ class HomeBridge:
                 metadata={"reason": "audio_unavailable"},
             )
         while True:
+            if deadline is None and audio_timeout is not None:
+                with self._state_lock:
+                    requested_at = (
+                        called_at if owner is None else owner.audio_requested_at
+                    )
+                if requested_at is not None:
+                    deadline = max(called_at, requested_at) + audio_timeout
             try:
-                receive_timeout = (
-                    None if deadline is None else _remaining(deadline, "response audio")
-                )
+                if audio_timeout is None:
+                    receive_timeout = None
+                elif deadline is None:
+                    receive_timeout = min(audio_timeout, _PRE_SPEECH_AUDIO_POLL_SECONDS)
+                else:
+                    receive_timeout = deadline - self._monotonic()
+                    if receive_timeout <= 0:
+                        raise TimeoutError("response audio timed out")
                 raw = socket.receive(timeout=receive_timeout)
             except TimeoutError as error:
+                if audio_timeout is not None and deadline is None:
+                    with self._state_lock:
+                        replaced = self._audio_socket is not socket
+                    if replaced:
+                        return AudioFrame(
+                            kind="unavailable",
+                            turn_id=turn_id,
+                            metadata={"reason": "audio_changed"},
+                        )
+                    continue
                 self._close_audio(owner=owner)
                 raise BridgeTimeoutError("standard response audio timed out") from error
             except (
@@ -2854,11 +2891,20 @@ class HomeBridge:
         if stale:
             _close_quietly(socket)
 
+    def _mark_speech_requested_locked(self) -> None:
+        """Start the response-audio clock for the sidecar's owning turn."""
+
+        owner = self._audio_owner
+        if owner is not None and owner.audio_requested_at is None:
+            owner.audio_requested_at = self._monotonic()
+
     def _append_audio(self, text: str, *, owner: _ActiveTurn | None = None) -> bool:
         with self._state_lock:
             socket = self._audio_socket
             if owner is not None and self._audio_owner is not owner:
                 return False
+            if socket is not None:
+                self._mark_speech_requested_locked()
         if socket is None:
             return False
         try:
@@ -2886,6 +2932,8 @@ class HomeBridge:
             socket = self._audio_socket
             if owner is not None and self._audio_owner is not owner:
                 return
+            if socket is not None:
+                self._mark_speech_requested_locked()
         if socket is not None:
             try:
                 with self._audio_send_lock:
@@ -2910,6 +2958,8 @@ class HomeBridge:
             socket = self._audio_socket
             if owner is not None and self._audio_owner is not owner:
                 return
+            if socket is not None:
+                self._mark_speech_requested_locked()
         if socket is not None:
             try:
                 with self._audio_send_lock:
