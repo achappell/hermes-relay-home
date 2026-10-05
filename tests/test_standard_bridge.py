@@ -204,6 +204,72 @@ class SilentAudioSocket(FakeAudioSocket):
         raise TimeoutError(f"no audio frame within {timeout}")
 
 
+class ManualClock:
+    def __init__(self, now: float = 1_000.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class ClockedAudioSocket(FakeAudioSocket):
+    """Speak-stream stand-in: answers only after speech is requested.
+
+    Like Standard's speak-stream, no frame arrives before Home has sent text,
+    ``done``, or ``stop``. In the default mode a receive consumes its whole
+    timeout on the manual clock and raises ``TimeoutError``. With ``gate``
+    set, the caller waits on a condition instead of advancing the clock
+    itself; the test releases the wait through :meth:`advance` or a speech
+    send, so the fake clock moves only under test control.
+    """
+
+    def __init__(
+        self, incoming: list[object], clock: ManualClock, *, gate: bool = False
+    ) -> None:
+        super().__init__(incoming)
+        self.clock = clock
+        self.waits: list[float | None] = []
+        self.gate = gate
+        self.parked = Event()
+        self._released = False
+        self._cv = Condition()
+
+    def send_json(self, frame: dict[str, object]) -> None:
+        with self._cv:
+            super().send_json(frame)
+            self._cv.notify_all()
+
+    def advance(self, seconds: float) -> None:
+        """Elapse the current (or next) gated wait by moving the clock."""
+
+        with self._cv:
+            self.clock.now += seconds
+            self._released = True
+            self._cv.notify_all()
+
+    def receive(self, timeout: float | None = None) -> object:
+        if self.closed:
+            raise ConnectionError("audio socket closed")
+        if self.sent and self.incoming:
+            return self.incoming.popleft()
+        self.waits.append(timeout)
+        if not self.gate:
+            self.clock.now += timeout or 0.0
+            time.sleep(0.001)
+            raise TimeoutError(f"no audio frame within {timeout}")
+        with self._cv:
+            self.parked.set()
+            self._cv.wait_for(
+                lambda: self._released or (self.sent and self.incoming) or self.closed
+            )
+            self._released = False
+        if self.closed:
+            raise ConnectionError("audio socket closed")
+        if self.sent and self.incoming:
+            return self.incoming.popleft()
+        raise TimeoutError(f"no audio frame within {timeout}")
+
+
 class FakeAudioSocketFactory:
     def __init__(self, socket: FakeAudioSocket) -> None:
         self.socket = socket
@@ -256,6 +322,7 @@ def _make_bridge(
     authenticator=None,
     gateway_url="wss://hermes.example/api/ws",
     audio_timeout=30.0,
+    monotonic=None,
 ):
     if authenticator is None:
         authenticator = StaticCredentialAuthenticator(
@@ -272,6 +339,7 @@ def _make_bridge(
             ),
             capability_revision=1,
         )
+    clock = {} if monotonic is None else {"monotonic": monotonic}
     return HomeBridge(
         gateway_url=gateway_url,
         hermes_token="server-hermes-secret",
@@ -280,6 +348,7 @@ def _make_bridge(
         gateway_socket_factory=socket_factory,
         audio_socket_factory=audio_factory,
         audio_timeout=audio_timeout,
+        **clock,
     )
 
 
@@ -2963,48 +3032,179 @@ def test_bridge_keeps_a_live_session_when_an_event_poll_times_out() -> None:
         bridge.close()
 
 
-def test_bridge_bounds_response_audio_wait():
-    gateway_socket = FakeJsonSocket(
-        [
-            _event("gateway.ready", {"capabilities": {}}),
-            {
-                "jsonrpc": "2.0",
-                "id": "home-1",
-                "result": {"session_id": "runtime-hermes-1"},
-            },
-            {
-                "jsonrpc": "2.0",
-                "id": "home-2",
-                "result": {"accepted": True},
-            },
+def _speech_turn_gateway(*, with_text: bool) -> FakeJsonSocket:
+    events: list[dict[str, object]] = [
+        _event("gateway.ready", {}),
+        {
+            "jsonrpc": "2.0",
+            "id": "home-1",
+            "result": {"session_id": "runtime-hermes-1"},
+        },
+        {"jsonrpc": "2.0", "id": "home-2", "result": {"accepted": True}},
+    ]
+    if with_text:
+        events += [
+            _session_event(
+                "message.start", {"turn_id": "hermes-turn-1"}, "runtime-hermes-1"
+            ),
+            _session_event("message.delta", {"text": "Hello."}, "runtime-hermes-1"),
         ]
+    events.append(
+        _session_event("message.complete", {"status": "completed"}, "runtime-hermes-1")
     )
-    audio_socket = SilentAudioSocket([])
-    bridge = HomeBridge(
-        gateway_url="wss://hermes.example/api/ws",
-        hermes_token="server-hermes-secret",
-        device_authenticator=StaticCredentialAuthenticator(
-            admin_token="admin-secret",
-            device_credentials={"device-secret": "puck-kitchen"},
-        ),
-        conversation_resolver=lambda handle, device_id: ConversationGrant(
-            handle=handle,
-            device_id=device_id,
-            profile_id="family",
-        ),
-        gateway_socket_factory=FakeSocketFactory(gateway_socket),
-        audio_socket_factory=FakeAudioSocketFactory(audio_socket),
-    )
+    return FakeJsonSocket(events)
 
+
+def _wait_for_park(audio_socket: ClockedAudioSocket) -> None:
+    assert audio_socket.parked.wait(2.0), "audio reader never reached the sidecar"
+
+
+def _read_audio_in_background(bridge: HomeBridge) -> tuple[Thread, dict[str, object]]:
+    outcome: dict[str, object] = {}
+
+    def read() -> None:
+        try:
+            outcome["frame"] = bridge.next_audio()
+        except Exception as error:  # noqa: BLE001 - surfaced by the assertion
+            outcome["error"] = error
+
+    reader = Thread(target=read)
+    reader.start()
+    return reader, outcome
+
+
+def test_bridge_bounds_response_audio_wait_once_speech_is_requested():
+    gateway_socket = _speech_turn_gateway(with_text=True)
+    audio_socket = SilentAudioSocket([])
+    bridge = _make_bridge(
+        FakeSocketFactory(gateway_socket),
+        audio_factory=FakeAudioSocketFactory(audio_socket),
+    )
     bridge.open(
         headers={"Authorization": "Device device-secret"},
         conversation_handle="opaque-conversation-1",
     )
     bridge.submit_prompt("Bound the audio wait")
+    bridge.next_event()
+    bridge.next_event()
+    assert audio_socket.sent == [{"text": "Hello."}]
 
     with pytest.raises(BridgeTimeoutError, match="response audio"):
         bridge.next_audio(timeout=0.01)
     assert audio_socket.closed is True
+
+
+def test_bridge_waits_past_the_audio_timeout_while_the_agent_is_still_thinking():
+    clock = ManualClock()
+    audio_socket = ClockedAudioSocket(
+        [
+            {"type": "start", "sample_rate": 24_000, "channels": 1},
+            b"\x01\x02\x03\x04",
+            {"type": "end"},
+        ],
+        clock,
+        gate=True,
+    )
+    bridge = _make_bridge(
+        FakeSocketFactory(_speech_turn_gateway(with_text=True)),
+        audio_factory=FakeAudioSocketFactory(audio_socket),
+        monotonic=clock,
+    )
+    bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle="opaque-conversation-1",
+    )
+    bridge.submit_prompt("Think for a while")
+    accepted_at = clock.now
+
+    reader, outcome = _read_audio_in_background(bridge)
+    _wait_for_park(audio_socket)
+    audio_socket.advance(accepted_at + 40.0 - clock.now)
+    assert reader.is_alive(), "no audio timeout before speech is requested"
+
+    assert bridge.next_event().type == "message.start"
+    assert bridge.next_event().type == "message.delta"
+    reader.join(timeout=2)
+
+    assert not reader.is_alive()
+    assert "error" not in outcome
+    assert outcome["frame"].kind == "start"
+    assert bridge.next_audio().data == b"\x01\x02\x03\x04"
+    assert bridge.next_event().type == "message.complete"
+    assert bridge.next_audio().kind == "end"
+    assert audio_socket.sent == [{"text": "Hello."}, {"done": True}]
+    assert audio_socket.waits
+    # The first park is a pre-speech poll slice; no wait may exceed the
+    # 30 s post-speech deadline.
+    assert audio_socket.waits[0] <= 1.0
+    assert all(wait <= 30.0 for wait in audio_socket.waits)
+
+
+def test_bridge_still_times_out_audio_that_stalls_after_speech_starts():
+    clock = ManualClock()
+    audio_socket = ClockedAudioSocket(
+        [
+            {"type": "start", "sample_rate": 24_000, "channels": 1},
+            b"\x01\x02\x03\x04",
+        ],
+        clock,
+    )
+    bridge = _make_bridge(
+        FakeSocketFactory(_speech_turn_gateway(with_text=True)),
+        audio_factory=FakeAudioSocketFactory(audio_socket),
+        monotonic=clock,
+    )
+    bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle="opaque-conversation-1",
+    )
+    bridge.submit_prompt("Speak, then stall")
+    bridge.next_event()
+    bridge.next_event()
+    assert bridge.next_audio().kind == "start"
+    assert bridge.next_audio().kind == "pcm"
+    stalled_at = clock.now
+
+    with pytest.raises(BridgeTimeoutError, match="response audio"):
+        bridge.next_audio()
+
+    assert clock.now - stalled_at == pytest.approx(30.0)
+    assert audio_socket.waits == [pytest.approx(30.0)]
+    assert audio_socket.closed is True
+
+
+def test_bridge_ends_audio_cleanly_for_a_turn_that_never_sends_text():
+    clock = ManualClock()
+    audio_socket = ClockedAudioSocket(
+        [{"type": "start", "sample_rate": 24_000, "channels": 1}, {"type": "end"}],
+        clock,
+        gate=True,
+    )
+    bridge = _make_bridge(
+        FakeSocketFactory(_speech_turn_gateway(with_text=False)),
+        audio_factory=FakeAudioSocketFactory(audio_socket),
+        monotonic=clock,
+    )
+    bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle="opaque-conversation-1",
+    )
+    bridge.submit_prompt("Nothing to say")
+    accepted_at = clock.now
+
+    reader, outcome = _read_audio_in_background(bridge)
+    _wait_for_park(audio_socket)
+    audio_socket.advance(accepted_at + 40.0 - clock.now)
+    assert bridge.next_event().type == "message.complete"
+    reader.join(timeout=2)
+
+    assert not reader.is_alive()
+    assert "error" not in outcome
+    assert outcome["frame"].kind == "start"
+    assert bridge.next_audio().kind == "end"
+    assert audio_socket.sent == [{"done": True}]
+    assert audio_socket.closed is True
+    assert bridge.active_turn_id is None
 
 
 def test_bridge_treats_message_complete_without_status_as_a_terminal_event():
