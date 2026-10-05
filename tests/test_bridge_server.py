@@ -1155,12 +1155,14 @@ def test_client_close_during_submit_records_failed_write_and_finalizes_associati
         assert started["connection_id"] == outcome["connection_id"] == connection_id
         assert outcome["outcome"] == "accepted"
 
-        transport = next(
+        transports = [
             record
             for record in records
             if record["event"] == "transport_observed"
             and record["connection_id"] == connection_id
-        )
+        ]
+        assert len(transports) == 1
+        transport = transports[0]
         closed = next(
             record
             for record in records
