@@ -98,3 +98,71 @@ helpers' format.
 | Ruff lint | `uv run --no-cache --no-project --python 3.14 --with ruff -- ruff check src tests` | `All checks passed!` |
 | Ruff format | `uv run --no-cache --no-project --python 3.14 --with ruff -- ruff format --check src tests` | `48 files already formatted` |
 | Whitespace/diff | `git diff --check` | Passed |
+
+## CaticornQueen deployment — 2026-10-04
+
+Deployed the merged Home main revision `a45f7efe318e91bde7edf4c23c62973d7fb86e96`
+to the live Windows Home host CaticornQueen using an isolated `.worktrees/`
+checkout. The rollout was package-only, followed by a narrowly scoped runner
+update to route operational diagnostics to a separate protected directory.
+No broad installer, Prometheus, Standard credentials/settings, pilot proxy,
+iOS, or private hub changes were made.
+
+### Build and rollback evidence
+
+- Detached worktree HEAD matched `origin/main` at merge commit
+  `a45f7efe318e91bde7edf4c23c62973d7fb86e96` and includes HOME-NW-06.
+- Home gates: `uv run --python 3.14 --extra dev pytest -q` — 913 passed,
+  four deprecation warnings; `uvx ruff check src tests` — passed;
+  `uvx ruff format --check src tests` — 74 files already formatted.
+- Built wheel `hermes_relay_home-0.1.0-py3-none-any.whl`, SHA-256
+  `dc28b3c1e71a763fa9eb6ae1ffb698c2a2c217e6bbf592cd25d0c5f11e0af016`.
+  Its 39 members include 33 `hermes_home` Python sources and top-level
+  `hermes_home_diagnostics.py`.
+- Installed previous receipt: revision
+  `082e5938615ae4fc037ed6b3a1e791ccda04bd89`, wheel SHA-256
+  `42eecc57e9c655d1eba3ed39b3ad61c5da0264d6d60bbd051777e12eeca9349b`.
+- Protected rollback directory:
+  `C:\ProgramData\HermesHome\backups\home-nw06-a45f7ef-20261004`.
+  Prior `installed-package.zip` SHA-256:
+  `2493dabeee2464dd978d0d2abfc64190395a213dc18a8004552006525726ebd7`;
+  its 43-file manifest was checked against archive contents and digests.
+  The directory retains the prior runner, exact task XML, archived machine
+  settings, distribution metadata, prior receipt and package rollback script.
+  A separate task-specific `deployment-rollback.ps1` was written and parsed
+  by Windows PowerShell 5.1. It stops only Home, requires both listeners to
+  release, restores prior package files from the verified archive and checks
+  hashes, restores the prior runner and task XML, and starts Home. It does not
+  restore the older SQLite image or machine settings. The live DB was not
+  reverted.
+- Before cutover, all 18 current machine `HERMES_HOME*` values matched the
+  archived machine settings; prior task action, SYSTEM principal and working
+  directory were captured. The original user-writable logs directory was
+  preserved as `C:\ProgramData\HermesHome\diagnostics-legacy`.
+- Dedicated diagnostics directory
+  `C:\ProgramData\HermesHome\diagnostics` has a protected ACL with only
+  SYSTEM Modify and BUILTIN\Administrators Read. The final runner SHA-256 is
+  `52b9316aac157fcc3095373cd8231083841b1c864c0eb7b6e88135484985cc55`; it
+  sets `HERMES_HOME_DIAGNOSTICS_DIR` per Home process to this directory.
+  Task action, principal, working directory, and task settings were retained.
+
+### Live acceptance observed
+
+| Check | Result |
+| --- | --- |
+| Installed package | Version `0.1.0`; source revision is the merged wheel from `a45f7efe318e91bde7edf4c23c62973d7fb86e96`; wheel SHA matches staged artifact. |
+| Home task | `Hermes Home` Running as SYSTEM; last result `267009` (`0x41301`, running). Both loopback listeners on `127.0.0.1:8780` and `127.0.0.1:8766` were present on the same Home process. |
+| Pairing page | `GET /pair` returned 200. |
+| Authenticated Home reads | Existing admin credential (used only in the remote process) obtained 200 from `/api/v1/diagnostics/status` and `/api/v1/configuration`; no credential was emitted. |
+| Prometheus | `up{job="hermes-home"}` returned `1`; no Prometheus configuration or service changes. |
+| Operational JSONL | Benign `/pair` reads were followed by queued writer wait. `diagnostics/home.jsonl` contains two complete JSON records: `provenance_header` and `process_started` (`component=home`, `phase=startup`). Both parse; zero invalid records; scans found no authorization, credential/path secrets, prompt, or transcript markers. |
+| Diagnostics ACL | Still protected; SYSTEM Modify and Administrators Read only, two explicit entries; no Users or deployment-account write access. |
+| Proxy boundary | No proxy process was present. The task named `\Microsoft\Windows\Autochk\Proxy` is the unrelated disabled Windows Autochk task; it was not altered. No pilot proxy was started. |
+
+### Acceptance boundary
+
+Deployment and protected startup-log validation are complete. No synthetic
+schema-2 report was uploaded and no phone observation was fabricated.
+Real-device schema-2 upload and end-to-end phone/Home correlation evidence
+remain pending; issue #16 remains open for those acceptance items. No commit
+or push was made.
