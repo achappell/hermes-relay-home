@@ -163,3 +163,20 @@ validation above supersedes the prior note that PowerShell was unavailable.
 No production deployment or restart, installer/runner execution, ACL
 acceptance, real-device acceptance, or live Standard/proxy acceptance was
 performed.
+
+## Mid-request disconnect and duplicate-token gap tests (2026-10-04)
+
+- `uv run --python 3.14 --extra dev pytest` — **915 passed, 4 warnings** in 23.27s.
+- `uvx ruff check src tests` — all checks passed.
+- `uvx ruff format --check src tests` — 74 files already formatted.
+- Added `test_client_close_during_submit_records_failed_write_and_finalizes_association` and
+  `test_duplicate_diagnostic_request_token_is_ambiguous_without_suppressing_prompts`.
+- Fixed a diagnostics gap exposed by the first test: a failed response send detached the
+  server-managed endpoint before `run()` could observe the close. The endpoint now records
+  `request_transport_lost` and `transport_observed` at the failed-write boundary.
+- The disconnect test verifies one Home connection ID across request/upstream/close evidence,
+  pending state, no claimed successful response write, redaction, and linked association
+  finalization. The duplicate-token test verifies both upstream submissions, omitted
+  diagnostics on the duplicate response, ambiguous association, and the
+  `correlation_conflicts` counter.
+- Known limit: real Standard/phone network drop during a pending request is not exercised on device (owner accepted).
