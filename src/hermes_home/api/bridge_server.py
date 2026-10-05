@@ -18,10 +18,12 @@ from websockets.sync.server import Server, ServerConnection, serve
 
 from hermes_home.bridge.endpoint import (
     BRIDGE_WS_PATH,
+    CLIENT_FEATURES_HEADER,
     HOME_BRIDGE_SCHEMA,
     MAX_BRIDGE_MESSAGE_BYTES,
     BridgeEndpoint,
     BridgeRoute,
+    client_turn_keepalive,
 )
 from hermes_home.observability.diagnostics import DiagnosticsRecorder
 from hermes_home_diagnostics import (
@@ -267,6 +269,9 @@ def create_bridge_server(
     def handler(connection: ServerConnection) -> None:
         raw_header_items = list(connection.request.headers.raw_items())
         headers = dict(raw_header_items)
+        turn_keepalive = client_turn_keepalive(
+            connection.request.headers.get_all(CLIENT_FEATURES_HEADER)
+        )
         connection_id = new_connection_id()
         diagnostics_opted_in = _diagnostics_opted_in(raw_header_items)
         _emit_operational(
@@ -284,6 +289,7 @@ def create_bridge_server(
                 headers,
                 connection_id,
                 diagnostics_opted_in,
+                turn_keepalive,
             )
         except Exception as error:
             transport_error = error
@@ -335,6 +341,7 @@ def create_bridge_server(
         headers: Mapping[str, str],
         connection_id: str,
         diagnostics_opted_in: bool,
+        turn_keepalive: bool,
     ) -> None:
         try:
             first_message = connection.recv()
@@ -376,6 +383,7 @@ def create_bridge_server(
                 client_reports=client_reports,
                 diagnostics_connection_id=connection_id,
                 diagnostics_opted_in=diagnostics_opted_in,
+                turn_keepalive=turn_keepalive,
             ).run(first_message=first_message)
             return
         method, handle, request_id = request
@@ -416,6 +424,7 @@ def create_bridge_server(
                     headers=headers,
                     diagnostics_connection_id=connection_id,
                     diagnostics_opted_in=diagnostics_opted_in,
+                    turn_keepalive=turn_keepalive,
                 )
             except RuntimeError:
                 recovery_timer.cancel()
@@ -456,6 +465,7 @@ def create_bridge_server(
                 client_reports=client_reports,
                 diagnostics_connection_id=connection_id,
                 diagnostics_opted_in=diagnostics_opted_in,
+                turn_keepalive=turn_keepalive,
             )
         if parked is not None:
             try:

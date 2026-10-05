@@ -4083,3 +4083,185 @@ def test_opted_in_ready_adds_diagnostics_only_to_upstream_capabilities() -> None
         }
     finally:
         endpoint.close()
+
+
+class _KeepaliveTicks:
+    """Fake keep-alive clock: each ``tick()`` elapses one interval."""
+
+    def __init__(self) -> None:
+        self.intervals: list[float] = []
+        self.stopping = False
+        self._ticks = threading.Semaphore(0)
+
+    def wait(self, interval: float) -> bool:
+        self.intervals.append(interval)
+        self._ticks.acquire()
+        return self.stopping
+
+    def tick(self) -> None:
+        self._ticks.release()
+
+    def stop(self) -> None:
+        self.stopping = True
+        self._ticks.release()
+
+
+def _keepalive_endpoint(
+    *, opt_in: bool = True
+) -> tuple[FakeConnection, FakeBridge, BridgeEndpoint, _KeepaliveTicks]:
+    connection = FakeConnection()
+    bridge = FakeBridge()
+    ticks = _KeepaliveTicks()
+    endpoint = BridgeEndpoint(
+        connection,
+        bridge,
+        headers=HEADERS,
+        route=ROUTE,
+        turn_keepalive=opt_in,
+        turn_keepalive_wait=ticks.wait,
+    )
+    return connection, bridge, endpoint, ticks
+
+
+def _alive(connection: FakeConnection) -> list[dict[str, object]]:
+    frames = [
+        json.loads(item) for item in list(connection.sent) if isinstance(item, str)
+    ]
+    return [
+        frame
+        for frame in frames
+        if frame.get("method") == "event"
+        and frame["params"]["event"]["type"] == "turn.alive"
+    ]
+
+
+def _submit(endpoint: BridgeEndpoint) -> dict[str, object]:
+    return _send(
+        endpoint,
+        jsonrpc="2.0",
+        schema=1,
+        id="prompt-1",
+        method="prompt.submit",
+        params={"conversation_handle": HANDLE, "text": "hello"},
+    )
+
+
+def _close_keepalive(endpoint: BridgeEndpoint, ticks: _KeepaliveTicks) -> None:
+    ticks.stop()
+    endpoint.close()
+    thread = endpoint._keepalive_thread
+    assert thread is None or not thread.is_alive()
+
+
+def test_turn_keepalive_is_advertised_only_to_opted_in_clients() -> None:
+    for opt_in in (True, False):
+        connection, _bridge, endpoint, ticks = _keepalive_endpoint(opt_in=opt_in)
+        try:
+            capabilities = _open(endpoint)["result"]["capabilities"]
+            expected = {"commands": ["status"], "heartbeat": True, "timing": "absent"}
+            if opt_in:
+                expected["turn_keepalive"] = True
+            assert capabilities == expected
+        finally:
+            _close_keepalive(endpoint, ticks)
+
+
+def test_turn_keepalive_ticks_with_fixed_payload_until_terminal() -> None:
+    connection, bridge, endpoint, ticks = _keepalive_endpoint()
+    try:
+        _open(endpoint)
+        correlation_id = _submit(endpoint)["result"]["correlation_id"]
+        for count in (1, 2):
+            ticks.tick()
+            _wait_for(lambda count=count: len(_alive(connection)) == count)
+        assert set(ticks.intervals) == {15.0}
+        assert _alive(connection)[0] == {
+            "jsonrpc": "2.0",
+            "schema": 1,
+            "method": "event",
+            "params": {
+                "schema": 1,
+                "conversation_handle": HANDLE,
+                "event": {"type": "turn.alive", "payload": {"phase": "running"}},
+                "turn_id": "home-turn-1",
+                "correlation_id": correlation_id,
+            },
+        }
+        bridge.events.append(
+            BridgeEvent(
+                HANDLE,
+                "message.complete",
+                {"text": "OK", "status": "complete"},
+                turn_id="home-turn-1",
+            )
+        )
+        bridge.event_ready.set()
+        _wait_for(lambda: "message.complete" in repr(connection.sent))
+        thread = endpoint._keepalive_thread
+        assert thread is not None
+        ticks.tick()
+        thread.join(timeout=1)
+        assert not thread.is_alive()
+        assert len(_alive(connection)) == 2
+    finally:
+        _close_keepalive(endpoint, ticks)
+
+
+def test_turn_keepalive_reports_awaiting_input_while_a_prompt_is_pending() -> None:
+    connection, bridge, endpoint, ticks = _keepalive_endpoint()
+    try:
+        _open(endpoint)
+        _submit(endpoint)
+        bridge.events.append(
+            BridgeEvent(
+                HANDLE,
+                "approval.request",
+                {"command": "rm -rf /secret-tool-arg", "description": "Run it?"},
+                turn_id="home-turn-1",
+                correlation_id="approval-1",
+            )
+        )
+        bridge.event_ready.set()
+        _wait_for(lambda: "approval.request" in repr(connection.sent))
+        ticks.tick()
+        _wait_for(lambda: len(_alive(connection)) == 1)
+        alive = _alive(connection)[0]["params"]
+        assert alive["event"] == {
+            "type": "turn.alive",
+            "payload": {"phase": "awaiting_input"},
+        }
+        assert "secret-tool-arg" not in json.dumps(alive)
+    finally:
+        _close_keepalive(endpoint, ticks)
+
+
+def test_turn_keepalive_is_silent_for_clients_that_did_not_opt_in() -> None:
+    connection, _bridge, endpoint, ticks = _keepalive_endpoint(opt_in=False)
+    try:
+        _open(endpoint)
+        _submit(endpoint)
+        sent_before = len(connection.sent)
+        ticks.tick()
+        ticks.tick()
+        _wait_for(lambda: len(ticks.intervals) >= 3)
+        assert _alive(connection) == []
+        assert len(connection.sent) == sent_before
+    finally:
+        _close_keepalive(endpoint, ticks)
+
+
+def test_turn_keepalive_stops_on_disconnect_and_close_without_parking() -> None:
+    connection, _bridge, endpoint, ticks = _keepalive_endpoint()
+    try:
+        _open(endpoint)
+        _submit(endpoint)
+        ticks.tick()
+        _wait_for(lambda: len(_alive(connection)) == 1)
+        endpoint.detach()
+        ticks.tick()
+        _wait_for(lambda: len(ticks.intervals) >= 3)
+        assert len(_alive(connection)) == 1
+        assert endpoint._parked_events == deque()
+        assert endpoint.has_active_turn
+    finally:
+        _close_keepalive(endpoint, ticks)

@@ -11,7 +11,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
@@ -58,6 +58,12 @@ MAX_BRIDGE_MESSAGE_BYTES = 1_048_576
 MAX_MESSAGE_SIZE = MAX_BRIDGE_MESSAGE_BYTES
 MAX_RETIRED_TURN_IDS = 1024
 MAX_PARKED_EVENT_BYTES = 8 * 1_048_576
+# Idle interval between per-turn ``turn.alive`` notifications for clients that
+# opted in through the ``X-Hermes-Home-Client-Features`` upgrade header.
+TURN_KEEPALIVE_INTERVAL_SECONDS = 15.0
+TURN_KEEPALIVE_EVENT_TYPE = "turn.alive"
+CLIENT_FEATURES_HEADER = "X-Hermes-Home-Client-Features"
+TURN_KEEPALIVE_FEATURE = "turn_keepalive"
 
 _METHODS = frozenset(
     {
@@ -282,7 +288,15 @@ class BridgeEndpoint:
         diagnostics_opted_in: bool | None = None,
         choice_clock: Callable[[], float] = time.monotonic,
         choice_token_factory: Callable[[], str] | None = None,
+        turn_keepalive: bool = False,
+        turn_keepalive_interval: float = TURN_KEEPALIVE_INTERVAL_SECONDS,
+        turn_keepalive_wait: Callable[[float], bool] | None = None,
     ) -> None:
+        if (
+            type(turn_keepalive_interval) not in {int, float}
+            or turn_keepalive_interval <= 0
+        ):
+            raise ValueError("Home turn keep-alive interval must be positive")
         if type(max_message_size) is not int or max_message_size <= 0:
             raise ValueError("Home bridge message size must be positive")
         self._connection: WebSocketConnection | None = connection
@@ -374,6 +388,11 @@ class BridgeEndpoint:
                 correlation_state="local_only",
                 phase="open",
             )
+        self._turn_keepalive_enabled = turn_keepalive is True
+        self._turn_keepalive_interval = float(turn_keepalive_interval)
+        # Returns True when the endpoint is stopping; tests inject a fake clock.
+        self._turn_keepalive_wait = turn_keepalive_wait or self._stop.wait
+        self._keepalive_thread: threading.Thread | None = None
 
     @property
     def conversation_handle(self) -> str | None:
@@ -523,6 +542,7 @@ class BridgeEndpoint:
         headers: Mapping[str, str],
         diagnostics_connection_id: str | None = None,
         diagnostics_opted_in: bool | None = None,
+        turn_keepalive: bool = False,
     ) -> None:
         """Attach a candidate reconnect; buffered events wait for reauthorization."""
 
@@ -566,6 +586,7 @@ class BridgeEndpoint:
                     correlation_state="local_only",
                     phase="reconnect",
                 )
+            self._turn_keepalive_enabled = turn_keepalive is True
         with self._state_lock:
             self._adoption_ack_pending = True
             self._adoption_acknowledged = False
@@ -901,7 +922,8 @@ class BridgeEndpoint:
             initiator=initiator,
         )
         current = threading.current_thread()
-        for thread in (event_thread, audio_thread):
+        keepalive_thread = self._keepalive_thread
+        for thread in (event_thread, audio_thread, keepalive_thread):
             if thread is not None and thread is not current:
                 thread.join(timeout=1)
 
@@ -1292,6 +1314,7 @@ class BridgeEndpoint:
             self._maybe_release_turn(turn_id)
         else:
             self._start_audio_pump(turn_id)
+            self._start_turn_keepalive(turn_id)
         return payload
 
     def _prompt_respond(self, params: dict[str, object]) -> dict[str, object]:
@@ -1605,6 +1628,12 @@ class BridgeEndpoint:
         if payload.get("conversation_handle") != handle:
             payload = self._unavailable_result(handle, "conversation_mismatch")
         result_status = payload.get("status")
+        if result_status == "ready":
+            with self._send_lock:
+                keepalive = self._turn_keepalive_enabled
+            capabilities = payload.get("capabilities")
+            if keepalive and isinstance(capabilities, dict):
+                payload["capabilities"] = {**capabilities, "turn_keepalive": True}
         if result_status == "ready":
             with self._state_lock:
                 if self._stop.is_set():
@@ -2012,6 +2041,82 @@ class BridgeEndpoint:
             )
             self._audio_thread = thread
             thread.start()
+
+    def _start_turn_keepalive(self, turn_id: str) -> None:
+        with self._state_lock:
+            if self._closed:
+                return
+            thread = threading.Thread(
+                target=self._turn_keepalive_loop,
+                args=(turn_id,),
+                name="hermes-home-bridge-keepalive",
+                daemon=True,
+            )
+            self._keepalive_thread = thread
+            thread.start()
+
+    def _turn_keepalive_loop(self, turn_id: str) -> None:
+        """Emit content-free liveness for one turn until it ends or Home stops.
+
+        The thread runs for every accepted turn so an opted-in client that
+        adopts a parked endpoint mid-turn still receives liveness; each tick
+        sends only when the current transport opted in.
+        """
+        while not self._turn_keepalive_wait(self._turn_keepalive_interval):
+            # The dispatch lock orders this send after any terminal event the
+            # event pump is forwarding, so no keep-alive follows a terminal.
+            with self._event_dispatch_lock:
+                with self._state_lock:
+                    if (
+                        self._stop.is_set()
+                        or self._closed
+                        or self._active_turn_id != turn_id
+                        or turn_id in self._terminal_turn_ids
+                    ):
+                        return
+                    handle = self._bound_handle
+                    correlation_id = self._turn_correlations.get(turn_id)
+                    awaiting = any(key[1] == turn_id for key in self._pending_prompts)
+                if handle is None:
+                    return
+                params: dict[str, object] = {
+                    "schema": HOME_BRIDGE_SCHEMA,
+                    "conversation_handle": handle,
+                    "event": {
+                        "type": TURN_KEEPALIVE_EVENT_TYPE,
+                        "payload": {
+                            "phase": "awaiting_input" if awaiting else "running"
+                        },
+                    },
+                    "turn_id": turn_id,
+                }
+                if correlation_id is not None:
+                    params["correlation_id"] = correlation_id
+                message = json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "schema": HOME_BRIDGE_SCHEMA,
+                        "method": "event",
+                        "params": params,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                # Liveness is never parked or replayed: a detached, legacy, or
+                # not-yet-reauthorized transport simply misses the tick.
+                with self._send_lock:
+                    connection = self._connection
+                    if (
+                        self._closed
+                        or connection is None
+                        or self._awaiting_adoption
+                        or not self._turn_keepalive_enabled
+                    ):
+                        continue
+                    try:
+                        connection.send(message)
+                    except Exception:  # noqa: BLE001 - other paths own transport failure
+                        continue
 
     def _audio_loop(self, turn_id: str) -> None:
         started = False
@@ -2715,6 +2820,15 @@ def _require_param_shape(
     keys = set(params)
     if keys - required - optional or required - keys:
         raise _RequestError("invalid_request", rpc_code=-32602)
+
+
+def client_turn_keepalive(feature_headers: Iterable[str]) -> bool:
+    """Return whether ``X-Hermes-Home-Client-Features`` opts into keep-alives."""
+    return any(
+        token.strip().lower() == TURN_KEEPALIVE_FEATURE
+        for value in feature_headers
+        for token in value.split(",")
+    )
 
 
 def _require_string(value: object) -> str:
