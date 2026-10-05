@@ -345,6 +345,41 @@ Global events may omit `turn_id`; they cannot complete or retarget the active
 turn. A terminal event is the completion authority. `session.interrupt` being
 accepted is not itself a terminal outcome.
 
+#### Turn keep-alive (`turn.alive`)
+
+A client opts in on the WebSocket upgrade request with the header
+`X-Hermes-Home-Client-Features`, a comma-separated token list; the opt-in token
+is `turn_keepalive` (trimmed, case-insensitive). The opt-in is per transport,
+including a reconnect that adopts a parked endpoint. Clients that do not send
+the token get a byte-identical ready reply and never receive `turn.alive`.
+
+For an opted-in client the ready reply's `capabilities` adds
+`"turn_keepalive": true` (`heartbeat` keeps its existing meaning). While the
+client's turn is active — from `prompt.submit` acceptance until the terminal
+event is forwarded, the turn otherwise ends, or Home closes — Home sends one
+notification every 15 seconds (`TURN_KEEPALIVE_INTERVAL_SECONDS`):
+
+```json
+{
+  "jsonrpc": "2.0",
+  "schema": 1,
+  "method": "event",
+  "params": {
+    "schema": 1,
+    "conversation_handle": "opaque-home-handle",
+    "event": {"type": "turn.alive", "payload": {"phase": "running"}},
+    "turn_id": "home-turn-1",
+    "correlation_id": "turn-correlation-from-prompt-submit"
+  }
+}
+```
+
+`phase` is `awaiting_input` while a structured prompt for the turn is pending,
+else `running`; the payload never carries tool names, arguments, or content.
+`correlation_id` is the turn's `prompt.submit` correlation. Keep-alives are
+never parked or replayed across a disconnect, are never sent after the turn's
+terminal event, and do not change turn, reconnect-grace, or claim state.
+
 ### Errors
 
 Malformed JSON-RPC uses the standard JSON-RPC error envelope. Method-level
