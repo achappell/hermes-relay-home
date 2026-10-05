@@ -4265,3 +4265,40 @@ def test_turn_keepalive_stops_on_disconnect_and_close_without_parking() -> None:
         assert endpoint.has_active_turn
     finally:
         _close_keepalive(endpoint, ticks)
+
+
+@pytest.mark.parametrize("suspendable", [True, False])
+def test_turn_keepalive_stops_when_the_upstream_dies_mid_turn(
+    suspendable: bool,
+) -> None:
+    class DyingBridge(FakeBridge):
+        def suspend_failed_upstream(self) -> bool:
+            return suspendable
+
+    connection = FakeConnection()
+    bridge = DyingBridge()
+    ticks = _KeepaliveTicks()
+    endpoint = BridgeEndpoint(
+        connection,
+        bridge,
+        headers=HEADERS,
+        route=ROUTE,
+        turn_keepalive=True,
+        turn_keepalive_wait=ticks.wait,
+    )
+    try:
+        _open(endpoint)
+        _submit(endpoint)
+        ticks.tick()
+        _wait_for(lambda: len(_alive(connection)) == 1)
+        bridge.events.append(BridgeTransportError("standard socket lost"))
+        bridge.event_ready.set()
+        _wait_for(lambda: not endpoint.has_active_turn)
+        thread = endpoint._keepalive_thread
+        assert thread is not None
+        ticks.tick()
+        thread.join(timeout=1)
+        assert not thread.is_alive()
+        assert len(_alive(connection)) == 1
+    finally:
+        _close_keepalive(endpoint, ticks)
