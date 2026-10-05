@@ -69,6 +69,33 @@ def _start(server) -> threading.Thread:
     return thread
 
 
+def _send_rpc(
+    client,
+    request_id: str,
+    method: str,
+    params: dict[str, object],
+    *,
+    diagnostics: dict[str, object] | None = None,
+) -> None:
+    request = {
+        "jsonrpc": "2.0",
+        "schema": 1,
+        "id": request_id,
+        "method": method,
+        "params": params,
+    }
+    if diagnostics is not None:
+        request["diagnostics"] = diagnostics
+    client.send(json.dumps(request))
+
+
+def _receive_rpc(client, request_id: str) -> dict[str, object]:
+    while True:
+        response = json.loads(client.recv(timeout=2))
+        if response.get("id") == request_id:
+            return response
+
+
 def test_live_bridge_server_accepts_only_the_versioned_route_and_closes_bridges() -> (
     None
 ):
@@ -1017,3 +1044,311 @@ def test_peer_close_before_first_request_is_observed_without_prose(tmp_path) -> 
     assert observed["connection_id"] == connection_id
     assert closed["connection_id"] == connection_id
     assert observed["exception_category"] == "connection_closed_ok"
+
+
+def test_client_close_during_submit_records_failed_write_and_finalizes_association(
+    tmp_path,
+) -> None:
+    from hermes_home.observability.client_reports import ClientReportStore
+    from hermes_home_diagnostics import OperationalDiagnostics
+
+    handle = "HOME-OPAQUE-HANDLE-CANARY"
+    content = "HOME-PRIVATE-PROMPT-CANARY"
+    rpc_id = "HOME-PRIVATE-RPC-ID-CANARY"
+    request_token = "req-11111111111111111111111111111111"
+    device_id = "authenticated-diagnostic-device"
+    submit_started = threading.Event()
+    release_submit = threading.Event()
+
+    class BlockingSubmitBridge(ListenerBridge):
+        def __init__(self) -> None:
+            super().__init__()
+            self.authenticated_device_id = device_id
+
+        def submit_prompt(self, text: str) -> BridgeTurn:
+            assert text == content
+            submit_started.set()
+            if not release_submit.wait(5):
+                raise RuntimeError("test submit gate timed out")
+            return BridgeTurn("home-turn-1", handle)
+
+    bridge = BlockingSubmitBridge()
+    diagnostics = OperationalDiagnostics(component="home", directory=tmp_path)
+    client_reports = ClientReportStore(tmp_path / "client-reports.sqlite")
+    server = create_bridge_server(
+        bridge_factory=lambda: bridge,
+        host="127.0.0.1",
+        port=0,
+        operational_diagnostics=diagnostics,
+        client_reports=client_reports,
+    )
+    thread = _start(server)
+    port = server.socket.getsockname()[1]
+    headers = {
+        "Authorization": "Device HOME-PRIVATE-AUTH-CANARY",
+        "X-Hermes-Diagnostics-Version": "1",
+    }
+
+    flow_complete = False
+
+    try:
+        with connect(
+            f"ws://127.0.0.1:{port}{BRIDGE_WS_PATH}",
+            additional_headers=headers,
+        ) as client:
+            _send_rpc(
+                client,
+                "open",
+                "conversation.open",
+                {"conversation_handle": handle},
+            )
+            opened = _receive_rpc(client, "open")
+            connection_id = opened["diagnostics"]["home_connection_id"]
+            _send_rpc(
+                client,
+                rpc_id,
+                "prompt.submit",
+                {"conversation_handle": handle, "text": content},
+                diagnostics={"version": 1, "request_id": request_token},
+            )
+            assert submit_started.wait(2)
+            client.close()
+
+        release_submit.set()
+        flow_complete = True
+    finally:
+        release_submit.set()
+        server.shutdown()
+        thread.join(timeout=2)
+        diagnostics.close()
+        if not flow_complete:
+            client_reports.close()
+
+    try:
+        raw = (tmp_path / "home.jsonl").read_text(encoding="utf-8")
+        assert content not in raw
+        assert "HOME-PRIVATE-AUTH-CANARY" not in raw
+        assert rpc_id not in raw
+        assert handle not in raw
+        records = [json.loads(line) for line in raw.splitlines()]
+
+        observed = next(
+            record
+            for record in records
+            if record["event"] == "request_observed"
+            and record.get("request_id") == request_token
+        )
+        correlation_id = observed["correlation_id"]
+        assert observed["connection_id"] == connection_id
+        started = next(
+            record
+            for record in records
+            if record["event"] == "upstream_submit_started"
+            and record["correlation_id"] == correlation_id
+        )
+        outcome = next(
+            record
+            for record in records
+            if record["event"] == "upstream_submit_outcome"
+            and record["correlation_id"] == correlation_id
+        )
+        assert started["connection_id"] == outcome["connection_id"] == connection_id
+        assert outcome["outcome"] == "accepted"
+
+        transports = [
+            record
+            for record in records
+            if record["event"] == "transport_observed"
+            and record["connection_id"] == connection_id
+        ]
+        assert len(transports) == 1
+        transport = transports[0]
+        closed = next(
+            record
+            for record in records
+            if record["event"] == "connection_closed"
+            and record["connection_id"] == connection_id
+        )
+        assert transport["pending_count"] == 0
+        assert transport["pending_state"] == "none"
+        request_lost = next(
+            record
+            for record in records
+            if record["event"] == "request_transport_lost"
+            and record["correlation_id"] == correlation_id
+        )
+        assert request_lost["pending_state"] == "awaiting_response"
+        assert request_lost["outcome"] == "unknown"
+        assert closed["connection_id"] == connection_id
+
+        write_outcomes = [
+            record["outcome"]
+            for record in records
+            if record["event"] == "response_write_outcome"
+            and record["correlation_id"] == correlation_id
+        ]
+        assert write_outcomes
+        assert "write_returned" not in write_outcomes
+
+        association = None
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            association = client_reports.lookup_association(
+                device_id, connection_id, request_token
+            )
+            if association["state"] == "linked":
+                break
+            time.sleep(0.01)
+        assert association["state"] == "linked"
+        assert association["correlation_id"] == correlation_id
+    finally:
+        client_reports.close()
+
+
+def test_duplicate_diagnostic_request_token_is_ambiguous_without_suppressing_prompts(
+    tmp_path,
+) -> None:
+    from hermes_home.observability.client_reports import ClientReportStore
+    from hermes_home_diagnostics import OperationalDiagnostics
+
+    handle = "opaque-home-handle"
+    device_id = "authenticated-diagnostic-device"
+    request_token = "req-22222222222222222222222222222222"
+
+    class CompletingBridge(ListenerBridge):
+        def __init__(self) -> None:
+            super().__init__()
+            self.authenticated_device_id = device_id
+            self.events: queue.Queue[BridgeEvent] = queue.Queue()
+            self.prompt_calls: list[str] = []
+            self.release_first_submit = threading.Event()
+
+        def submit_prompt(self, text: str) -> BridgeTurn:
+            self.prompt_calls.append(text)
+            turn_id = f"home-turn-{len(self.prompt_calls)}"
+            self.events.put(
+                BridgeEvent(
+                    handle,
+                    "turn.complete",
+                    {"status": "completed"},
+                    turn_id=turn_id,
+                )
+            )
+            if len(self.prompt_calls) == 1 and not self.release_first_submit.wait(5):
+                raise RuntimeError("test terminal event gate timed out")
+            return BridgeTurn(turn_id, handle)
+
+        def next_event(self):
+            while not self.closed.is_set():
+                try:
+                    return self.events.get(timeout=0.05)
+                except queue.Empty:
+                    continue
+            raise BridgeTransportError("closed")
+
+    bridge = CompletingBridge()
+    diagnostics = OperationalDiagnostics(component="home", directory=tmp_path)
+    client_reports = ClientReportStore(tmp_path / "client-reports.sqlite")
+    server = create_bridge_server(
+        bridge_factory=lambda: bridge,
+        host="127.0.0.1",
+        port=0,
+        operational_diagnostics=diagnostics,
+        client_reports=client_reports,
+    )
+    thread = _start(server)
+    port = server.socket.getsockname()[1]
+    headers = {
+        "Authorization": "Device test-device",
+        "X-Hermes-Diagnostics-Version": "1",
+    }
+
+    try:
+        with connect(
+            f"ws://127.0.0.1:{port}{BRIDGE_WS_PATH}",
+            additional_headers=headers,
+        ) as client:
+            _send_rpc(
+                client,
+                "open",
+                "conversation.open",
+                {"conversation_handle": handle},
+            )
+            opened = _receive_rpc(client, "open")
+            connection_id = opened["diagnostics"]["home_connection_id"]
+            first = {
+                "conversation_handle": handle,
+                "text": "first prompt",
+            }
+            second = {
+                "conversation_handle": handle,
+                "text": "second prompt",
+            }
+            _send_rpc(
+                client,
+                "first",
+                "prompt.submit",
+                first,
+                diagnostics={"version": 1, "request_id": request_token},
+            )
+            first_terminal_seen = False
+            while not first_terminal_seen:
+                response = json.loads(client.recv(timeout=2))
+                if response.get("method") == "event":
+                    params = response.get("params")
+                    event = params.get("event") if isinstance(params, dict) else None
+                    first_terminal_seen = (
+                        isinstance(event, dict) and event.get("type") == "turn.complete"
+                    )
+            bridge.release_first_submit.set()
+            first_response = _receive_rpc(client, "first")
+            _send_rpc(
+                client,
+                "second",
+                "prompt.submit",
+                second,
+                diagnostics={"version": 1, "request_id": request_token},
+            )
+            second_response = _receive_rpc(client, "second")
+            assert first_response["result"]["status"] == "submitted"
+            assert first_response["diagnostics"]["request_id"] == request_token
+            assert second_response["result"]["status"] == "submitted"
+            assert "diagnostics" not in second_response
+        server.shutdown()
+        thread.join(timeout=2)
+        diagnostics.close()
+
+        association = None
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            association = client_reports.lookup_association(
+                device_id, connection_id, request_token
+            )
+            if association["state"] == "ambiguous":
+                break
+            time.sleep(0.01)
+        assert association["state"] == "ambiguous"
+        assert bridge.prompt_calls == ["first prompt", "second prompt"]
+        assert diagnostics.status()["correlation_conflicts"] == 1
+        assert client_reports.recent()["association_losses"]["conflicts"] == 1
+
+        records = [
+            json.loads(line)
+            for line in (tmp_path / "home.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        submit_outcomes = [
+            record for record in records if record["event"] == "upstream_submit_outcome"
+        ]
+        assert len(submit_outcomes) == 2
+        assert all(
+            record["outcome"] == "accepted" and record["connection_id"] == connection_id
+            for record in submit_outcomes
+        )
+    finally:
+        bridge.release_first_submit.set()
+        server.shutdown()
+        thread.join(timeout=2)
+        diagnostics.close()
+        client_reports.close()

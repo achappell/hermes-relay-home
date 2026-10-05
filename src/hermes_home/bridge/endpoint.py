@@ -441,42 +441,7 @@ class BridgeEndpoint:
                 self.handle_message(message)
         except Exception as error:  # noqa: BLE001 - project transport facts only
             transport_error = error
-            connection = self._connection
-            facts = close_fields(connection, error)
-            category = facts["exception_category"]
-            received = facts["received_close_code"]
-            sent = facts["sent_close_code"]
-            classification = (
-                "normal_shutdown"
-                if category == "connection_closed_ok"
-                else "transport_error"
-            )
-            initiator = (
-                "peer"
-                if received is not None
-                else "local"
-                if sent is not None
-                else "unknown"
-            )
-            close_trigger = (
-                "counterpart_closed" if initiator == "peer" else "transport_error"
-            )
-            pending_count = len(self._pending_prompts)
-            if self._operational_diagnostics is not None:
-                self._operational_diagnostics.emit(
-                    "transport_observed",
-                    leg="client_home",
-                    phase="closing",
-                    classification=classification,
-                    connection_id=self._diagnostic_connection_id,
-                    correlation_state="local_only",
-                    initiator=initiator,
-                    close_trigger=close_trigger,
-                    pending_count=min(65535, pending_count),
-                    pending_saturated=pending_count > 65535,
-                    pending_state="unknown" if pending_count else "none",
-                    **facts,
-                )
+            self._record_transport_observed(self._connection, error)
         finally:
             connection = self._connection
             facts = close_fields(connection, transport_error)
@@ -845,6 +810,45 @@ class BridgeEndpoint:
             fields["failure_code"] = "transport_unavailable"
             fields["exception_category"] = exception_fields(error)["exception_category"]
         self._operational_diagnostics.emit("response_write_outcome", **fields)
+
+    def _record_transport_observed(
+        self, connection: WebSocketConnection | None, error: BaseException
+    ) -> None:
+        if self._operational_diagnostics is None:
+            return
+        facts = close_fields(connection, error)
+        category = facts["exception_category"]
+        received = facts["received_close_code"]
+        sent = facts["sent_close_code"]
+        classification = (
+            "normal_shutdown"
+            if category == "connection_closed_ok"
+            else "transport_error"
+        )
+        initiator = (
+            "peer"
+            if received is not None
+            else "local"
+            if sent is not None
+            else "unknown"
+        )
+        pending_count = len(self._pending_prompts)
+        self._operational_diagnostics.emit(
+            "transport_observed",
+            leg="client_home",
+            phase="closing",
+            classification=classification,
+            connection_id=self._diagnostic_connection_id,
+            correlation_state="local_only",
+            initiator=initiator,
+            close_trigger="counterpart_closed"
+            if initiator == "peer"
+            else "transport_error",
+            pending_count=min(65535, pending_count),
+            pending_saturated=pending_count > 65535,
+            pending_state="unknown" if pending_count else "none",
+            **facts,
+        )
 
     handle = handle_message
 
@@ -2485,6 +2489,21 @@ class BridgeEndpoint:
                             ),
                             error=error,
                         )
+                        request_transport_fields: dict[str, object] = {
+                            "correlation_id": diagnostic_correlation_id,
+                            "connection_id": self._diagnostic_connection_id,
+                            "phase": "response",
+                            "pending_state": "awaiting_response",
+                            "outcome": "unknown",
+                        }
+                        if diagnostic_request_id is not None:
+                            request_transport_fields["request_id"] = (
+                                diagnostic_request_id
+                            )
+                        self._operational_diagnostics.emit(
+                            "request_transport_lost", **request_transport_fields
+                        )
+                        self._record_transport_observed(connection, error)
                     if payload.get("method") == "event":
                         message_bytes = len(message.encode("utf-8"))
                         if (
