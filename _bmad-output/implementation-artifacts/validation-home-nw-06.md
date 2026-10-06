@@ -166,3 +166,96 @@ schema-2 report was uploaded and no phone observation was fabricated.
 Real-device schema-2 upload and end-to-end phone/Home correlation evidence
 remain pending; issue #16 remains open for those acceptance items. No commit
 or push was made.
+
+## CaticornQueen deployment — 2026-10-05 (0effbf9)
+
+Deployed Home `main` revision `0effbf98fd1f4521313ba19f2378089ba7b3baf8`
+(origin/main; includes #74 audio-wait-after-speech, #75 opt-in `turn.alive`
+keep-alive, #76 runner comment) to CaticornQueen from the isolated detached
+worktree `.worktrees/deploy-0effbf9`. Package-only cutover: no installer, no
+runner/task re-registration, no dependency, Prometheus, Standard, tailnet or
+credential change. Media-server, Standard, the Qwen3 server and iOS were not
+touched, and no prompt or Home traffic beyond authenticated read GETs was sent.
+
+### Build
+
+- Gates in the worktree (HEAD verified as the exact SHA):
+  `uv run --python 3.14 --extra dev pytest -q` — 925 passed, four deprecation
+  warnings; `uvx ruff check src tests` — passed;
+  `uvx ruff format --check src tests` — 74 files already formatted.
+- Wheel `hermes_relay_home-0.1.0-py3-none-any.whl`, SHA-256
+  `d4e1c38f53e8c5f15547bb4c9444fc5bd2ce5ed1e161535f922771f6400644c7`
+  (39 members; 34 Python sources = 33 `hermes_home` + `hermes_home_diagnostics.py`).
+  Every Python source in the wheel is byte-identical to
+  `git show 0effbf9:src/<path>`. The wheel's SHA-256 matched on the host.
+- Versus the previous deployment (`a45f7ef`), three installed sources differ:
+  `hermes_home/api/bridge_server.py`, `hermes_home/bridge/endpoint.py`,
+  `hermes_home/bridge/standard.py`. All other installed hashes are unchanged.
+
+### Pre-flight (read-only) and backups
+
+- Task `Hermes Home` Running as SYSTEM (last result `267009`); both loopback
+  listeners (`127.0.0.1:8780`, `127.0.0.1:8766`) on one process (pid 28988).
+  All 34 installed Python sources matched `git show a45f7ef:src/<path>`
+  (so the installed code was the `a45f7ef` deployment). Runner SHA-256
+  `52b9316aac157fcc3095373cd8231083841b1c864c0eb7b6e88135484985cc55`, equal to
+  the new source `run.ps1`, so the runner was not replaced. 18 `HERMES_HOME*`
+  machine variables recorded. Baseline `/pair`, authenticated
+  `/api/v1/diagnostics/status`, `/api/v1/configuration` returned 200;
+  Prometheus `up{job="hermes-home"}` = 1.
+- Protected rollback directory (SYSTEM, Administrators, deployment account):
+  `C:\ProgramData\HermesHome\backups\home-0effbf9-20261005`
+  - `installed-package.zip` (44 files, venv-relative) SHA-256
+    `16af3fc25e1572d74e2b086e659e1dc4e935b84fbba88d5e0ceb6b47ba4839f1`, with
+    `installed-package-manifest.json` and `installed-distributions.json`.
+  - `home-preupgrade.sqlite3`: consistent `sqlite3.Connection.backup` online
+    copy (live DB reported `journal_mode=delete`); `PRAGMA integrity_check`
+    `ok`; 3,579,904 bytes, SHA-256
+    `15a2625d02f2cd3177b5249bbdea7653f6b5659606354f5e4383c7a5d16fbf7e`.
+  - `run.ps1`, `task.xml` (`Export-ScheduledTask`), `machine-settings.json`
+    (18 variables), `preflight-hashes.json`, and the deployed wheel.
+  - `rollback-package.ps1` (SHA-256
+    `fe4cdd347ef2b40c08be3d290e983e53ec5e8ddecc9f0f79aa3094735625d54e`),
+    parsed by Windows PowerShell 5.1 with 0 parse errors; **not executed**.
+    Like the previous rollback it stops only Home, requires both listeners to
+    release, validates the archive checksum and manifest, saves a new
+    `home-before-rollback-<UTC>.sqlite3`, restores the `a45f7ef` package files
+    and verifies hashes, verifies the runner hash and task definition, and
+    starts Home. It does not restore the SQLite image or machine settings.
+
+### Cutover
+
+`Stop-ScheduledTask 'Hermes Home'`; both listeners released;
+`uv pip install --python C:\ProgramData\HermesHome\venv\Scripts\python.exe
+--no-deps --force-reinstall <backup-dir>\hermes_relay_home-0.1.0-py3-none-any.whl`;
+`Start-ScheduledTask 'Hermes Home'`. Only that task was stopped/started.
+
+Deviation: the first install attempt aborted immediately because the script's
+`$ErrorActionPreference='Stop'` turned `uv`'s stderr progress line into a
+PowerShell error. Nothing had been installed (the installed source hashes were
+re-read and equal to pre-cutover; no `uv` process was running; the task was
+stopped, listeners released). The same command was re-run with the native-call
+error preference relaxed and exited 0. The staging copy was placed in
+`C:\Users\achap\hermes-home-deploy\deploy-0effbf9\` (a subdirectory, so the
+existing wheel in the parent directory was not overwritten).
+
+### Live acceptance observed
+
+| Check | Result |
+| --- | --- |
+| Installed sources | All 34 installed Python sources equal the wheel's (and `git show 0effbf9:src/<path>`) hashes. Distributions unchanged: cffi 2.1.1, cryptography 50.0.1, hermes-relay-home 0.1.0, pycparser 3.0, segno 1.6.6, websockets 17.1. |
+| New code present | `_PRE_SPEECH_AUDIO_POLL_SECONDS` in installed `bridge/standard.py`; `TURN_KEEPALIVE_INTERVAL_SECONDS` in installed `bridge/endpoint.py`. |
+| Task / listeners | `Hermes Home` Running as SYSTEM, last start 2026-10-05 12:00:36 (host time), result `267009`. `127.0.0.1:8780` and `127.0.0.1:8766` on the same new process (pid 14528). |
+| HTTP | `/pair` 200; authenticated `/api/v1/diagnostics/status` 200; authenticated `/api/v1/configuration` 200 with a response SHA-256 identical to the pre-cutover response. The existing admin credential was read only inside the remote process and never printed. |
+| Prometheus | `up{job="hermes-home"}` returned `1`. |
+| Preserved | 18 `HERMES_HOME*` machine variables equal the backup (0 differences); exported task XML SHA-256 identical before/after (`f61e73a2…d495`); runner SHA-256 unchanged (`52b9316a…cc55`); diagnostics ACL unchanged (SYSTEM Modify, Administrators Read). |
+| Operational JSONL | The new `diagnostics/home.jsonl` holds two complete records (`provenance_header`, `process_started`); 0 invalid; zero authorization/bearer/token/secret/password/credential/prompt/transcript hits. The previous run's file rotated to `home.jsonl.1` (166 records, 0 invalid; its only marker hits are the benign `operation` label `prompt_submit`). |
+
+### Boundaries
+
+No rollback was needed. The keep-alive is opt-in per client request header, so
+it takes effect only for clients that advertise it; the audio-wait change
+applies to every Standard turn. No live prompt, Standard Session, real-device
+turn, or phone observation was exercised, so the effect of #74/#75 on a real
+phone turn remains unobserved. `HERMES_HOME_DEPLOYMENT_REVISION` is still the
+stale `376583d…`; the installed-source hashes above identify this deployment.
