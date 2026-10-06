@@ -1,0 +1,55 @@
+--- a/qwen3_streaming_server.py
++++ b/qwen3_streaming_server.py
+@@ -1666,6 +1666,12 @@
+         level=logging.INFO,
+         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+     )
++    try:
++        import qwen3_server_logging
++
++        qwen3_server_logging.install_logging()
++    except Exception:
++        LOGGER.exception("could not enable rotating file logging; continuing on stderr only")
+     voices_dir = args.voices_dir.expanduser()
+     voices_config = args.voices_config.expanduser() if args.voices_config else None
+     profiles, default_voice = load_voice_profiles(
+@@ -1709,6 +1715,11 @@
+             pass
+         LOGGER.info("startup warmup complete")
+ 
++    try:
++        qwen3_server_logging.start_health_monitor(service, args)
++    except Exception:
++        LOGGER.exception("could not start health logging; continuing without it")
++
+     # TorchInductor's reduce-overhead mode uses CUDA graph trees whose
+     # thread-local state must remain on the same thread between calls.  A
+     # ThreadingHTTPServer creates a fresh worker for each request, so the
+--- a/start_qwen3_streaming_optimized.ps1
++++ b/start_qwen3_streaming_optimized.ps1
+@@ -60,6 +60,25 @@
+     $Arguments += @("--forced-aligner-model", $ForcedAlignerModel)
+ }
+ 
++# Start-Process truncates the redirect targets, which used to discard the previous
++# run's stderr/stdout on every restart. Keep the last 5 of each. The server also
++# writes a rotating content-free log to logs\qwen3-streaming.log (qwen3_server_logging.py).
++try {
++    $ArchiveDir = Join-Path $Root "logs\archive"
++    New-Item -ItemType Directory -Force -Path $ArchiveDir | Out-Null
++    $Stamp = Get-Date -Format "yyyyMMdd-HHmmss"
++    foreach ($LogPath in @($StdoutLogPath, $StderrLogPath)) {
++        if ((Test-Path -LiteralPath $LogPath) -and ((Get-Item -LiteralPath $LogPath).Length -gt 0)) {
++            $Leaf = [IO.Path]::GetFileNameWithoutExtension($LogPath)
++            Move-Item -LiteralPath $LogPath -Destination (Join-Path $ArchiveDir "$Leaf.$Stamp.log")
++            Get-ChildItem -LiteralPath $ArchiveDir -Filter "$Leaf.*.log" |
++                Sort-Object LastWriteTime -Descending | Select-Object -Skip 5 | Remove-Item -Force
++        }
++    }
++} catch {
++    Write-Warning "log archive step failed: $($_.Exception.Message)"
++}
++
+ Set-Location -LiteralPath $Root
+ $Process = Start-Process `
+     -FilePath $Python `

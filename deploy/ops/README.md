@@ -1,5 +1,14 @@
 # Ops observability deployment
 
+## Index
+
+| Path | Host | What |
+| --- | --- | --- |
+| `hermes-home.alloy` | ops | Authenticated Alloy scrape of Home (below). |
+| `hermes-standard-home-pilot*.{sh,py}`, `com.hermes.home-standard-pilot*.plist` | media server | Standard-backed Home pilot and its relay proxy ([below](#standard-backed-home-pilot)). |
+| [`standard-speak-stream-timeout/`](standard-speak-stream-timeout/README.md) | media server | Live local patch to the Hermes Agent checkout: 15 s speak-stream timeout ([below](#live-local-edits)). |
+| [`qwen3-streaming-logging/`](qwen3-streaming-logging/README.md) | CaticornQueen | Live local edits to the Qwen3 speech server: persistent content-free rotating log ([below](#live-local-edits)). |
+
 The Grafana instance at `grafana.chappell-home.dev` reads the Prometheus
 container on the `ops` host. That Prometheus receives metrics through the
 existing Alloy remote-write pipeline, so Home must be added as an authenticated
@@ -105,3 +114,30 @@ Standard token on the media server and copy the same value into the
 ACL-protected CaticornQueen token file used by the Windows installer. This
 process is the Sprint 1 pilot target; HOME-NW-05 still owns the eventual
 dynamic Profile and claim authority.
+
+## Live local edits
+
+Two edits made directly on production hosts on 2026-10-06 are not part of any
+upstream repository. They are versioned here so an update cannot silently
+revert them. Each directory holds the exact artifact, an idempotent installer,
+rollback, and the SHA-256 of the live files it was captured from.
+
+| Edit | Host and target | Survives updates? | Check after an update |
+| --- | --- | --- | --- |
+| [`standard-speak-stream-timeout/`](standard-speak-stream-timeout/README.md): `tts.openai.stream_timeout_seconds` (default 15 s, 0 < v <= 120) and `max_retries=0` for Standard speak-stream; type-only synthesis warning | media server, `~/.hermes/hermes-agent` (`tools/tts_streaming.py`, `hermes_cli/web_routers/audio.py`), uncommitted on `f97608f178d1` | **No.** `hermes update` autostashes and re-applies; a conflict resets the tree and leaves the patch in `git stash list`. | `sh ~/hermes-ops/standard-speak-stream-timeout/verify.sh`; if it fails, `sh .../apply.sh` |
+| [`qwen3-streaming-logging/`](qwen3-streaming-logging/README.md): `qwen3_server_logging.py`, `main()` hooks, archiving start script | CaticornQueen, `D:\Qwen3-TTS` (untracked files in an upstream `QwenLM/Qwen3-TTS` clone) | Nothing updates these files, but an upstream `git pull` or manual reinstall of the server must keep them. | `Get-FileHash` the three files against the table in its README |
+
+### After `hermes update` (media server)
+
+1. `sh ~/hermes-ops/standard-speak-stream-timeout/verify.sh` (read-only). It
+   exits `0` when patched and loaded, `1` when the patch is missing, partial or
+   conflicted (and prints the exact re-apply command), `3` when patched on disk
+   but the running pilot predates the edit.
+2. On `1`: `sh ~/hermes-ops/standard-speak-stream-timeout/apply.sh`. It is
+   idempotent, backs up the two files, and reports `CONFLICT` without changing
+   anything if upstream touched the same lines.
+3. Apply and verify change files only. Restart the pilot only when idle:
+   `launchctl kickstart -k gui/$(id -u)/com.hermes.home-standard-pilot`.
+
+Restarting the Qwen3 task (`Qwen3-TTS-Streaming-Optimized`) is likewise only
+done when idle; see its README.

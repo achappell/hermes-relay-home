@@ -1,0 +1,3 @@
+# Patches and POSIX scripts must keep LF line endings and exact bytes.
+*.patch -text
+*.sh text eol=lf

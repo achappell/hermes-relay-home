@@ -1,0 +1,3 @@
+# Keep the Qwen3 files byte-exact: the SHA-256 table in README.md and install.ps1
+# is checked against them, and a CRLF conversion on a Windows checkout breaks it.
+* -text

@@ -1,0 +1,59 @@
+diff --git a/hermes_cli/web_routers/audio.py b/hermes_cli/web_routers/audio.py
+index 992ba1a69aa..58f120d7db9 100644
+--- a/hermes_cli/web_routers/audio.py
++++ b/hermes_cli/web_routers/audio.py
+@@ -501,7 +501,9 @@ async def speak_stream_ws(ws: "WebSocket") -> None:
+                             return
+                         loop.call_soon_threadsafe(chunks.put_nowait, chunk)
+         except Exception as exc:
+-            _log.warning("speak-stream synthesis failed: %s", exc)
++            # Type only: provider errors can echo the synthesized text. The
++            # finally below still ends the stream so Home is not left waiting.
++            _log.warning("speak-stream synthesis failed: %s", type(exc).__name__)
+         finally:
+             loop.call_soon_threadsafe(chunks.put_nowait, None)
+ 
+diff --git a/tools/tts_streaming.py b/tools/tts_streaming.py
+index 33f1fb1acce..c96ea5f339a 100644
+--- a/tools/tts_streaming.py
++++ b/tools/tts_streaming.py
+@@ -233,6 +233,21 @@ def _sample_rate_from_headers(headers) -> Optional[int]:
+     return rate if rate > 0 else None
+ 
+ 
++_DEFAULT_STREAM_TIMEOUT_SECONDS = 15.0
++
++
++def _stream_timeout_seconds(section: Dict) -> float:
++    configured = section.get("stream_timeout_seconds", _DEFAULT_STREAM_TIMEOUT_SECONDS)
++    try:
++        value = float(configured)
++    except (TypeError, ValueError):
++        value = 0.0
++    if isinstance(configured, bool) or not 0 < value <= 120:
++        logger.warning("Invalid tts stream_timeout_seconds %r; using %.0f s", configured, _DEFAULT_STREAM_TIMEOUT_SECONDS)
++        return _DEFAULT_STREAM_TIMEOUT_SECONDS
++    return value
++
++
+ @register("openai")
+ class OpenAIStreamer(StreamingTTSProvider):
+     """OpenAI speech with ``response_format=pcm`` (OpenAI itself: 24 kHz mono int16).
+@@ -258,9 +273,16 @@ class OpenAIStreamer(StreamingTTSProvider):
+     def stream(self, text: str) -> Iterator[bytes]:
+         from openai import OpenAI
+         from hermes_cli.config import get_env_value
++        # A stalled endpoint must end the sentence promptly: the SDK default
++        # (600 s, two retries) holds speak-stream silent far past Home's 30 s
++        # audio timeout. ``stream_timeout_seconds`` bounds connect and each
++        # read (the gap between PCM chunks); no retries mid-reply.
+         client = OpenAI(
+             api_key=(self.section.get("api_key") or resolve_openai_audio_api_key()),
+-            base_url=(self.section.get("base_url") or get_env_value("OPENAI_BASE_URL") or None))
++            base_url=(self.section.get("base_url") or get_env_value("OPENAI_BASE_URL") or None),
++            timeout=_stream_timeout_seconds(self.section),
++            max_retries=0,
++        )
+         from tools.tts_tool_openai import _openai_extra_body
+         extra = {"extra_body": body} if (body := _openai_extra_body(self.section)) else {}
+         with client.audio.speech.with_streaming_response.create(
