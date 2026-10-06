@@ -1352,3 +1352,53 @@ def test_duplicate_diagnostic_request_token_is_ambiguous_without_suppressing_pro
         thread.join(timeout=2)
         diagnostics.close()
         client_reports.close()
+
+
+@pytest.mark.parametrize(
+    ("features", "expected"),
+    [
+        (None, False),
+        ("audio, other", False),
+        (" Turn_KeepAlive ", True),
+        ("other,turn_keepalive", True),
+    ],
+)
+def test_live_server_reads_the_turn_keepalive_feature_header(
+    features: str | None, expected: bool
+) -> None:
+    """Verify the bridge server parses the X-Hermes-Home-Client-Features header."""
+    server = create_bridge_server(
+        bridge_factory=ListenerBridge,
+        route={"class": "home", "id": "local-test"},
+        host="127.0.0.1",
+        port=0,
+    )
+    thread = _start(server)
+    headers = {"Authorization": "Device endpoint-secret"}
+    if features is not None:
+        headers["X-Hermes-Home-Client-Features"] = features
+    try:
+        port = server.socket.getsockname()[1]
+        with connect(
+            f"ws://127.0.0.1:{port}{BRIDGE_WS_PATH}", additional_headers=headers
+        ) as client:
+            client.send(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "schema": 1,
+                        "id": "open-1",
+                        "method": "conversation.open",
+                        "params": {"conversation_handle": HANDLE},
+                    }
+                )
+            )
+            capabilities = json.loads(client.recv())["result"]["capabilities"]
+        legacy = {"commands": [], "heartbeat": True, "timing": "absent"}
+        if expected:
+            assert capabilities == {**legacy, "turn_keepalive": True}
+        else:
+            assert capabilities == legacy
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
