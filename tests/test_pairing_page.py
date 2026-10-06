@@ -548,3 +548,48 @@ def test_connection_report_review_reports_storage_failure(page):
     response = page.call("POST", "/pair/api/client-diagnostics", {})
     assert response.status == 503
     assert "fixture unavailable" not in str(response.body)
+
+
+def test_android_device_report_appears_in_review_without_content(page):
+    import time
+    import uuid
+
+    page.sign_in()
+    paired = _paired(page, ["spark"])
+    now = time.time()
+    report = {
+        "schema": 1,
+        "report_id": str(uuid.uuid4()),
+        "created_at": now,
+        "app_version": "0.3.1",
+        "build": "301",
+        "platform": "android",
+        "os_version": "16",
+        "model": "Pixel 9 Pro XL",
+        "events": [
+            {"time": now, "name": "connection_lost", "launch_id": str(uuid.uuid4())}
+        ],
+    }
+    response = page.call(
+        "POST",
+        "/api/v1/client-diagnostics",
+        report,
+        device=paired["credential"],
+        cookie=False,
+    )
+    assert response.status == 200
+    view = page.call("POST", "/pair/api/client-diagnostics", {})
+    item = view.body["reports"][0]
+    assert item["device_id"] == paired["device_id"]
+    assert item["report"] == report
+    rejected = page.call(
+        "POST",
+        "/api/v1/client-diagnostics",
+        {**report, "report_id": str(uuid.uuid4()), "model": "Amanda's phone"},
+        device=paired["credential"],
+        cookie=False,
+    )
+    assert rejected.status in (400, 429)
+    assert "Amanda" not in str(
+        page.call("POST", "/pair/api/client-diagnostics", {}).body
+    )
