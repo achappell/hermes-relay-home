@@ -80,6 +80,8 @@ Report top-level keys exactly: `schema`(int 2), `report_id`(lowercase-canonical 
 `created_at`(number, epoch s, within [now−7 d, now+300 s]), `app_version`, `build`,
 `os_version` (each `^[0-9]{1,8}(\.[0-9]{1,8}){0,3}$`), `platform` (`ios`|`macos`),
 `model` (`(iPhone|iPad|Mac)N,N` | `arm64` | `x86_64` | `unknown`), `events`, `origins`.
+(Android adds `platform` `android` with a separate bounded `model` pattern; see
+`spec-home-client-diagnostics.md` § Android platform. The Apple vocabulary above is unchanged.)
 Whole body ≤ 65 536 UTF-8 bytes.
 
 `origins` (`_origins`): list of 1–100; each object keys **exactly**

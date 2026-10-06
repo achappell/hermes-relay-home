@@ -13,6 +13,21 @@ from threading import Lock, RLock, Thread
 
 MAX_BODY = 65536
 RETENTION = 7 * 86400
+# Apple clients send a hardware identifier or simulator architecture. Android
+# clients send only `Build.MODEL`, an OEM-fixed (never user-editable) string such
+# as `Pixel 9 Pro XL`, `SM-S928B` or `moto g(60)`. Its vocabulary is open-ended, so
+# it is a strict, length-bounded ASCII pattern instead of an enumeration: 1-40
+# characters, starting with an alphanumeric and not ending in a space. No
+# trimming or case folding is applied; non-matching values are rejected.
+# `unknown` (the client's fallback) is valid for every platform.
+_APPLE_MODEL = re.compile(
+    r"(?:iPhone|iPad|Mac)[0-9]{1,3},[0-9]{1,3}|arm64|x86_64|unknown"
+)
+PLATFORM_MODELS = {
+    "ios": _APPLE_MODEL,
+    "macos": _APPLE_MODEL,
+    "android": re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9 _.+()-]{0,38}[A-Za-z0-9_.+()-])?"),
+}
 NAMES = frozenset(
     {
         "launch",
@@ -131,10 +146,11 @@ def validate_report(body: bytes | str, now: float) -> dict:
             r"[0-9]{1,8}(?:\.[0-9]{1,8}){0,3}", value[key]
         ):
             raise ValueError("invalid version")
-    if value["platform"] not in {"ios", "macos"}:
+    platform = value["platform"]
+    if not isinstance(platform, str) or platform not in PLATFORM_MODELS:
         raise ValueError("invalid platform")
-    if not isinstance(value["model"], str) or not re.fullmatch(
-        r"(?:iPhone|iPad|Mac)[0-9]{1,3},[0-9]{1,3}|arm64|x86_64|unknown", value["model"]
+    if not isinstance(value["model"], str) or not PLATFORM_MODELS[platform].fullmatch(
+        value["model"]
     ):
         raise ValueError("invalid model")
     origins = _origins(value["origins"]) if schema == 2 else set()

@@ -16,3 +16,12 @@ A local HTTP fixture with synthetic credentials/report data served the real pair
 ## Remaining acceptance
 
 Deploy the Home code and add the documented tailnet Serve mapping for `/api/v1/client-diagnostics`. Install and explicitly enable an Apple device, reproduce failure plus app restart, and verify received reports and recent Home events. The viewer offers timestamp comparison, not exact per-turn correlation. This slice does not reopen the historical HOME-NW-06 acceptance or claim real-device/deployed validation.
+
+## Android platform amendment — 2026-10-06
+
+Status: review. Local validator/contract change only; deployed acceptance remains pending.
+
+- Branch `feat/home-client-reports-android-platform` off `origin/main` `790f59e`, Python 3.14.
+- Full suite (`uv run --python 3.14 --locked --extra dev pytest -q`) run twice: `1024 passed` both times. `ruff check src tests`: all checks passed. `ruff format --check src tests`: 74 files already formatted.
+- New tests cover Android schema 1 and schema 2 with correlation, exact-case platform, unknown/malformed platforms, model boundary (1/40 accepted, 41 and out-of-charset/whitespace/control/Unicode rejected, no normalization), Apple vocabulary unchanged and cross-platform models rejected, exact key set (no `manufacturer`), size bound, restart persistence, `/pair` review payload, device HTTP path (200 and 400), and no content reaching storage or review output. No existing Apple test was edited.
+- Not done here: deployment to CaticornQueen and device acceptance with an Android client (separate, owner-approved steps). Unblocks ANDROID-DIAG-02 and ANDROID-DIAG-03.

@@ -635,3 +635,243 @@ def test_failed_finalize_keeps_durable_evidence_unavailable(tmp_path, monkeypatc
         "state": "unavailable"
     }
     store.close()
+
+
+NOW = 1790000000
+ANDROID_MODELS = [
+    "Pixel 9 Pro XL",
+    "SM-S928B",
+    "moto g(60)",
+    "Redmi Note 11 Pro+",
+    "ASUS_I006D",
+    "sdk_gphone64_arm64",
+    "M2102J20SG",
+    "unknown",
+    "A",
+    "A" * 40,
+]
+
+
+def android_report(model="Pixel 9 Pro XL", factory=report):
+    value = factory(NOW)
+    value.update(platform="android", os_version="16", model=model, build="301")
+    return value
+
+
+@pytest.mark.parametrize("model", ANDROID_MODELS)
+def test_android_schema1_report_is_accepted_unchanged(model):
+    value = android_report(model)
+    assert validate_report(json.dumps(value), NOW) == value
+
+
+@pytest.mark.parametrize("os_version", ["16", "15.0", "9", "12.1.2.3"])
+def test_android_os_release_uses_the_existing_version_format(os_version):
+    value = android_report()
+    value["os_version"] = os_version
+    assert validate_report(json.dumps(value), NOW) == value
+
+
+def test_android_schema2_report_with_correlation_is_accepted():
+    value = android_report(factory=report_v2)
+    event = value["events"][0]
+    value["origins"][0].update(
+        app_version="0.3.1",
+        build_number="301",
+        os_version="16",
+        source_revision=None,
+        artifact_sha256=None,
+        provenance_status="unverified",
+    )
+    event.update(
+        name="request_started",
+        leg="client_home",
+        phase="submission",
+        correlation_state="local_only",
+        pending_state="awaiting_write",
+    )
+    del event["correlation_id"]
+    assert validate_report(json.dumps(value), NOW) == value
+    event.update(
+        name="client_response_received",
+        phase="response",
+        response_kind="accepted",
+        correlation_id="corr-" + uuid.uuid4().hex,
+    )
+    assert validate_report(json.dumps(value), NOW) == value
+
+
+@pytest.mark.parametrize("factory", [report, report_v2])
+@pytest.mark.parametrize(
+    "platform", ["Android", "ANDROID", " android", "android ", "android\n", "ios "]
+)
+def test_platform_is_exact_and_case_sensitive(platform, factory):
+    value = android_report(factory=factory)
+    value["platform"] = platform
+    with pytest.raises(ValueError, match="invalid platform"):
+        validate_report(json.dumps(value), NOW)
+
+
+@pytest.mark.parametrize(
+    "platform", ["windows", "linux", "watchos", "", None, 1, True, ["android"], {}]
+)
+def test_unknown_or_malformed_platform_is_rejected(platform):
+    value = android_report()
+    value["platform"] = platform
+    with pytest.raises(ValueError, match="invalid platform"):
+        validate_report(json.dumps(value), NOW)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "",
+        " ",
+        " Pixel 9",
+        "Pixel 9 ",
+        "Pixel 9\n",
+        "\tPixel",
+        "Pixel\t9",
+        "A" * 41,
+        "(Pixel)",
+        "-Pixel",
+        "_Pixel",
+        "Pixel,9",
+        "Pixel/9",
+        "Pixel;9",
+        "Pixel <9>",
+        "Pixel'9",
+        "Pixel 9: Ünï",
+        "Pixel \u202e9",
+        "Pixel\x009",
+        "Pixel@home",
+        "Amanda's phone name",
+        "bob@example.com",
+        None,
+        9,
+        True,
+        ["Pixel"],
+    ],
+)
+def test_android_invalid_or_oversize_model_is_rejected(model):
+    value = android_report()
+    value["model"] = model
+    with pytest.raises(ValueError, match="invalid model"):
+        validate_report(json.dumps(value), NOW)
+
+
+def test_android_model_keeps_case_and_is_never_normalized():
+    for model in ("pixel 9", "PIXEL 9", "Unknown", "UNKNOWN"):
+        value = android_report(model)
+        assert validate_report(json.dumps(value), NOW)["model"] == model
+
+
+@pytest.mark.parametrize("platform", ["ios", "macos"])
+@pytest.mark.parametrize(
+    "model", ["Pixel 9 Pro XL", "SM-S928B", "Pixel", "iPhone18", "iphone18,1", "Mac"]
+)
+def test_apple_platforms_still_reject_android_style_models(platform, model):
+    value = report()
+    value.update(platform=platform, model=model)
+    with pytest.raises(ValueError, match="invalid model"):
+        validate_report(json.dumps(value), NOW)
+
+
+@pytest.mark.parametrize("platform", ["ios", "macos"])
+@pytest.mark.parametrize(
+    "model", ["iPhone18,1", "iPad16,3", "Mac15,6", "arm64", "x86_64", "unknown"]
+)
+def test_apple_platform_model_vocabulary_is_unchanged(platform, model):
+    value = report()
+    value.update(platform=platform, model=model)
+    assert validate_report(json.dumps(value), NOW) == value
+
+
+def test_android_cannot_borrow_apple_only_model_syntax():
+    value = android_report("iPhone18,1")
+    with pytest.raises(ValueError, match="invalid model"):
+        validate_report(json.dumps(value), NOW)
+
+
+@pytest.mark.parametrize("factory", [report, report_v2])
+def test_android_report_keeps_exact_key_set_and_bounds(factory):
+    value = android_report(factory=factory)
+    value["manufacturer"] = "Google"
+    with pytest.raises(ValueError, match="invalid report"):
+        validate_report(json.dumps(value), NOW)
+    value = android_report(factory=factory)
+    body = json.dumps(value).encode()
+    body += b" " * (65536 - len(body))
+    validate_report(body, NOW)
+    with pytest.raises(ValueError, match="report too large"):
+        validate_report(body + b" ", NOW)
+
+
+@pytest.mark.parametrize("factory", [report, report_v2])
+def test_android_reports_are_stored_and_reviewed_without_content(tmp_path, factory):
+    canary = "private-canary-prompt"
+    store = ClientReportStore(tmp_path / "home.db", clock=lambda: NOW)
+    value = android_report("moto g(60)", factory)
+    assert store.receive("device-a", json.dumps(value)) == value["report_id"]
+    unsafe = android_report(canary + ": Pixel", factory)
+    with pytest.raises(ValueError, match="invalid model"):
+        store.receive("device-b", json.dumps(unsafe))
+    extra = android_report(factory=factory)
+    extra["events"][0]["text"] = canary
+    with pytest.raises(ValueError):
+        store.receive("device-b", json.dumps(extra))
+    store.close()
+    store = ClientReportStore(tmp_path / "home.db", clock=lambda: NOW)
+    reports = store.recent()["reports"]
+    assert [r["device_id"] for r in reports] == ["device-a"]
+    assert reports[0]["report"] == value
+    assert reports[0]["report"]["platform"] == "android"
+    assert canary not in json.dumps(store.recent())
+    assert canary not in json.dumps(
+        store._db.execute("SELECT * FROM client_diagnostic_reports").fetchall()
+    )
+    store.close()
+
+
+def test_android_and_apple_reports_share_rate_and_storage_accounting():
+    store = ClientReportStore(clock=lambda: NOW)
+    store.receive("phone", json.dumps(android_report()))
+    with pytest.raises(ReportRateLimited):
+        store.receive("phone", json.dumps(report()))
+    store.receive("iphone", json.dumps(report()))
+    assert {r["report"]["platform"] for r in store.recent()["reports"]} == {
+        "android",
+        "ios",
+    }
+    store.close()
+
+
+def test_http_android_device_report_is_accepted_and_malformed_is_400(tmp_path):
+    config = SQLiteConfigurationStore(tmp_path / "home.db")
+    config.replace(
+        expected_revision=0,
+        candidate={"rooms": [], "profiles": [], "devices": [], "wake_mappings": []},
+    )
+    reports = ClientReportStore(clock=lambda: NOW)
+    app = HomeApplication(
+        configuration_store=config,
+        arbitration_engine=ArbitrationEngine(configuration=config.read),
+        admin_token="admin",
+        device_credentials={"device-token": "device-a"},
+        client_reports=reports,
+    )
+    headers = {"Authorization": "Device device-token"}
+    good = android_report()
+    response = app.handle(
+        "POST", "/api/v1/client-diagnostics", headers, json.dumps(good)
+    )
+    assert response.status == 200
+    assert response.body == {"schema": 1, "report_id": good["report_id"]}
+    bad = android_report("not allowed!", report_v2)
+    response = app.handle(
+        "POST", "/api/v1/client-diagnostics", headers, json.dumps(bad)
+    )
+    assert response.status == 400
+    assert [r["report"]["report_id"] for r in reports.recent()["reports"]] == [
+        good["report_id"]
+    ]
+    reports.close()
