@@ -259,3 +259,44 @@ applies to every Standard turn. No live prompt, Standard Session, real-device
 turn, or phone observation was exercised, so the effect of #74/#75 on a real
 phone turn remains unobserved. `HERMES_HOME_DEPLOYMENT_REVISION` is still the
 stale `376583d…`; the installed-source hashes above identify this deployment.
+
+## Deployment revision variable corrected — 2026-10-06
+
+The `HERMES_HOME_DEPLOYMENT_REVISION` machine variable on CaticornQueen was
+changed from the stale `376583d7273e08a090d7ec33c416e0b32880a343` to
+`0effbf98fd1f4521313ba19f2378089ba7b3baf8`, the revision the running package
+was built from (Home `main` is now `790f59e`; only tests/docs changed after
+`0effbf9`, so runtime code is identical). Variable only: no installer, package,
+runner, task, credential, Prometheus or Standard change.
+
+- Old value saved first to
+  `C:\ProgramData\HermesHome\backups\home-0effbf9-20261005\deployment-revision-before.json`
+  (SHA-256 `f193a0838761638027a85b1afda43c6795b3aa11214d6cb464a193a9349ccc6f`;
+  the file holds the old value, variable name, scope and UTC time). Rollback
+  is
+  `[Environment]::SetEnvironmentVariable('HERMES_HOME_DEPLOYMENT_REVISION','<old>','Machine')`.
+- The other 17 `HERMES_HOME*` machine variables are unchanged (0 differences
+  against the `machine-settings.json` backup; 18 variables before and after).
+- **No Home restart was performed, deliberately.** The Home runtime does not
+  read this variable: `src/` contains no reference to it (only
+  `load_settings` reads other `HERMES_HOME_*` names), `run.ps1` does not set it,
+  and the startup `provenance_header` carries `source_revision: null` with
+  `provenance_status: unverified` because Home is not given a revision.
+  Restarting would therefore not make it appear in diagnostics, and live
+  `prompt_submit` traffic was present in the operational JSONL, so the running
+  process (pid 14528, started 2026-10-05 12:00:36) was left untouched.
+- The variable's actual consumer is the host-side live-gate attestation:
+  `provenance\deployment.json` and `provenance\traces\*.json` carry a signed
+  `deployment_revision` of `376583d…` (written 2026-09-17/23, signer
+  `android-live-home-gate-20260917`). Those signed historical artifacts were
+  not modified (re-signing needs the live-gate signing key and a new gate run),
+  so they still attest the old identifier; a future attestation run on the host
+  will pick up the corrected value.
+- Post-change checks: task `Hermes Home` Running as SYSTEM, last start
+  2026-10-05 12:00:36, result `267009`; `127.0.0.1:8780` and `127.0.0.1:8766`
+  both on pid 14528; `/pair` 200; authenticated `/api/v1/diagnostics/status`
+  200 and `/api/v1/configuration` 200 (admin credential read only inside the
+  remote process, never printed); Prometheus `up{job="hermes-home"}` = `1`;
+  runner SHA-256 `52b9316a…cc55` and exported task XML SHA-256 `f61e73a2…d495`
+  unchanged; `diagnostics\home.jsonl` 147 records, 0 invalid, only marker hit
+  is the benign `operation` label `prompt_submit`.
