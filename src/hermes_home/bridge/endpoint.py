@@ -1533,6 +1533,7 @@ class BridgeEndpoint:
             if not active and turn_id not in self._retired_turn_ids:
                 raise _RequestError("request_rejected")
             bridge = self._bridge
+            audio_tail = active and turn_id in self._terminal_turn_ids
         if not active:
             # A repeated signal for a recently completed turn is an accepted
             # no-op; it must never reach a newer turn's upstream.
@@ -1562,6 +1563,13 @@ class BridgeEndpoint:
         if not accepted:
             self._unmark_interrupted(turn_id, newly_marked)
             raise _RequestError("request_rejected")
+        if audio_tail:
+            # The text turn is already terminal, so the response-audio worker
+            # is all that still holds prompt admission. Acknowledge only once
+            # it has exited and released the turn: a prompt sent right after
+            # this reply must not race the worker's shutdown.
+            self._wait_for_stale_audio()
+            self._maybe_release_turn(turn_id)
         return {
             "schema": HOME_BRIDGE_SCHEMA,
             "conversation_handle": handle,

@@ -345,6 +345,17 @@ Global events may omit `turn_id`; they cannot complete or retarget the active
 turn. A terminal event is the completion authority. `session.interrupt` being
 accepted is not itself a terminal outcome.
 
+**Interrupting the audio tail.** Home can observe the text terminal while the
+client still plays buffered speech, and Home keeps prompt admission until the
+response-audio sidecar ends. A client that stops that speech sends the same
+`session.interrupt` for the same `turn_id`. Home treats it as an audio-only
+cancellation: it stops the sidecar, sends no interrupt to Hermes, and
+acknowledges only after the audio worker has exited and released prompt
+admission, so a `prompt.submit` right after the acknowledgement is admitted. A
+repeated `session.interrupt` for a recently completed `turn_id` is an accepted
+no-op; it never stops, or is applied to, a newer turn. A `turn_id` Home does
+not know is still rejected with `request_rejected`.
+
 #### Turn keep-alive (`turn.alive`)
 
 A client opts in on the WebSocket upgrade request with the header

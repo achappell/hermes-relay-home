@@ -6833,6 +6833,9 @@ def test_home_tail_interrupt_stops_audio_and_admits_the_next_prompt() -> None:
             self._condition = Condition()
             self.parked = Event()
             self.stop_seen = False
+            # The sidecar needs a moment to flush after a stop; a client that
+            # prompts right after the interrupt reply must still be admitted.
+            self.flush_delay = 0.2
 
         def send_json(self, frame: dict[str, object]) -> None:
             super().send_json(frame)
@@ -6845,6 +6848,7 @@ def test_home_tail_interrupt_stops_audio_and_admits_the_next_prompt() -> None:
                 if self.closed:
                     raise ConnectionError("fixture audio socket closed")
                 if self.stop_seen:
+                    time.sleep(self.flush_delay)
                     return {"type": "end"}
                 if self.sent and self.incoming:
                     return self.incoming.popleft()
@@ -6859,6 +6863,7 @@ def test_home_tail_interrupt_stops_audio_and_admits_the_next_prompt() -> None:
                 if self.closed:
                     raise ConnectionError("fixture audio socket closed")
                 if self.stop_seen:
+                    time.sleep(self.flush_delay)
                     return {"type": "end"}
                 return self.incoming.popleft()
 
@@ -6959,6 +6964,13 @@ def test_home_tail_interrupt_stops_audio_and_admits_the_next_prompt() -> None:
     session_socket = SessionSocket()
     bridges: list[HomeBridge] = []
 
+    next_audio_socket = FakeAudioSocket(
+        [
+            {"type": "start", "sample_rate": 24_000, "channels": 1},
+            {"type": "end"},
+        ]
+    )
+
     def bridge_factory() -> HomeBridge:
         bridge = HomeBridge(
             gateway_url="wss://hermes.example/api/ws",
@@ -6971,15 +6983,7 @@ def test_home_tail_interrupt_stops_audio_and_admits_the_next_prompt() -> None:
                 handle, device, "family"
             ),
             gateway_socket_factory=SessionFactory(session_socket),
-            audio_socket_factory=AudioFactory(
-                audio_socket,
-                FakeAudioSocket(
-                    [
-                        {"type": "start", "sample_rate": 24_000, "channels": 1},
-                        {"type": "end"},
-                    ]
-                ),
-            ),
+            audio_socket_factory=AudioFactory(audio_socket, next_audio_socket),
             turn_id_factory=lambda index: f"home-turn-{index}",
         )
         bridges.append(bridge)
@@ -7065,13 +7069,11 @@ def test_home_tail_interrupt_stops_audio_and_admits_the_next_prompt() -> None:
             assert interrupted.get("result", {}).get("status") == "accepted", (
                 interrupted
             )
-            deadline = time.monotonic() + 2
-            while "end" not in audio_kinds:
-                assert time.monotonic() < deadline, (
-                    "Home did not stop the response audio"
-                )
-                receive(client)
+            # The reply is the release point: the worker has already ended the
+            # audio and freed admission, so the next prompt needs no wait.
+            assert "end" in audio_kinds
             assert {"stop": True} in audio_socket.sent
+            assert bridges[0].active_turn_id is None
             assert not any(
                 frame["method"] == "session.interrupt" for frame in session_socket.sent
             )
@@ -7097,6 +7099,7 @@ def test_home_tail_interrupt_stops_audio_and_admits_the_next_prompt() -> None:
             assert not any(
                 frame["method"] == "session.interrupt" for frame in session_socket.sent
             )
+            assert {"stop": True} not in next_audio_socket.sent
     finally:
         server.shutdown()
         server_thread.join(timeout=2)
