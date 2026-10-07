@@ -454,3 +454,33 @@ and wheels untouched).
 
 No rollback was needed. The effect of #83 on a real Pixel interrupt turn is not
 observed by this deployment; that is the separate live Android gate.
+
+### Deployment revision variable updated — 2026-10-07
+
+After the verified cutover above, the `HERMES_HOME_DEPLOYMENT_REVISION` machine
+variable on CaticornQueen was changed from `0effbf98fd1f4521313ba19f2378089ba7b3baf8`
+to `b964082c034ea60c249678ce416db7015cb0a382`, the revision of the running
+package. Metadata only: no installer, package, runner, task, credential,
+Prometheus, or Standard change, and **no Home restart** (the runtime does not
+read this variable; the process stayed pid `33944`, started 2026-10-07 12:32:29).
+
+- Old value saved first to
+  `C:\ProgramData\HermesHome\backups\home-pr83-20261007\deployment-revision-before.json`
+  (SHA-256 `5b2b31f236eea0e7d38def6ab2b30658f015fea69d337de4d0783513a8fc4674`;
+  holds the old value, variable name, scope and UTC time). Rollback:
+  `[Environment]::SetEnvironmentVariable('HERMES_HOME_DEPLOYMENT_REVISION','<old>','Machine')`.
+- Persisted value verified in a freshly started PowerShell process
+  (`[Environment]::GetEnvironmentVariable(..., 'Machine')`) — the same call the
+  host live-gate scripts (`install-live-gate.ps1`, `apply-*-fix.ps1`,
+  `Get-RequiredMachineValue`) use to read it — and returned the new SHA.
+- 18 `HERMES_HOME*` machine variables before and after; against the
+  `machine-settings.json` backup exactly one differs
+  (`HERMES_HOME_DEPLOYMENT_REVISION`); the other 17 are unchanged.
+- Post-change: task Running as SYSTEM, `127.0.0.1:8780` and `:8766` on pid
+  `33944`; installed sources still equal the b964082 wheel (34/34); `/pair`,
+  authenticated `/api/v1/diagnostics/status` and `/api/v1/configuration` 200
+  (configuration hash unchanged); Prometheus `up{job="hermes-home"}` = 1; task
+  XML `f61e73a2…d495` and runner `52b9316a…cc55` unchanged.
+- The signed `provenance\deployment.json` still attests the historical
+  `376583d…` (written 2026-09-23); it is regenerated only by a live-gate run,
+  which was not performed. A future run will read the corrected value.
