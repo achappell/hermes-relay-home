@@ -377,3 +377,110 @@ the `uv` call; it exited 0 and installed the staged wheel.
 | Operational JSONL | New `diagnostics\home.jsonl` contains two parsed records (`provenance_header`, `process_started`), 0 invalid lines, and no credential/content marker hits. The provenance header has `source_revision: null` and `provenance_status: unverified`; the service is not given a revision at runtime. Older rotated files contain only the benign marker `prompt_submit` for prompt-related labels. |
 
 No rollback was needed. Media-server, Standard, Qwen3 and iOS were not touched.
+
+## CaticornQueen deployment — 2026-10-07 (b964082, PR #83)
+
+Deployed merged Home `origin/main` revision
+`b964082c034ea60c249678ce416db7015cb0a382` (#83: `session.interrupt` after the
+text terminal releases the response-audio tail, and the acknowledgement is sent
+only after the audio worker has released prompt admission) to CaticornQueen from
+detached worktree `.worktrees/deploy-pr83`. The runtime diff from the previously
+deployed `f1eeb94` is exactly `src/hermes_home/bridge/endpoint.py` and
+`src/hermes_home/bridge/standard.py` (46 insertions, 4 deletions); #81 (ops
+patches under `deploy/ops/`) changes no runtime source and was not applied.
+Package-only cutover: no installer, runner/task re-registration, dependency,
+Prometheus, Standard, tailnet, machine-variable, or credential change. No prompt,
+claim, or Pixel action was performed.
+
+### Build
+
+- Gates at the exact revision: `uv run --python 3.14 --extra dev pytest -q` —
+  1,039 passed, four deprecation warnings; `uvx ruff check src tests` — passed;
+  `uvx ruff format --check src tests` — 75 files already formatted.
+- Wheel `hermes_relay_home-0.1.0-py3-none-any.whl`, SHA-256
+  `851c59bc739053cb53eb9fdd3d29153212ec39f26c4ac36e6c27146f4fe0deeb` (39
+  members, 34 Python sources), byte-identical to `git show b964082:src/<path>`;
+  only the two files above differ from `f1eeb94`. The SHA-256 matched on the host.
+
+### Pre-flight and backup
+
+- Resolved before action: running package = `f1eeb94` (all 34 installed sources
+  matched), task Running as SYSTEM since 2026-10-06 17:59:04, both loopback
+  listeners on pid `34736`, 18 `HERMES_HOME*` machine variables,
+  `HERMES_HOME_DEPLOYMENT_REVISION` still `0effbf98…` (unchanged by design: the
+  runtime does not read it), task XML SHA-256 `f61e73a2…d495`, runner SHA-256
+  `52b9316a…cc55`, `/pair` and authenticated diagnostics/configuration 200,
+  Prometheus `up{job="hermes-home"}` = 1. The cutover waited until no Home
+  diagnostic event had occurred for more than 130 seconds.
+- Protected backup directory
+  `C:\ProgramData\HermesHome\backups\home-pr83-20261007` (SYSTEM,
+  Administrators, deployment account):
+  - `installed-package.zip` (44 files) SHA-256
+    `ee01927e51be824e781ede4b0dac351b5927c1cb6ef5f358a56edbaa5c720bf2`, with
+    manifest and `installed-distributions.json`.
+  - `home-preupgrade.sqlite3`: online `sqlite3.Connection.backup` (live DB
+    `journal_mode=delete`), `PRAGMA integrity_check` `ok`, 4,259,840 bytes,
+    SHA-256 `3ebb032dd7cd5e47812fb93ce9769f2c9b09ff2720bd33c2f3b9bdd65133e129`.
+  - `run.ps1`, `task.xml`, `machine-settings.json` (18 variables),
+    `preflight-hashes.json`, and the deployed wheel.
+  - `rollback-package.ps1` SHA-256
+    `da19df3d8b744a08569a37346b31bf9fcb5056e07fbe239d21029700f4d8372c`, parsed
+    by Windows PowerShell 5.1 with 0 errors; **not executed**. It stops only
+    Home, waits for both listeners to release, validates the archive checksum
+    and manifest, takes a new online SQLite backup, restores the `f1eeb94`
+    package files with hash verification, checks the runner and task
+    definition, and starts Home. It does not restore the database or machine
+    settings.
+
+### Cutover and live acceptance
+
+`Stop-ScheduledTask 'Hermes Home'`; both listeners released;
+`uv pip install --python C:\ProgramData\HermesHome\venv\Scripts\python.exe
+--no-deps --force-reinstall <deploy-pr83>\hermes_relay_home-0.1.0-py3-none-any.whl`
+(native-command error preference relaxed; exit 0); `Start-ScheduledTask
+'Hermes Home'`. Only that task was stopped and started. Staging directory:
+`C:\Users\achap\hermes-home-deploy\deploy-pr83\` (earlier staging directories
+and wheels untouched).
+
+| Check | Result |
+| --- | --- |
+| Installed sources | All 34 installed Python source hashes equal the wheel and `git show b964082:src/<path>`; `_unmark_interrupted` (endpoint) and `terminal_audio_tail` (standard) are present in the installed package. Distributions unchanged (cffi 2.1.1, cryptography 50.0.1, hermes-relay-home 0.1.0, pycparser 3.0, segno 1.6.6, websockets 17.1). |
+| Task / listeners | `Hermes Home` Running as SYSTEM, last start 2026-10-07 12:32:29 (host time), result `267009`; `127.0.0.1:8780` and `127.0.0.1:8766` on the same new process, pid `33944`. |
+| HTTP | `/pair`, authenticated `/api/v1/diagnostics/status`, and authenticated `/api/v1/configuration` returned 200; configuration response SHA-256 unchanged from pre-cutover (`d2e71cb9…1af3`). The admin credential was used only inside the remote process and never printed. |
+| Prometheus | `up{job="hermes-home"}` = 1. |
+| Profiles / claims path | Configuration lists profiles `amanda`, `jensen`, `spark` (shared), 1 wake mapping, 1 device, 1 room; the Standard gateway host (`media-server`, port 8443) accepts a TCP connection from CaticornQueen. Through the tailnet front door `/pair` returned 200 and `/api/v1/client-claims` returned 401 (route reaches Home; auth enforced). Tailscale Serve routes unchanged. |
+| Preserved | 18 `HERMES_HOME*` machine variables equal the backup (0 differences); task XML SHA-256 `f61e73a2…d495` and runner SHA-256 `52b9316a…cc55` unchanged; diagnostics ACL unchanged (SYSTEM Modify, Administrators Read). |
+| Operational JSONL | New `diagnostics\home.jsonl`: two parsed records (`provenance_header`, `process_started`), 0 invalid, no credential/content marker hits; header has `source_revision: null`, `provenance_status: unverified`. Rotated files show only the benign `prompt_submit` label. |
+
+No rollback was needed. The effect of #83 on a real Pixel interrupt turn is not
+observed by this deployment; that is the separate live Android gate.
+
+### Deployment revision variable updated — 2026-10-07
+
+After the verified cutover above, the `HERMES_HOME_DEPLOYMENT_REVISION` machine
+variable on CaticornQueen was changed from `0effbf98fd1f4521313ba19f2378089ba7b3baf8`
+to `b964082c034ea60c249678ce416db7015cb0a382`, the revision of the running
+package. Metadata only: no installer, package, runner, task, credential,
+Prometheus, or Standard change, and **no Home restart** (the runtime does not
+read this variable; the process stayed pid `33944`, started 2026-10-07 12:32:29).
+
+- Old value saved first to
+  `C:\ProgramData\HermesHome\backups\home-pr83-20261007\deployment-revision-before.json`
+  (SHA-256 `5b2b31f236eea0e7d38def6ab2b30658f015fea69d337de4d0783513a8fc4674`;
+  holds the old value, variable name, scope and UTC time). Rollback:
+  `[Environment]::SetEnvironmentVariable('HERMES_HOME_DEPLOYMENT_REVISION','<old>','Machine')`.
+- Persisted value verified in a freshly started PowerShell process
+  (`[Environment]::GetEnvironmentVariable(..., 'Machine')`) — the same call the
+  host live-gate scripts (`install-live-gate.ps1`, `apply-*-fix.ps1`,
+  `Get-RequiredMachineValue`) use to read it — and returned the new SHA.
+- 18 `HERMES_HOME*` machine variables before and after; against the
+  `machine-settings.json` backup exactly one differs
+  (`HERMES_HOME_DEPLOYMENT_REVISION`); the other 17 are unchanged.
+- Post-change: task Running as SYSTEM, `127.0.0.1:8780` and `:8766` on pid
+  `33944`; installed sources still equal the b964082 wheel (34/34); `/pair`,
+  authenticated `/api/v1/diagnostics/status` and `/api/v1/configuration` 200
+  (configuration hash unchanged); Prometheus `up{job="hermes-home"}` = 1; task
+  XML `f61e73a2…d495` and runner `52b9316a…cc55` unchanged.
+- The signed `provenance\deployment.json` still attests the historical
+  `376583d…` (written 2026-09-23); it is regenerated only by a live-gate run,
+  which was not performed. A future run will read the corrected value.
