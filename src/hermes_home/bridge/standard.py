@@ -293,6 +293,9 @@ class _ActiveTurn:
     terminal: bool = False
     uncertain: bool = False
     interrupt_requested: bool = False
+    # Home asked the response-audio sidecar to stop this turn's speech, so the
+    # sidecar closing afterwards is the answer to that request, not a failure.
+    audio_stop_requested: bool = False
     rendered_preview: str = ""
     audio_text_sent: str = ""
     # Monotonic time speech was first requested from the sidecar (first text,
@@ -2733,7 +2736,15 @@ class HomeBridge:
                 TypeError,
                 ValueError,
             ) as error:
+                with self._state_lock:
+                    stopped = owner is not None and owner.audio_stop_requested
                 self._close_audio(owner=owner)
+                if stopped:
+                    return AudioFrame(
+                        kind="end",
+                        turn_id=turn_id,
+                        metadata={"reason": "stopped"},
+                    )
                 raise BridgeTransportError(
                     "home bridge audio is unavailable"
                 ) from error
@@ -2971,6 +2982,9 @@ class HomeBridge:
                 return
             if socket is not None:
                 self._mark_speech_requested_locked()
+                stopping = owner if owner is not None else self._audio_owner
+                if stopping is not None:
+                    stopping.audio_stop_requested = True
         if socket is not None:
             try:
                 with self._audio_send_lock:

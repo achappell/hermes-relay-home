@@ -765,3 +765,40 @@ def test_proxy_link_configuration_rejects_direct_standard_target(tmp_path) -> No
             )
     finally:
         store.close()
+
+
+def test_audio_socket_reports_a_peer_close_as_a_connection_error() -> None:
+    """A sidecar that closes after ``stop`` must look like every other closure.
+
+    The bridge's audio loop releases a terminal turn only on the typed error
+    classes it knows; a raw ``websockets.ConnectionClosed`` escaped them.
+    """
+    from threading import Thread
+
+    from websockets.sync.server import serve
+
+    from hermes_home.bridge.production import WebsocketsAudioSocketFactory
+
+    def sidecar(connection) -> None:
+        connection.recv(timeout=5)
+        connection.close()
+
+    server = serve(sidecar, "127.0.0.1", 0)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    audio = None
+    try:
+        port = server.socket.getsockname()[1]
+        audio = WebsocketsAudioSocketFactory(open_timeout=5).open(
+            f"ws://127.0.0.1:{port}/api/audio/speak-stream"
+        )
+        audio.send_json({"stop": True})
+        with pytest.raises(ConnectionError):
+            audio.receive(timeout=5)
+        with pytest.raises(ConnectionError):
+            audio.send_json({"text": "late"})
+    finally:
+        if audio is not None:
+            audio.close()
+        server.shutdown()
+        thread.join(timeout=2)
