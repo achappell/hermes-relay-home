@@ -2595,11 +2595,22 @@ class HomeBridge:
                 active is None
                 or self._gateway is not gateway
                 or self._runtime_session_id != runtime_session_id
-                or active.terminal
             ):
                 return False
             if active.interrupt_requested:
                 return True
+            if active.terminal:
+                if self._audio_socket is None or self._audio_owner is not active:
+                    return False
+                active.interrupt_requested = True
+                terminal_audio_tail = True
+            else:
+                terminal_audio_tail = False
+        if terminal_audio_tail:
+            # Standard has already completed the text turn. Stop only its
+            # remaining response-audio sidecar; never interrupt another turn.
+            self._stop_audio(owner=active)
+            return True
         try:
             result = gateway.request(
                 "session.interrupt",

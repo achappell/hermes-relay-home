@@ -1529,28 +1529,58 @@ class BridgeEndpoint:
         turn_id = _require_string(params["turn_id"])
         self._require_ready()
         with self._state_lock:
-            if self._active_turn_id != turn_id:
+            active = self._active_turn_id == turn_id
+            if not active and turn_id not in self._retired_turn_ids:
                 raise _RequestError("request_rejected")
             bridge = self._bridge
+            audio_tail = active and turn_id in self._terminal_turn_ids
+        if not active:
+            # A repeated signal for a recently completed turn is an accepted
+            # no-op; it must never reach a newer turn's upstream.
+            return {
+                "schema": HOME_BRIDGE_SCHEMA,
+                "conversation_handle": handle,
+                "turn_id": turn_id,
+                "status": "accepted",
+            }
         if bridge is None:  # pragma: no cover - _require_ready proves this
             raise _RequestError("hermes_unavailable")
+        # Mark before delivery: a terminal audio tail can end and release the
+        # turn as soon as the stop is sent, and a user stop must not surface as
+        # an audio failure or leave the id behind.
+        with self._state_lock:
+            newly_marked = turn_id not in self._interrupted_turn_ids
+            self._interrupted_turn_ids.add(turn_id)
         try:
             accepted = bridge.interrupt()
         except Exception as error:  # noqa: BLE001 - injected bridge is untrusted
+            self._unmark_interrupted(turn_id, newly_marked)
             self._raise_bridge_error(error)
         if type(accepted) is not bool:
+            self._unmark_interrupted(turn_id, newly_marked)
             self._mark_unavailable("protocol_error")
             raise _RequestError("protocol_error", delivery="uncertain")
         if not accepted:
+            self._unmark_interrupted(turn_id, newly_marked)
             raise _RequestError("request_rejected")
-        with self._state_lock:
-            self._interrupted_turn_ids.add(turn_id)
+        if audio_tail:
+            # The text turn is already terminal, so the response-audio worker
+            # is all that still holds prompt admission. Acknowledge only once
+            # it has exited and released the turn: a prompt sent right after
+            # this reply must not race the worker's shutdown.
+            self._wait_for_stale_audio()
+            self._maybe_release_turn(turn_id)
         return {
             "schema": HOME_BRIDGE_SCHEMA,
             "conversation_handle": handle,
             "turn_id": turn_id,
             "status": "accepted",
         }
+
+    def _unmark_interrupted(self, turn_id: str, newly_marked: bool) -> None:
+        if newly_marked:
+            with self._state_lock:
+                self._interrupted_turn_ids.discard(turn_id)
 
     def _command_dispatch(self, params: dict[str, object]) -> dict[str, object]:
         _require_param_shape(
@@ -2394,6 +2424,7 @@ class BridgeEndpoint:
                     self._retired_turn_ids.add(turn_id)
                 self._known_turn_ids.discard(turn_id)
                 self._terminal_turn_ids.discard(turn_id)
+                self._interrupted_turn_ids.discard(turn_id)
                 correlation_id = self._turn_correlations.pop(turn_id, None)
                 if correlation_id is not None:
                     self._retired_turn_correlations[turn_id] = correlation_id
