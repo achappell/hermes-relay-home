@@ -300,3 +300,80 @@ runner, task, credential, Prometheus or Standard change.
   runner SHA-256 `52b9316a…cc55` and exported task XML SHA-256 `f61e73a2…d495`
   unchanged; `diagnostics\home.jsonl` 147 records, 0 invalid, only marker hit
   is the benign `operation` label `prompt_submit`.
+
+## CaticornQueen deployment — 2026-10-06 (f1eeb94, PR #80)
+
+Deployed merged Home `origin/main` revision
+`f1eeb94cab166131c0305b0543d37357c376b8d4` (#80, Android client connection
+report platform acceptance) to CaticornQueen from detached worktree
+`.worktrees/deploy-pr80`. The runtime diff from `0effbf9` is exactly
+`src/hermes_home/observability/client_reports.py` (19 insertions, 3 deletions).
+Package-only cutover: no installer, runner/task re-registration, dependency,
+Prometheus, Standard, tailnet, machine-variable, or credential change. No
+prompt was sent; verification used authenticated/read-only HTTP GETs and a
+synthetic local validator check only.
+
+### Build
+
+- Exact worktree revision `f1eeb94cab166131c0305b0543d37357c376b8d4`:
+  `uv run --python 3.14 --extra dev pytest -q` — 1,024 passed, four
+  deprecation warnings; `uvx ruff check src tests` — passed;
+  `uvx ruff format --check src tests` — 74 files already formatted.
+- Wheel `hermes_relay_home-0.1.0-py3-none-any.whl`, SHA-256
+  `1b075e82ac92ac6ded43eff8b7be67ca361a6c34a19537a546f4d8151e1ff31b`
+  (39 members, 34 Python sources). Every Python source in the wheel is
+  byte-identical to `git show f1eeb94:src/<path>`; only
+  `hermes_home/observability/client_reports.py` differs from `0effbf9`.
+  The wheel SHA-256 matched on CaticornQueen.
+
+### Pre-flight and backup
+
+- Before cutover, `Hermes Home` was Running as SYSTEM (last result `267009`);
+  listeners `127.0.0.1:8780` and `127.0.0.1:8766` shared pid `14528`. All 34
+  installed Python sources matched `0effbf9`. The host was observed without a
+  diagnostic event for 138 seconds before stopping the task.
+  `/pair`, authenticated `/api/v1/diagnostics/status`, and authenticated
+  `/api/v1/configuration` returned 200; Prometheus
+  `up{job="hermes-home"}` returned `1`.
+- Protected backup directory
+  `C:\ProgramData\HermesHome\backups\home-pr80-20261006` (SYSTEM and
+  Administrators Full, deployment account Full):
+  - `installed-package.zip` contains the 44 venv-relative package files;
+    SHA-256 `d3b8a48244f81cc9c0470bc4e0290ea562715f48a0ca399652e547658cc8481c`,
+    with `installed-package-manifest.json` and
+    `installed-distributions.json`.
+  - `home-preupgrade.sqlite3` was made with `sqlite3.Connection.backup` while
+    the live database reported `journal_mode=delete`; `PRAGMA integrity_check`
+    returned `ok`. Size 4,026,368 bytes; SHA-256
+    `d94a25e9cf36931b3e9f5d92b5f0813e32b276f5019e869886dc445b0bd36922`.
+  - Includes `run.ps1`, exported `task.xml`, `machine-settings.json` (18
+    variables), `preflight-hashes.json`, and the deployed wheel.
+  - `rollback-package.ps1` SHA-256
+    `175abf0d3ba8140e0aa9244b806e64074b4ee837424251acf55b5ce3a82a9a51`,
+    parsed by Windows PowerShell 5.1 with 0 parse errors; **not executed**.
+    It stops only Home, waits for both listeners to release, validates the
+    prior package archive checksum and manifest, makes a new online SQLite
+    backup before restoring the `0effbf9` package, verifies restored hashes,
+    runner and task definition, then starts Home. It leaves the database and
+    machine settings unchanged.
+
+### Cutover and live acceptance
+
+`Stop-ScheduledTask 'Hermes Home'`; both listeners released;
+`uv pip install --python C:\ProgramData\HermesHome\venv\Scripts\python.exe
+--no-deps --force-reinstall <deploy-pr80>\hermes_relay_home-0.1.0-py3-none-any.whl`;
+`Start-ScheduledTask 'Hermes Home'`. Only the Home scheduled task was stopped
+and restarted. PowerShell's native-command error preference was disabled for
+the `uv` call; it exited 0 and installed the staged wheel.
+
+| Check | Result |
+| --- | --- |
+| Installed sources | All 34 installed Python source hashes equal the wheel and `git show f1eeb94:src/<path>`; relative to the previous package only `hermes_home/observability/client_reports.py` changed. Distributions unchanged: cffi 2.1.1, cryptography 50.0.1, hermes-relay-home 0.1.0, pycparser 3.0, segno 1.6.6, websockets 17.1. |
+| Task / listeners | `Hermes Home` Running as SYSTEM, last start 2026-10-06 17:59:04 (host time), result `267009`. Both loopback listeners share new process pid `34736` (started 17:59:04). |
+| HTTP | `/pair`, authenticated `/api/v1/diagnostics/status`, and authenticated `/api/v1/configuration` returned 200. Configuration response SHA-256 was unchanged from pre-cutover: `d2e71cb9ea5cab5800f11ecc49c92e3f2cf1c81e6fb32709c3f60a59b9721af3`. Admin credential was read and used only inside the remote process; it was never printed. |
+| Prometheus | `up{job="hermes-home"}` returned `1`. |
+| Functional behavior | Using the installed venv package, synthetic schema-1 Android report `{platform: "android", model: "Pixel 9 Pro XL"}` was accepted; `{platform: "windows"}` was rejected. No report was uploaded. |
+| Preserved | All 18 `HERMES_HOME*` machine variables matched the backup (0 differences); `HERMES_HOME_DEPLOYMENT_REVISION` remains the previously corrected `0effbf98fd1f4521313ba19f2378089ba7b3baf8`. Exported task XML SHA-256 unchanged (`f61e73a28e55c7498e3f5f4db5b42141f7e0d67f35b755fde75a4c7a5ee2d495`); runner SHA-256 unchanged (`52b9316aac157fcc3095373cd8231083841b1c864c0eb7b6e88135484985cc55`). Diagnostics ACL remains SYSTEM Modify and Administrators Read. |
+| Operational JSONL | New `diagnostics\home.jsonl` contains two parsed records (`provenance_header`, `process_started`), 0 invalid lines, and no credential/content marker hits. The provenance header has `source_revision: null` and `provenance_status: unverified`; the service is not given a revision at runtime. Older rotated files contain only the benign marker `prompt_submit` for prompt-related labels. |
+
+No rollback was needed. Media-server, Standard, Qwen3 and iOS were not touched.
