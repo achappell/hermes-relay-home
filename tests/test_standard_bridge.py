@@ -7105,3 +7105,311 @@ def test_home_tail_interrupt_stops_audio_and_admits_the_next_prompt() -> None:
         server_thread.join(timeout=2)
         for bridge in bridges:
             bridge.close()
+
+
+def test_tail_interrupt_with_a_sidecar_that_closes_on_stop_admits_the_next_prompt() -> (
+    None
+):
+    """Real ``websockets`` sidecar: it closes after ``stop`` and sends no ``end``.
+
+    The live Standard sidecar does this. The closure must release the terminal
+    turn at the bridge, report a normal end to the client (not a failed stream),
+    admit the next prompt at once, and leave a repeated old-turn interrupt unable
+    to touch the new turn.
+    """
+    from websockets.sync.client import connect
+    from websockets.sync.server import serve
+
+    from hermes_home.api.bridge_server import create_bridge_server
+    from hermes_home.bridge.endpoint import BRIDGE_WS_PATH
+    from hermes_home.bridge.production import (
+        WebsocketsAudioSocketFactory,
+    )
+
+    audio_connections: list[dict[str, object]] = []
+
+    def sidecar(connection) -> None:
+        record: dict[str, object] = {"stop": False, "done": False}
+        audio_connections.append(record)
+        try:
+            while True:
+                message = connection.recv(timeout=5)
+                if isinstance(message, str):
+                    frame = json.loads(message)
+                    record["stop"] = record["stop"] or frame.get("stop") is True
+                    record["done"] = record["done"] or frame.get("done") is True
+                    if len(audio_connections) == 1 and frame.get("done") is True:
+                        connection.send(
+                            json.dumps(
+                                {"type": "start", "sample_rate": 24_000, "channels": 1}
+                            )
+                        )
+                        connection.send(b"\x01\x00\x02\x00")
+                    if record["stop"]:
+                        # The live sidecar closes here; it sends no ``end``.
+                        connection.close()
+                        return
+        except Exception:  # noqa: BLE001 - the peer may already be gone
+            return
+
+    sidecar_server = serve(sidecar, "127.0.0.1", 0)
+    Thread(target=sidecar_server.serve_forever, daemon=True).start()
+    gateway_url = f"ws://127.0.0.1:{sidecar_server.socket.getsockname()[1]}/api/ws"
+
+    class SessionSocket:
+        def __init__(self) -> None:
+            self.runtime_id = "runtime-close-on-stop"
+            self.incoming = deque([_event("gateway.ready", {})])
+            self.sent: list[dict[str, object]] = []
+            self.closed = False
+            self.prompt_count = 0
+            self.held: list[dict[str, object]] = []
+            self._condition = Condition()
+
+        def send_json(self, frame: dict[str, object]) -> None:
+            self.sent.append(frame)
+            method = frame["method"]
+            result: dict[str, object]
+            if method == "commands.catalog":
+                result = {"pairs": []}
+            elif method == "session.create":
+                result = {"session_id": self.runtime_id}
+            elif method == "prompt.submit":
+                self.prompt_count += 1
+                result = {"accepted": True}
+                if self.prompt_count == 1:
+                    self.held = [
+                        _session_event(
+                            "message.start",
+                            {"turn_id": "standard-turn-1"},
+                            self.runtime_id,
+                        ),
+                        _session_event(
+                            "message.delta", {"text": "A spoken tail."}, self.runtime_id
+                        ),
+                        _session_event(
+                            "message.complete", {"status": "completed"}, self.runtime_id
+                        ),
+                    ]
+            else:
+                raise AssertionError(f"unexpected Standard operation {method}")
+            with self._condition:
+                self.incoming.append(
+                    {"jsonrpc": "2.0", "id": frame["id"], "result": result}
+                )
+                self._condition.notify_all()
+
+        def release_held_events(self) -> None:
+            with self._condition:
+                self.incoming.extend(self.held)
+                self.held = []
+                self._condition.notify_all()
+
+        def receive_json(self, timeout: float | None = None) -> dict[str, object]:
+            with self._condition:
+                if not self._condition.wait_for(
+                    lambda: self.closed or bool(self.incoming), timeout
+                ):
+                    raise TimeoutError("fixture gateway wait timed out")
+                if self.closed:
+                    raise ConnectionError("fixture gateway closed")
+                return self.incoming.popleft()
+
+        def close(self) -> None:
+            with self._condition:
+                self.closed = True
+                self._condition.notify_all()
+
+    class SessionFactory:
+        def __init__(self, socket: SessionSocket) -> None:
+            self.socket = socket
+
+        def open(self, url: str) -> SessionSocket:
+            del url
+            return self.socket
+
+    session_socket = SessionSocket()
+    bridges: list[HomeBridge] = []
+
+    def bridge_factory() -> HomeBridge:
+        bridge = HomeBridge(
+            gateway_url=gateway_url,
+            hermes_token="server-secret",
+            device_authenticator=StaticCredentialAuthenticator(
+                admin_token="admin-secret",
+                device_credentials={"device-secret": "puck-kitchen"},
+            ),
+            conversation_resolver=lambda handle, device: ConversationGrant(
+                handle, device, "family"
+            ),
+            gateway_socket_factory=SessionFactory(session_socket),
+            audio_socket_factory=WebsocketsAudioSocketFactory(open_timeout=5),
+            turn_id_factory=lambda index: f"home-turn-{index}",
+        )
+        bridges.append(bridge)
+        return bridge
+
+    server = create_bridge_server(
+        bridge_factory=bridge_factory, host="127.0.0.1", port=0
+    )
+    Thread(target=server.serve_forever, daemon=True).start()
+    url = f"ws://127.0.0.1:{server.socket.getsockname()[1]}{BRIDGE_WS_PATH}"
+    events: list[dict[str, object]] = []
+    audio_frames: list[dict[str, object]] = []
+
+    def pump(client, until, *, within: float = 3.0) -> None:
+        deadline = time.monotonic() + within
+        while not until():
+            assert time.monotonic() < deadline, "timed out waiting for Home"
+            try:
+                raw = client.recv(timeout=0.5)
+            except TimeoutError:
+                continue
+            if isinstance(raw, bytes):
+                continue
+            message = json.loads(raw)
+            if message.get("method") == "event":
+                events.append(message["params"]["event"])
+            elif message.get("method") == "audio.frame":
+                audio_frames.append(message["params"]["frame"])
+            elif "id" in message:
+                responses[message["id"]] = message
+
+    responses: dict[str, dict[str, object]] = {}
+
+    def rpc(client, request_id: str, method: str, **params):
+        client.send(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "schema": 1,
+                    "id": request_id,
+                    "method": method,
+                    "params": {
+                        "conversation_handle": "opaque-conversation-1",
+                        **params,
+                    },
+                }
+            )
+        )
+        pump(client, lambda: request_id in responses)
+        return responses[request_id]
+
+    try:
+        with connect(
+            url, additional_headers={"Authorization": "Device device-secret"}
+        ) as client:
+            assert (
+                rpc(client, "open", "conversation.open")["result"]["status"] == "ready"
+            )
+            first = rpc(client, "p1", "prompt.submit", text="Start a spoken reply")
+            first_turn = first["result"]["turn_id"]
+            session_socket.release_held_events()
+            pump(
+                client,
+                lambda: (
+                    any(e["type"] == "message.complete" for e in events)
+                    and any(f["kind"] == "start" for f in audio_frames)
+                ),
+            )
+
+            interrupted = rpc(client, "i1", "session.interrupt", turn_id=first_turn)
+            assert interrupted["result"]["status"] == "accepted", interrupted
+            assert audio_connections[0]["stop"] is True
+            # A deliberate stop that the sidecar answers by closing is a normal
+            # end for the client, never a failed audio stream.
+            pump(client, lambda: any(f["kind"] == "end" for f in audio_frames))
+            assert not any(f["kind"] == "unavailable" for f in audio_frames), (
+                audio_frames
+            )
+            assert bridges[0].active_turn_id is None
+
+            second = rpc(client, "p2", "prompt.submit", text="The next prompt")
+            assert second["result"]["status"] == "submitted", second
+            assert second["result"]["turn_id"] == "home-turn-2"
+            assert bridges[0].active_turn_id == "home-turn-2"
+
+            repeated = rpc(client, "i2", "session.interrupt", turn_id=first_turn)
+            assert repeated["result"]["status"] == "accepted"
+            assert bridges[0].active_turn_id == "home-turn-2"
+            assert not any(
+                frame["method"] == "session.interrupt" for frame in session_socket.sent
+            )
+            assert not any(
+                connection["stop"] for connection in audio_connections[1:]
+            ), "the old turn's interrupt stopped the new turn's sidecar"
+    finally:
+        server.shutdown()
+        sidecar_server.shutdown()
+        for bridge in bridges:
+            bridge.close()
+
+
+def test_audio_closed_after_a_stop_is_a_normal_end_and_releases_only_its_own_turn():
+    class ClosingAudioSocket(FakeAudioSocket):
+        """Streams until it is told to stop, then closes without an ``end``."""
+
+        def receive(self, timeout: float | None = None) -> object:
+            del timeout
+            if any(frame.get("stop") is True for frame in self.sent):
+                raise ConnectionError("sidecar closed after stop")
+            return self.incoming.popleft()
+
+    class OneAudioPerTurn:
+        def __init__(self, *sockets: FakeAudioSocket) -> None:
+            self.sockets = deque(sockets)
+
+        def open(self, url: str) -> FakeAudioSocket:
+            del url
+            return self.sockets.popleft()
+
+    first_audio = ClosingAudioSocket(
+        [{"type": "start", "sample_rate": 24_000, "channels": 1}]
+    )
+    second_audio = FakeAudioSocket([])
+    runtime = "runtime-hermes-1"
+    gateway_socket = FakeJsonSocket(
+        [
+            _event("gateway.ready", {}),
+            {"jsonrpc": "2.0", "id": "home-1", "result": {"session_id": runtime}},
+            {"jsonrpc": "2.0", "id": "home-2", "result": {"accepted": True}},
+            _session_event("message.start", {"turn_id": "standard-1"}, runtime),
+            _session_event("message.delta", {"text": "A spoken tail."}, runtime),
+            _session_event("message.complete", {"status": "completed"}, runtime),
+            {"jsonrpc": "2.0", "id": "home-3", "result": {"accepted": True}},
+        ]
+    )
+    bridge = _make_bridge(
+        FakeSocketFactory(gateway_socket),
+        audio_factory=OneAudioPerTurn(first_audio, second_audio),
+    )
+    bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle="opaque-conversation-1",
+    )
+    first = bridge.submit_prompt("Speak")
+    for _ in range(3):
+        bridge.next_event()
+    assert bridge.active_turn_id == first.turn_id
+    older = bridge._active_turn
+
+    assert bridge.interrupt() is True
+    assert {"stop": True} in first_audio.sent
+    frame = bridge.next_audio()
+
+    # The close answers the stop: a normal end, the turn released, no failure.
+    assert frame.kind == "end"
+    assert frame.metadata == {"reason": "stopped"}
+    assert bridge.active_turn_id is None
+    assert first_audio.closed
+
+    second = bridge.submit_prompt("The next prompt")
+    assert second.turn_id != first.turn_id
+    # A late close from the finished turn cannot release or close the new one.
+    bridge._close_audio(owner=older)
+    assert bridge.active_turn_id == second.turn_id
+    assert not second_audio.closed
+    assert not any(frame.get("stop") for frame in second_audio.sent)
+    assert not any(
+        frame["method"] == "session.interrupt" for frame in gateway_socket.sent
+    )

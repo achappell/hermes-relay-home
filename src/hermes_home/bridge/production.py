@@ -15,6 +15,7 @@ from pathlib import Path
 from threading import RLock, Timer
 from urllib.parse import urlsplit
 
+from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import connect
 
 from hermes_home.bridge.standard import (
@@ -1372,12 +1373,21 @@ class WebsocketsAudioSocket:
     connection: object
 
     def send_json(self, frame: Mapping[str, object]) -> None:
-        self.connection.send(  # type: ignore[attr-defined]
-            json.dumps(frame, ensure_ascii=False, separators=(",", ":"))
-        )
+        try:
+            self.connection.send(  # type: ignore[attr-defined]
+                json.dumps(frame, ensure_ascii=False, separators=(",", ":"))
+            )
+        except ConnectionClosed as error:
+            raise ConnectionError("Standard audio connection is closed") from error
 
     def receive(self, timeout: float | None = None) -> object:
-        raw = self.connection.recv(timeout=timeout)  # type: ignore[attr-defined]
+        # The audio port reports a closed sidecar as ConnectionError, as every
+        # other implementation does; a raw ConnectionClosed would escape the
+        # bridge's typed handling and strand the terminal turn.
+        try:
+            raw = self.connection.recv(timeout=timeout)  # type: ignore[attr-defined]
+        except ConnectionClosed as error:
+            raise ConnectionError("Standard audio connection is closed") from error
         if isinstance(raw, bytes):
             return raw
         if not isinstance(raw, str):

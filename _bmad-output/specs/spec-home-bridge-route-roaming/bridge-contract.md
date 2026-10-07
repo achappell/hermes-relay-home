@@ -356,6 +356,13 @@ repeated `session.interrupt` for a recently completed `turn_id` is an accepted
 no-op; it never stops, or is applied to, a newer turn. A `turn_id` Home does
 not know is still rejected with `request_rejected`.
 
+The Standard sidecar answers a `stop` by closing its socket without an `end`
+frame. Home treats a close that follows its own stop request as the normal end
+of that turn's stream: the client receives `audio.frame` `end`, never
+`unavailable`, and the turn is released. A close with no stop request remains a
+failed stream. A closure only ever releases the turn that owns the sidecar; a
+newer turn and its sidecar are untouched.
+
 #### Turn keep-alive (`turn.alive`)
 
 A client opts in on the WebSocket upgrade request with the header
