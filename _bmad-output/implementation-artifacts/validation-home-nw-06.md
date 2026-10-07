@@ -484,3 +484,85 @@ read this variable; the process stayed pid `33944`, started 2026-10-07 12:32:29)
 - The signed `provenance\deployment.json` still attests the historical
   `376583d…` (written 2026-09-23); it is regenerated only by a live-gate run,
   which was not performed. A future run will read the corrected value.
+
+## CaticornQueen deployment — 2026-10-07 (d803994, PR #85)
+
+Deployed merged Home `origin/main` revision
+`d803994d1d47c63bb1b3c92cff42695de19a4434` (#85: a Standard audio sidecar
+closing after Home's stop request ends the audio and releases the terminal
+turn instead of stranding it) to CaticornQueen from detached worktree
+`.worktrees/deploy-pr85`. `origin/main` was exactly this revision when
+deployed. The runtime diff from the previously deployed `b964082` is exactly
+`src/hermes_home/bridge/production.py` and `src/hermes_home/bridge/standard.py`
+(28 insertions, 4 deletions). Package-only cutover: no installer, runner/task
+re-registration, dependency, Prometheus, Standard, tailnet, credential, or other
+machine-variable change. No prompt, claim, or Pixel action was performed.
+
+### Build
+
+- Gates at the exact revision: `uv run --python 3.14 --extra dev pytest -q` —
+  1,042 passed, seven warnings; `uvx ruff check src tests` — passed;
+  `uvx ruff format --check src tests` — 75 files already formatted.
+- Wheel SHA-256 `95271ba3628ecf378e92d56972c55f2d74eba0238e4f299ddd595df145457c00`
+  (39 members, 34 Python sources), byte-identical to `git show d803994:src/<path>`;
+  matched on the host.
+
+### Pre-flight and backup
+
+- Before action: running package = `b964082` (all 34 installed sources
+  matched), task Running as SYSTEM since 2026-10-07 12:32:29, listeners on pid
+  `33944`, 18 `HERMES_HOME*` variables, `HERMES_HOME_DEPLOYMENT_REVISION` =
+  `b964082…`, task XML `f61e73a2…d495`, runner `52b9316a…cc55`, `/pair` and
+  authenticated diagnostics/configuration 200, Prometheus up. The cutover waited
+  for more than 130 seconds without a Home diagnostic event.
+- Protected backup `C:\ProgramData\HermesHome\backups\home-pr85-20261007`:
+  - `installed-package.zip` (44 files) SHA-256
+    `cc39589d61bf7103b190d643695ce558f504972018f6ec3f5be23978b1842471`, plus
+    manifest and `installed-distributions.json`.
+  - `home-preupgrade.sqlite3`: online `sqlite3.Connection.backup`
+    (`journal_mode=delete`), `PRAGMA integrity_check` `ok`, 4,259,840 bytes,
+    SHA-256 `9f62ba2781792ee624b4322fa5ac976da92f8b0ad3c629a416be7470d10a8316`.
+  - `run.ps1`, `task.xml`, `machine-settings.json` (18 variables),
+    `preflight-hashes.json`, the deployed wheel.
+  - `rollback-package.ps1` SHA-256
+    `ceb72ca9eb5c0f01223a39bad728cc2c28254c80d22e42c9b2ea8acbc65743b6`, parsed
+    with 0 errors, **not executed**. It stops only Home, waits for listener
+    release, validates archive checksum and manifest, takes a new online SQLite
+    backup, restores the `b964082` package with hash verification, checks the
+    runner and task definition, and starts Home. It leaves the database and
+    machine settings unchanged.
+
+### Cutover and live acceptance
+
+`Stop-ScheduledTask 'Hermes Home'`; listeners released; `uv pip install --python
+C:\ProgramData\HermesHome\venv\Scripts\python.exe --no-deps --force-reinstall
+<deploy-pr85>\hermes_relay_home-0.1.0-py3-none-any.whl` (native-command error
+preference relaxed; exit 0); `Start-ScheduledTask 'Hermes Home'`. Only that task
+was stopped and started. Staging directory
+`C:\Users\achap\hermes-home-deploy\deploy-pr85\`.
+
+| Check | Result |
+| --- | --- |
+| Installed sources | All 34 installed source hashes equal the wheel and `git show d803994:src/<path>`; `audio_stop_requested` (standard) and the `ConnectionClosed` handling (production) are present. Distributions unchanged. |
+| Task / listeners | Running as SYSTEM, last start 2026-10-07 13:34:57 host time (18:34:57Z), result `267009`; `127.0.0.1:8780` and `:8766` on the same new pid `37536`. |
+| HTTP | `/pair`, authenticated `/api/v1/diagnostics/status`, `/api/v1/configuration` 200; configuration SHA-256 unchanged (`d2e71cb9…1af3`). Admin credential used only inside the remote process, never printed. |
+| Prometheus | `up{job="hermes-home"}` read 0 in the first seconds after restart (before the first scrape) and 1 on every check from about 30 seconds later. |
+| Tailnet | Front door `/pair` 200; `/api/v1/client-claims` 401 (route reaches Home, auth enforced). Profiles `amanda`, `jensen`, `spark` (shared), 1 wake mapping, 1 device, 1 room; Standard gateway TCP-reachable. |
+| Preserved | 18 `HERMES_HOME*` variables; exactly one differs from the backup (`HERMES_HOME_DEPLOYMENT_REVISION`, below); task XML and runner hashes unchanged; diagnostics ACL unchanged. |
+| Operational JSONL | New `home.jsonl`: two parsed records (`provenance_header`, `process_started`), 0 invalid, no credential/content markers. |
+
+### Deployment revision variable
+
+`HERMES_HOME_DEPLOYMENT_REVISION` (Machine) changed from
+`b964082c034ea60c249678ce416db7015cb0a382` to
+`d803994d1d47c63bb1b3c92cff42695de19a4434` as part of this deployment. Metadata
+only; the runtime does not read it and no restart was needed for it. Old value
+saved first in `<backup>\deployment-revision-before.json` (SHA-256
+`9140a515df4b4d7e7fc516b2278569b95b8f50f0f636f7163e046af0af4252d8`). Persisted
+value read back in a fresh PowerShell process. Rollback:
+`[Environment]::SetEnvironmentVariable('HERMES_HOME_DEPLOYMENT_REVISION','<old>','Machine')`.
+The signed `provenance\deployment.json` still attests the historical
+`376583d…`; a future live-gate run regenerates it.
+
+No rollback was needed. The effect of #85 on a real Pixel interrupt turn is not
+observed by this deployment; that is the separate live Android gate.
