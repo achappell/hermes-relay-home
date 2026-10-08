@@ -279,6 +279,7 @@ stories:
     product_epic: 6
     owner: hermes-relay-home
     release_scope: later
+    evidence_note: GitHub issue #66 closed on 2026-10-08. Story remains in 'review' per owner decision A (2026-10-08)—deployed exporter (HOME-NW-06-diagnostics-exporter) is prerequisite for acceptance; real-device captures pending.
     depends_on:
       - home:HOME-NW-06
   - id: HOME-NW-06-connection-diagnostics
@@ -291,6 +292,7 @@ stories:
     product_epic: 6
     owner: hermes-relay-home
     release_scope: later
+    evidence_note: GitHub issue #16 closed on 2026-10-08. Story remains in 'review' per owner decision A (2026-10-08)—deployed exporter (HOME-NW-06-diagnostics-exporter) is prerequisite for acceptance; real-device captures pending.
     depends_on:
       - home:HOME-NW-06
   - id: HOME-NW-06-diagnostics-exporter
