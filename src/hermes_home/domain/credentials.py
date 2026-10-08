@@ -36,7 +36,8 @@ RENEWAL_WINDOW_SECONDS = 14 * 24 * 60 * 60
 ROTATION_OVERLAP_SECONDS = 600
 DEVICE_CREDENTIAL_BYTES = 32
 SECURE_STORAGE_PLATFORM = "platform_secure_store"
-CLIENT_ENDPOINT_TYPES = frozenset({"tui", "ios", "macos", "android"})
+SECURE_STORAGE_PRIVATE_FILE = "service_private_file"
+CLIENT_ENDPOINT_TYPES = frozenset({"tui", "ios", "macos", "android", "browser"})
 PENDING_OWNER_GRANT_TTL_SECONDS = 24 * 60 * 60
 MAX_CLIENT_GRANTS = 16
 
@@ -404,12 +405,13 @@ class CredentialService:
         endpoint_id = _identifier(endpoint_id, "endpoint_id")
         label = _identifier(label, "label")
         endpoint_type = _identifier(endpoint_type, "type")
-        if secure_storage != SECURE_STORAGE_PLATFORM:
-            raise CredentialValidationError("platform secure storage is required")
+        _validate_storage(endpoint_type, secure_storage)
         requested_scope = CredentialScope.from_values(
             rooms=requested_rooms,
             capabilities=requested_capabilities,
         )
+        if endpoint_type == "browser":
+            _validate_browser_scope(requested_scope)
         profile_mappings = _profile_mappings(requested_profile_mappings)
         request_id = _identifier(self._id_factory(), "request_id")
         confirmation_code = self._confirmation_factory()
@@ -580,6 +582,8 @@ class CredentialService:
                 raise CredentialStateError("expired_or_consumed")
             requested = _scope_from_record(record["requested_scope"])
             scope.assert_subset_of(requested)
+            if record["type"] == "browser":
+                _validate_browser_scope(scope)
             if not set(scope.rooms).issubset(available_rooms):
                 raise CredentialValidationError(
                     "approved scope references an unavailable room"
@@ -675,8 +679,6 @@ class CredentialService:
         if type(enrollment_code) is not str or not enrollment_code:
             raise CredentialValidationError("enrollment code must not be blank")
         enrollment_code = normalize_enrollment_code(enrollment_code)
-        if secure_storage != SECURE_STORAGE_PLATFORM:
-            raise CredentialValidationError("platform secure storage is required")
         digest = self._digest(enrollment_code)
         shared = (
             None
@@ -707,8 +709,9 @@ class CredentialService:
                 raise CredentialStateError("rejected")
             if request["status"] != "approved":
                 raise CredentialStateError("conflict")
+            _validate_storage(str(request["type"]), secure_storage)
             if request["secure_storage"] != secure_storage:
-                raise CredentialValidationError("platform secure storage is required")
+                raise CredentialValidationError("secure storage attestation changed")
             if shared is None and request.get("approved_client_profiles"):
                 raise CredentialStateError("service_unavailable")
 
@@ -989,6 +992,174 @@ class CredentialService:
         self._notify_revocation(event)
         return event
 
+    def validate_client_labels(
+        self,
+        labels: Mapping[str, str],
+        *,
+        device_id: str | None = None,
+        additional_profiles: Iterable[object] = (),
+    ) -> None:
+        """Reject ambiguous labels within each device's current grant selection."""
+        selected: dict[str, set[str]] = {}
+        for grant in _current_grants(self._store.read_state(), self._now()):
+            selected.setdefault(grant.device_id, set()).add(grant.profile_id)
+        additional = _bounded_values(additional_profiles, "client_profiles")
+        if additional:
+            selected.setdefault(device_id or "", set()).update(additional)
+        for profiles in selected.values():
+            names = [labels[profile] for profile in profiles if profile in labels]
+            if len(names) != len(set(names)):
+                raise CredentialValidationError("client Profile labels must be unique")
+
+    def add_client_grant(
+        self,
+        device_id: str,
+        profile_id: str,
+        *,
+        idempotency_key: str,
+        configured_profiles: Iterable[object],
+        profile_labels: Mapping[str, str],
+        shared_profiles: Iterable[object] = (),
+        authorize_bootstrap: bool = False,
+    ) -> ClientGrant:
+        """Append one exact Profile grant on the trusted Home-admin boundary."""
+        device_id = _identifier(device_id, "device_id")
+        profile_id = _identifier(profile_id, "profile_id")
+        idempotency_key = _identifier(idempotency_key, "idempotency_key")
+        if not isinstance(profile_labels, Mapping):
+            raise CredentialValidationError("configured Profiles require labels")
+        available = frozenset(
+            _bounded_values(configured_profiles, "configured_profiles")
+        )
+        shared = frozenset(_bounded_values(shared_profiles, "shared_profiles"))
+        if profile_id == "*":
+            raise CredentialValidationError("profile is unavailable")
+        if type(authorize_bootstrap) is not bool:
+            raise CredentialValidationError("authorize_bootstrap must be a boolean")
+
+        def append(state: dict[str, object]) -> ClientGrant:
+            now = self._now()
+            live = _live_device_ids(state, now)
+            credentials = [
+                item
+                for item in _records(state, "credentials")
+                if item.get("device_id") == device_id
+            ]
+            if device_id not in live or not credentials:
+                raise CredentialStateError("not_found")
+            device = max(credentials, key=lambda item: int(item["generation"]))
+            if (
+                device.get("type") not in CLIENT_ENDPOINT_TYPES
+                or "client_claim"
+                not in _scope_from_record(device["scope"]).capabilities
+            ):
+                raise CredentialStateError("forbidden")
+            records = _client_grant_records(state)
+            _expire_pending_grants(records, now)
+            requests = state.setdefault("client_grant_requests", [])
+            for request in requests:
+                if (
+                    request["device_id"] == device_id
+                    and request["key"] == idempotency_key
+                ):
+                    if (
+                        request["profile_id"] != profile_id
+                        or request["authorize_bootstrap"] != authorize_bootstrap
+                    ):
+                        raise CredentialStateError("conflict")
+                    record = _find_record_by_id(records, request["grant_id"])
+                    if record is None:
+                        raise CredentialStateError("not_found")
+                    return _grant_from_record(record)
+
+            def remember(record: dict[str, object]) -> ClientGrant:
+                requests.append(
+                    {
+                        "device_id": device_id,
+                        "key": idempotency_key,
+                        "profile_id": profile_id,
+                        "authorize_bootstrap": authorize_bootstrap,
+                        "grant_id": record["id"],
+                    }
+                )
+                return _grant_from_record(record)
+
+            current = [
+                item
+                for item in records
+                if item.get("device_id") == device_id
+                and item.get("status") in {"active", "pending_owner"}
+            ]
+            for record in current:
+                if record["profile_id"] == profile_id:
+                    return remember(record)
+            if profile_id not in available:
+                raise CredentialValidationError("profile is unavailable")
+            label = profile_labels[profile_id]
+            if any(profile_labels.get(item["profile_id"]) == label for item in current):
+                raise CredentialValidationError("client Profile labels must be unique")
+            if len(current) >= MAX_CLIENT_GRANTS:
+                raise CredentialValidationError("too many client profiles")
+            held_elsewhere = any(
+                item.get("profile_id") == profile_id
+                and item.get("status") == "active"
+                and item.get("device_id") in live
+                and item.get("device_id") != device_id
+                for item in records
+            )
+            bootstrap = (
+                profile_id not in shared and not held_elsewhere and authorize_bootstrap
+            )
+            status = "active" if profile_id in shared or bootstrap else "pending_owner"
+            record = {
+                "id": _identifier(f"grant-{self._id_factory()}", "grant_id"),
+                "device_id": device_id,
+                "profile_id": profile_id,
+                "status": status,
+                "device_label": device["label"],
+                "device_type": device["type"],
+                "created_at": now,
+                "bootstrap": bootstrap,
+            }
+            if bootstrap:
+                record["decided_by"] = "home_admin"
+                record["decided_at"] = now
+            if status == "pending_owner":
+                record["pending_expires_at"] = now + PENDING_OWNER_GRANT_TTL_SECONDS
+            records.append(record)
+            return remember(record)
+
+        return self._store.mutate(append)
+
+    def client_configuration(
+        self, device_id: str, revision: int
+    ) -> tuple[int, tuple[ClientGrant, ...]]:
+        """Return one atomic grant projection and its durable device revision."""
+
+        def project(state: dict[str, object]) -> tuple[int, tuple[ClientGrant, ...]]:
+            grants = tuple(
+                grant
+                for grant in _current_grants(state, self._now())
+                if grant.device_id == device_id
+            )
+            projections = state.setdefault("client_configuration_revisions", {})
+            previous = projections.get(device_id)
+            fingerprint = [
+                revision,
+                [[grant.grant_id, grant.status] for grant in grants],
+            ]
+            if previous is not None and previous["fingerprint"] == fingerprint:
+                return previous["revision"], grants
+            current = (
+                revision
+                if previous is None
+                else max(revision, previous["revision"] + 1)
+            )
+            projections[device_id] = {"fingerprint": fingerprint, "revision": current}
+            return current, grants
+
+        return self._store.mutate(project)
+
     def client_grants(self, device_id: str) -> tuple[ClientGrant, ...]:
         """Return a device's current active and pending-owner grants."""
         device_id = _identifier(device_id, "device_id")
@@ -1041,6 +1212,13 @@ class CredentialService:
 
         def decide(state: dict[str, object]) -> ClientGrant:
             now = self._now()
+            if any(
+                item.get("device_id") == approver_device_id
+                and item.get("type") == "browser"
+                and item.get("status") == "active"
+                for item in _records(state, "credentials")
+            ):
+                raise CredentialStateError("forbidden")
             records = _client_grant_records(state)
             _expire_pending_grants(records, now)
             record = _find_record_by_id(records, grant_id)
@@ -1228,6 +1406,26 @@ class CredentialService:
 
     def _now(self) -> float:
         return _timestamp(self._clock())
+
+
+def _validate_storage(endpoint_type: str, secure_storage: str) -> None:
+    expected = (
+        SECURE_STORAGE_PRIVATE_FILE
+        if endpoint_type == "browser"
+        else SECURE_STORAGE_PLATFORM
+    )
+    if secure_storage != expected:
+        raise CredentialValidationError(f"secure storage must be {expected}")
+
+
+def _validate_browser_scope(scope: CredentialScope) -> None:
+    if (
+        scope.capabilities != ("client_claim",)
+        or scope.rooms
+        or scope.wake_mappings
+        or scope.touch_binding is not None
+    ):
+        raise CredentialValidationError("browser scope must contain only client_claim")
 
 
 def _identifier(value: object, field: str) -> str:

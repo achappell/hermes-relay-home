@@ -96,6 +96,7 @@ stories:
     title: Admit the production W/K browser appliance as a Home client
     kind: local
     spec: _bmad-output/implementation-artifacts/spec-home-nw-17-browser-admission.md
+    validation: _bmad-output/implementation-artifacts/validation-home-nw-17-browser-admission.md
     github_issue: https://github.com/achappell/hermes-relay-home/issues/101
     tracker_key: home-nw-17-browser-admission
     product_epic: 3
@@ -105,7 +106,7 @@ stories:
       - home:HOME-NW-17
       - home:HOME-NW-18
       - home:HOME-NW-10
-    evidence_note: Draft stub (2026-10-08), backlog. Every contract change is PROPOSED and needs owner approval before implementation. Consumed by TUI story WK-HOME-01 (draft); that repository owns its own status.
+    evidence_note: "Owner approved H1/H2/H3/H4/H6 implementation on 2026-10-08. Home-only contract implemented and under review with isolated local HTTP smoke; not deployed. H5, TUI WK-HOME-01 consumer/deployment acceptance, and production grants remain outside this work."
   - id: HOME-NW-05
     title: Add household Profile mappings and conversation claims
     kind: next-wave
