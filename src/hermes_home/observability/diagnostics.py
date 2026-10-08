@@ -382,6 +382,21 @@ class DiagnosticsStatus:
     ring_expired_entry_count: int = 0
     ring_out_of_order_drop_count: int = 0
     event_retention_seconds: int = EVENT_RETENTION_SECONDS
+    dropped_unuploaded_event_count: int = 0
+    collector_configured: bool = False
+
+    @property
+    def collector_state(self) -> str:
+        """Last-known export state; ``reachable`` is the last attempt's outcome.
+
+        ``idle`` means a collector is configured, nothing is queued, and the
+        last attempt did not succeed (or none was needed): not a failure.
+        """
+        if not self.collector_configured:
+            return "not_configured"
+        if self.collector_reachable:
+            return "reachable"
+        return "unreachable" if self.queued_event_count > 0 else "idle"
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -389,8 +404,11 @@ class DiagnosticsStatus:
             "enabled": self.enabled,
             "last_successful_upload_at": self.last_successful_upload_at,
             "queued_event_count": self.queued_event_count,
+            "collector_configured": self.collector_configured,
+            "collector_state": self.collector_state,
             "collector_reachable": self.collector_reachable,
             "dropped_event_count": self.dropped_event_count,
+            "dropped_unuploaded_event_count": self.dropped_unuploaded_event_count,
             "rejected_event_count": self.rejected_event_count,
             "ring_evicted_entry_count": self.ring_evicted_entry_count,
             "ring_expired_entry_count": self.ring_expired_entry_count,
@@ -522,6 +540,7 @@ class InMemoryDiagnosticsStore:
         self._events: deque[DiagnosticEvent] = deque()
         self._uploaded: set[str] = set()
         self._dropped_event_count = 0
+        self._dropped_unuploaded_event_count = 0
         self._rejected_event_count = 0
         self._last_successful_upload_at: float | None = None
         self._collector_reachable = False
@@ -546,6 +565,8 @@ class InMemoryDiagnosticsStore:
             dropped = False
             while len(self._events) >= max_events:
                 removed = self._events.popleft()
+                if removed.event_id not in self._uploaded:
+                    self._dropped_unuploaded_event_count += 1
                 self._uploaded.discard(removed.event_id)
                 self._dropped_event_count += 1
                 dropped = True
@@ -628,6 +649,7 @@ class InMemoryDiagnosticsStore:
                 collector_reachable=self._collector_reachable,
                 dropped_event_count=self._dropped_event_count,
                 rejected_event_count=self._rejected_event_count,
+                dropped_unuploaded_event_count=self._dropped_unuploaded_event_count,
             )
 
     def record_rejection(self) -> None:
@@ -679,6 +701,7 @@ class DiagnosticsRecorder:
         self._lock = RLock()
         self._in_flight_event_ids: set[str] = set()
         self._reported_ring_counts = (0, 0, 0)
+        self._reported_evictions: tuple[int, int] | None = None
         self._last_known_collector_reachable = False
 
     def new_correlation_id(self) -> str:
@@ -897,9 +920,13 @@ class DiagnosticsRecorder:
         return self._status_with_ring(self._store.status(before=now))
 
     def _status_with_ring(self, status: DiagnosticsStatus) -> DiagnosticsStatus:
+        configured = self._collector is not None
         status = replace(
             status,
             event_retention_seconds=self._event_retention_seconds,
+            collector_configured=configured,
+            # Stored reachability can outlive a removed collector; never show it.
+            collector_reachable=status.collector_reachable and configured,
         )
         if self._ring_buffer is None:
             return status
@@ -969,6 +996,11 @@ class DiagnosticsRecorder:
             "hermes_home_diagnostics_collector_reachable",
             int(current.collector_reachable),
         )
+        self._metric_set_safely(
+            "hermes_home_diagnostics_collector_configured",
+            int(current.collector_configured),
+        )
+        self._report_evictions(current)
         ring_counts = (
             current.ring_evicted_entry_count,
             current.ring_expired_entry_count,
@@ -995,6 +1027,25 @@ class DiagnosticsRecorder:
                 "hermes_home_diagnostics_last_upload_timestamp_seconds",
                 current.last_successful_upload_at,
             )
+
+    def _report_evictions(self, current: DiagnosticsStatus) -> None:
+        """Count evictions since process start, split by upload state."""
+        before = current.dropped_unuploaded_event_count
+        after = max(0, current.dropped_event_count - before)
+        previous = self._reported_evictions
+        self._reported_evictions = (before, after)
+        if previous is None:
+            return
+        for state, delta in (
+            ("before_upload", before - previous[0]),
+            ("after_upload", after - previous[1]),
+        ):
+            if delta > 0:
+                self._metric_inc_safely(
+                    "hermes_home_diagnostics_events_evicted_total",
+                    labels={"state": state},
+                    value=delta,
+                )
 
     def _metric_set_safely(self, name: str, value: float) -> None:
         try:

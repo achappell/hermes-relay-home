@@ -51,6 +51,7 @@ from hermes_home.domain.watch import (
 )
 from hermes_home.observability.client_reports import (
     ClientReportStore,
+    ReportConflict,
     ReportRateLimited,
 )
 from hermes_home.observability.diagnostics import (
@@ -1016,6 +1017,7 @@ class HomeApplication:
     def _get_metrics(self, headers: Mapping[str, str]) -> HTTPResponse:
         if not self._authenticator.authenticate_admin(headers):
             return _error(401, "unauthorized")
+        self._refresh_client_report_gauges()
         return HTTPResponse(
             200,
             self._metrics.render(),
@@ -1029,19 +1031,50 @@ class HomeApplication:
         ]
         return result
 
+    def _refresh_client_report_gauges(self) -> None:
+        try:
+            retained = self._client_reports.retained_by_platform()
+            for platform, count in retained.items():
+                self._metrics.set(
+                    "hermes_home_client_reports_retained",
+                    count,
+                    labels={"platform": platform},
+                )
+        except Exception as error:  # noqa: BLE001 - metrics are best effort
+            del error
+
+    def _count_client_report(self, outcome: str, platform: str = "unknown") -> None:
+        try:
+            self._metrics.inc(
+                "hermes_home_client_reports_total",
+                labels={"outcome": outcome, "platform": platform},
+            )
+        except Exception as error:  # noqa: BLE001 - metrics are best effort
+            del error
+
     def _post_client_diagnostics(self, headers, body) -> HTTPResponse:
         device = self._authenticator.authenticate_device(headers)
         if device is None:
+            self._count_client_report("unauthorized")
             return _error(401, "unauthorized")
         try:
-            report_id = self._client_reports.receive(device, body)
+            result = self._client_reports.receive_result(device, body)
         except ReportRateLimited:
+            self._count_client_report("rate_limited")
             return _error(429, "rate_limited")
+        except ReportConflict:
+            self._count_client_report("conflict")
+            return _error(400, "invalid_request")
         except ValueError, TypeError, KeyError, OverflowError:
+            self._count_client_report("invalid")
             return _error(400, "invalid_request")
         except sqlite3.Error:
+            self._count_client_report("storage_error")
             return _error(503, "service_unavailable")
-        return HTTPResponse(200, {"schema": 1, "report_id": report_id})
+        self._count_client_report(
+            "duplicate" if result.duplicate else "accepted", result.platform
+        )
+        return HTTPResponse(200, {"schema": 1, "report_id": result.report_id})
 
     def _get_diagnostics_status(
         self,

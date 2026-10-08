@@ -155,6 +155,26 @@ and propagates the process exit code; operational records go only to the
 bounded JSONL sink.
 
 
+## Diagnostics export (optional)
+
+The installer does not enable the export. To turn it on, create an export
+directory with the same protected DACL as the diagnostics directory (SYSTEM
+Modify, BUILTIN\Administrators Read, nothing inherited), for example
+`C:\ProgramData\HermesHome\diagnostics\export`, and set the machine
+environment variable `HERMES_HOME_EXPORT_DIR` to it (and optionally
+`HERMES_HOME_EXPORT_INTERVAL_SECONDS`). Machine variables reach the task
+process only when the task starts, so restart the Hermes Home task afterwards.
+Verify the ACL with `icacls` before relying on it. Files,
+retention (14 days safe events, 7 days client reports) and status fields are
+described in [`../../observability/README.md`](../../observability/README.md).
+
+[`hermes-home-export.alloy`](hermes-home-export.alloy) is an Alloy snippet
+(`loki.source.file` to `loki.process` to `loki.write`) that would ship the
+export to Loki. It is **not applied** and has not been run through Alloy. Its
+Loki push URL is the placeholder environment variable
+`HERMES_HOME_LOKI_PUSH_URL`; the real URL, authentication and tenant belong to
+`ops` and are not recorded in this repository.
+
 ## Personal-client pairing (HOME-NW-17)
 
 TUI, iOS, macOS, and Android clients pair from the Home pairing page and then reach

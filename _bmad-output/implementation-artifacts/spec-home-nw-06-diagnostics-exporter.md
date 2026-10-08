@@ -1,7 +1,7 @@
 ---
 id: HOME-NW-06-diagnostics-exporter
 parent: HOME-NW-06
-status: ready-for-dev
+status: review
 product_epic: 6
 created: 2026-10-08
 github_issue: https://github.com/achappell/hermes-relay-home/issues/89
@@ -9,7 +9,7 @@ github_issue: https://github.com/achappell/hermes-relay-home/issues/89
 
 # Deployed safe-event exporter
 
-**Status: ready-for-dev.** Owner decisions 2026-10-08 are recorded below: D1-D5 APPROVED as proposed; D6 approved in direction, with the shipper detail blocked on ops. Implementation is authorized for the repo-only tasks (1-8). Applying any shipper, deploying, and real-device captures remain separate owner-approved steps.
+**Status: review.** Repo-only tasks 1-8 are implemented and locally verified (see the implementation record at the end). Deployed acceptance, the Loki shipper, and real-device captures remain pending owner-approved steps; none is claimed.
 
 ## Owner decision (recorded)
 
@@ -129,3 +129,22 @@ D1-D5 defaults are the cheapest for the safe-event export: one new in-process ad
 ## Readiness
 
 Ready for development of tasks 1-8. D6 decision record: option C (Alloy `loki.source.file` to `loki.write` tailing the local JSONL) is the default; option B (direct Loki push) is used only if ops makes C impractical. Blocked on ops (host access not available): Loki push URL, auth and tenant, whether the ops Alloy `hermes-home` snippet is applied, and Loki retention. Also pending: deployment and real-device captures (AC-8). No deployment or runtime acceptance is claimed.
+
+## Implementation record (2026-10-08)
+
+Implemented on `feat/home-nw-06-diagnostics-exporter` (stacked on the approved spec). Evidence: [validation-home-nw-06-diagnostics-exporter.md](validation-home-nw-06-diagnostics-exporter.md).
+
+Where the code lives: `src/hermes_home/observability/export.py` (store, `FileEventCollector`, `ClientReportExporter`, `ExportScheduler`, `DiagnosticsExport`); runtime wiring in `src/hermes_home/runtime.py`; status, eviction split and metrics in `observability/diagnostics.py`, `storage/diagnostics.py`, `observability/metrics.py`; report sink, conflict type and retained counts in `observability/client_reports.py`; intake counters in `api/application.py`; dashboards in `observability/grafana/dashboards/hermes-home-diagnostics*.json`; shipper placeholder `deploy/windows/hermes-home-export.alloy`.
+
+Deviations and additions to the approved defaults (all additive; none changes a D1-D6 decision):
+
+1. **No preemptive 5 s write deadline.** Blocking local file I/O cannot be cancelled in Python. Isolation is by the independent drain thread, the 2 s shutdown bound (the thread is a daemon, so a stuck write cannot hold the process), and nonblocking report intake. A slow write therefore delays only the next export tick.
+2. **Extra status state `idle`.** `collector_state` is `not_configured`, `reachable`, `unreachable` (events queued, last attempt failed) or `idle` (configured, nothing queued, last attempt did not succeed). Without it a freshly started, empty exporter would read as a failure.
+3. **Extra setting `HERMES_HOME_EXPORT_INTERVAL_SECONDS`** (1 to 3600, default 30) so the cadence is configurable without code changes.
+4. **Retention is whole-file and UTC-day based.** A file is removed only when its whole UTC day plus the stream's retention is past, so lines may live up to one day beyond their retention; no line younger than retention is ever removed.
+5. **Idempotency memory is the newest 4096 batch keys** (rebuilt from the ledger lines at start). A replay of a batch older than that could be written twice; event IDs in each line let a reader deduplicate.
+6. **Eviction metric counts since process start.** `hermes_home_diagnostics_events_evicted_total{state}` baselines at first observation; the persisted totals stay in status (`dropped_event_count`, `dropped_unuploaded_event_count`). The SQLite store gained a `dropped_unuploaded_count` column by guarded `ALTER TABLE`; earlier evictions are not retroactively split (they read as after-upload).
+7. **Status JSON gained** `collector_configured`, `collector_state` and `dropped_unuploaded_event_count`. `collector_reachable` is forced false when no collector is configured, even if SQLite holds an older true.
+8. The installer and `run.ps1` are unchanged; the operator sets `HERMES_HOME_EXPORT_DIR`.
+
+Still pending and not claimed: AC-3 and AC-4 on a deployed runtime, AC-6 scan on deployed data, AC-7 sweep on real aged files, AC-8 real-device captures, AC-10 Grafana review (needs the Loki endpoint, authentication and tenant from ops, and the shipper applied), and any deployment. The Alloy snippet has not been validated with the Alloy binary.

@@ -7,6 +7,8 @@ import re
 import sqlite3
 import time
 import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Full, Queue
 from threading import Lock, RLock, Thread
@@ -283,8 +285,17 @@ def _timestamp(value, now):
 class ClientReportStore:
     """Bounded protected reports and authenticated request associations."""
 
-    def __init__(self, database: str | Path = ":memory:", *, clock=time.time):
+    def __init__(
+        self,
+        database: str | Path = ":memory:",
+        *,
+        clock=time.time,
+        export_sink: Callable[[str, float, dict], object] | None = None,
+    ):
         self._clock = clock
+        # Called once per newly stored report, after commit and outside the DB
+        # lock. It must be non-blocking; any failure is isolated from intake.
+        self._export_sink = export_sink
         self._lock = RLock()
         self._db = sqlite3.connect(str(database), check_same_thread=False)
         self._db.execute(
@@ -557,6 +568,9 @@ class ClientReportStore:
             )
 
     def receive(self, device_id: str, body: bytes | str) -> str:
+        return self.receive_result(device_id, body).report_id
+
+    def receive_result(self, device_id: str, body: bytes | str) -> ReceiveResult:
         now = self._clock()
         report = validate_report(body, now)
         report_id = report["report_id"]
@@ -568,8 +582,8 @@ class ClientReportStore:
             ).fetchone()
             if existing:
                 if report["schema"] == 2 and json.loads(existing[0]) != report:
-                    raise ValueError("conflicting report identifier")
-                return report_id
+                    raise ReportConflict("conflicting report identifier")
+                return ReceiveResult(report_id, report["platform"], True)
             latest = self._db.execute(
                 "SELECT MAX(received_at) FROM client_diagnostic_reports WHERE device_id=?",
                 (device_id,),
@@ -589,7 +603,32 @@ class ClientReportStore:
             self._db.execute(
                 "DELETE FROM client_diagnostic_reports WHERE rowid NOT IN (SELECT rowid FROM client_diagnostic_reports ORDER BY received_at DESC, rowid DESC LIMIT 1000)"
             )
-        return report_id
+        self._export(device_id, now, report)
+        return ReceiveResult(report_id, report["platform"], False)
+
+    def _export(self, device_id: str, received_at: float, report: dict) -> None:
+        if self._export_sink is None:
+            return
+        try:
+            self._export_sink(device_id, received_at, report)
+        except Exception:  # noqa: BLE001 - export must never affect intake
+            return
+
+    def retained_by_platform(self) -> dict[str, int]:
+        """Count unexpired stored reports per platform, zero-filled."""
+        counts = dict.fromkeys(PLATFORM_MODELS, 0)
+        cutoff = self._clock() - RETENTION
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT json_extract(payload, '$.platform'), COUNT(*) "
+                "FROM client_diagnostic_reports WHERE received_at >= ? "
+                "GROUP BY 1",
+                (cutoff,),
+            ).fetchall()
+        for platform, count in rows:
+            if platform in counts:
+                counts[platform] = count
+        return counts
 
     def _reject_conflicting_events(self, device_id, report):
         events = {event["event_id"]: event for event in report["events"]}
@@ -603,11 +642,11 @@ class ClientReportStore:
                 continue
             for event in previous["events"]:
                 if event["event_id"] in events and events[event["event_id"]] != event:
-                    raise ValueError("conflicting event identifier")
+                    raise ReportConflict("conflicting event identifier")
             for origin in previous["origins"]:
                 launch = origin["launch_id"].lower()
                 if launch in origins and origins[launch] != origin:
-                    raise ValueError("conflicting event origin")
+                    raise ReportConflict("conflicting event origin")
 
     def recent(self) -> dict:
         with self._lock, self._db:
@@ -675,3 +714,14 @@ class ClientReportStore:
 
 class ReportRateLimited(Exception):
     pass
+
+
+class ReportConflict(ValueError):
+    """A report reuses a stored identifier with different content."""
+
+
+@dataclass(frozen=True, slots=True)
+class ReceiveResult:
+    report_id: str
+    platform: str
+    duplicate: bool
