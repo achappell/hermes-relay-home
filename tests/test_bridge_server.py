@@ -641,7 +641,7 @@ def test_healthy_idle_background_disconnect_retains_upstream_until_grace(
                 }
             )
         )
-        return json.loads(client.recv(timeout=2))["result"]
+        return _receive_rpc(client, method)["result"]
 
     try:
         with connect(url, additional_headers=headers) as client:
