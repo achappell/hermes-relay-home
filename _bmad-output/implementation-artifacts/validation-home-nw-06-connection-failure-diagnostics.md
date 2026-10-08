@@ -234,3 +234,140 @@ local validation above; it does not complete real-device acceptance.
 Real phone schema-2 upload and end-to-end phone/Home correlation remain
 unverified and pending. This deployment supplement is operational evidence,
 not those missing acceptance observations.
+
+## Read-only deployed acceptance supplement — 2026-10-08 UTC
+
+Disposition: **review, not done**. This is bounded deployed verification, not
+a deployment, configuration repair, stress run, client-control action or
+broader HOME-NW-06/Epic 6 closure. No connection kill, revocation, unpair,
+consent change or CI watch was performed.
+
+### Installed source, operational journal and protected access — pass
+
+- All 34 installed Python sources matched
+  `d803994d1d47c63bb1b3c92cff42695de19a4434`, with zero mismatches.
+  Recomputing the source aggregate by the installed provenance algorithm
+  matched the running journal's startup artifact SHA-256
+  `a367de2ec24a3f0ce0cd9a5d1824a49897fb36750d1414c9aa6929ebf6d5b93b`.
+  The `Hermes Home` scheduled task was running. The separately stored
+  deployment revision remained stale `376583d7273e08a090d7ec33c416e0b32880a343`;
+  it was not substituted for loaded-source proof. The journal's own
+  provenance label remained `unverified`, not silently upgraded.
+- Five retained operational JSONL files contained 1,551 strictly valid
+  records, zero invalid records and 1,122,092 bytes at the bounded snapshot.
+  Every file started with provenance and ended in newline; the largest
+  record was 999 bytes. These are observed bounds, not a fresh load,
+  retention-expiry or crash test.
+- Latest operational loss snapshot: queue drops 0, schema rejects 0,
+  sink failures 0, rotation evictions 1, correlation conflicts 0.
+  This operational JSONL sink is distinct from the SQLite safe-event
+  export queue below.
+- The diagnostics directory DACL was protected, with only SYSTEM
+  Modify/Synchronize and BUILTIN Administrators Read/Synchronize, both
+  non-inherited. Credentials, report content and private identifiers were
+  not printed or copied.
+- Existing-admin authenticated `/api/v1/diagnostics/status` and `/metrics`
+  returned 200. The client-report intake/review access checks and retained
+  receipt counts are recorded in
+  [the client-report supplement](validation-home-client-diagnostics.md#read-only-deployed-acceptance-supplement--2026-10-08-utc).
+
+### Safe-event export — not wired, with observed durable evidence loss
+
+The precise finding is **exporter not wired: no `EventCollector` injection
+or flush wiring**. It is not a demonstrated collector network/authentication
+outage. The initial authenticated status snapshot showed:
+
+| Field | Observed value |
+| --- | --- |
+| `enabled` | `true` |
+| `collector_reachable` | `false` |
+| `last_successful_upload_at` | `null` |
+| `queued_event_count` | `4096` |
+| `dropped_event_count` | `2060` |
+| `rejected_event_count` | `0` |
+
+Bounded root-cause proof, using the installed sources rather than assuming
+the operator checkout matched production:
+
+1. Installed `runtime.py:358` constructs
+   `DiagnosticsRecorder(store=diagnostics_store, metrics=metrics)` without
+   `collector`; the installed constructor's default is `None`.
+   The fallback construction in `api/application.py:133` also omits it.
+   An AST inspection of the 34 installed Home Python files found no
+   `.flush()` call.
+2. `DiagnosticsRecorder.flush` in
+   `src/hermes_home/observability/diagnostics.py` uses the injected
+   `EventCollector`; its missing-collector branch returns zero uploaded
+   and false reachability. Runtime supplies no concrete collector or
+   automatic drain lifecycle. No collector destination/transport is
+   configured by this runtime contract, so there was no collector URL to
+   health-check safely.
+3. `SQLiteDiagnosticsStore` initializes reachability false and changes it
+   after upload outcomes. Status reads that stored state; it is **not**
+   a live network probe. Its bounded append path evicts old rows and
+   increments the persistent dropped-event count.
+4. A later read-only SQLite snapshot found all 4,096 retained diagnostic
+   events with `uploaded=0`, persistent drops **2,062**, zero rejects,
+   null last-success timestamp and reachability 0. The increase from
+   2,060 is observed activity between snapshots, not a stress test.
+   Authenticated metrics exposed queue depth 4,096 and reachability 0;
+   no upload-attempt metric series was present. There is no observed
+   exporter transport error to attribute to network, TLS or credentials.
+
+Operational export therefore cannot pass as a deployed capability in this
+review. Local recording, bounded loss reporting, the operational JSONL sink
+and automatic **client-report intake** must not be described as that export.
+Client intake separately retained 53 valid reports, including schema-2
+client receive/resolve assertions and exact scoped associations; it was not
+disabled by this missing exporter.
+
+### Contract-scope question and precise implementation prerequisite
+
+The [canonical parent SPEC](../specs/spec-household-diagnostics-incident-review/SPEC.md#capabilities)
+CAP-3 requires honest enabled/last-upload/queue/reachability status, and
+CAP-6 requires bounded retention and isolation from live turns. Its
+**Non-goals**, **Assumptions** and **Open Questions** deliberately leave the
+concrete log backend and transport protection undecided.
+The [historical implementation contract](spec-home-nw-06-diagnostics-incident-review.md#boundaries--constraints)
+explicitly selects an **injected collector**; its **UPLOAD** acceptance row
+requires delivery when one is supplied and honest queue/reachability when
+one is missing or failing. The two child specs do not select that collector:
+the client-report AC defines Device-authenticated intake, and connection
+diagnostics AC 4 expressly keeps broader Home/iOS/Standard/A11 acceptance
+pending. This observation does not silently reopen the historically
+completed injected-port slice.
+
+**Owner scope decision required:** Is a real deployed safe-event exporter a
+current NW-06 acceptance requirement to address within existing scope, or
+should its concrete integration be a separately authorized follow-up while
+retaining the historical injected-port boundary? Either choice must retain
+this installed-runtime limitation; neither is authorization from this
+evidence-only PR to implement or deploy transport.
+
+If export is authorized, first approve the missing collector contract:
+receiver/backend ownership and destination, transport and encoding,
+authentication/authorization and TLS trust, failure/timeout/size semantics,
+and remote retention/review/deletion responsibilities. Reuse the existing
+in-process `EventCollector.upload(events, idempotency_key)` and exact
+`UploadAcknowledgement(idempotency_key, event_ids)` rules; they are not an
+already defined network protocol. The proposed implementation is then a
+concrete collector adapter plus runtime injection and bounded, independently
+scheduled flush/shutdown lifecycle, preserving the existing queue limits,
+exact acknowledgements, privacy and no live-turn retry/replay. No such code
+or configuration change was made here.
+
+### Remaining integrated acceptance — unverified
+
+Current evidence does not establish the intended real client's consent and
+build attribution, controlled failure/restart and delayed schema-2 upload,
+or independently observed receive/resolve. Android DIAG-01 manual sharing is
+not automatic-upload proof. Historical stored assertions do not substitute
+for that controlled journey.
+
+The canonical [connection acceptance matrix](../specs/spec-connection-failure-diagnostics/implementation-acceptance.md#acceptance-matrix)
+still requires the separately authorized real-Standard gate in A2, intended
+iOS-device receive/resolve and close-order proof in A3, live proxy-leg
+attribution in A4, client/restart/consent attribution for integrated A10,
+and the final ID-joined Home/proxy/iOS timeline in A11. Earlier local fixture
+results retain their recorded scope; none was relabeled as live acceptance.
+Both child tracker entries remain `review`; no status was promoted.
