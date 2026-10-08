@@ -133,10 +133,44 @@ Verification:
 
 Notes: re-running `install.ps1` resets machine `HERMES_HOME_BIND_HOST` to its `-BindHost` parameter (default `127.0.0.1`, line 344) and rewrites the local Prometheus job target to that same value (line 401), so a future redeploy through the installer must be given a bind that keeps the tailnet scrape working or this change must be re-applied afterwards; do not pass `-BindHost 100.78.105.19` because the Tailscale Serve paths proxy to `127.0.0.1:8780`. The package-only cutovers used so far do not touch the variable. The Mac's access to ops Alloy and Prometheus used read-only HTTP GETs only.
 
-### Alloy and Loki shipper — not started
+### Alloy shipper to Loki — installed 2026-10-08 (PR #93 fixes the snippet)
 
-The owner approved installing Alloy on CaticornQueen once the tailnet grant exists. On 2026-10-08 the grant was not in place: from CaticornQueen `Test-NetConnection 100.106.8.34 -Port 3100` was False, ports 9090 and 12345 were False (guards), and `http://ops.taila59979.ts.net:3100/ready` timed out. Per the owner's instruction nothing was installed and the LAN URL was not used. Pending: the owner's `tag:home` to `tag:ops` `tcp:3100` grant.
+Owner approved installing Alloy on CaticornQueen once the tailnet grant existed. The grant (`tag:home` to `tag:ops` `tcp:3100`) was confirmed from CaticornQueen before acting: `Test-NetConnection 100.106.8.34 -Port 3100` True, `http://ops.taila59979.ts.net:3100/ready` returned `ready` (three repeats), guards `9090` and `12345` False. The LAN URL was not used. Only the `caticornqueen` SSH alias was used; ops was read through HTTP GETs from the Mac only.
+
+**Release and checksums.** Grafana Alloy `v1.20.1` (published 2026-09-28, not a prerelease). `SHA256SUMS` from the release matched on the Mac and again on the host: `alloy-installer-windows-amd64.exe` `23fcfe3755f02e8a6a83f27149851322ab2b66d584e76d239d9c031f50d3a8f0`; `alloy-windows-amd64.exe.zip` `4921238b7d45bbd8ec4429ee06af734deb9f7a2a0fd98e5652b15a1bec2ad653`. The extracted binary reported `alloy, version v1.20.1 (revision 95e12cf)` with a valid Authenticode signature.
+
+**Defect found in the snippet.** `alloy validate` failed on the committed snippet: the bare `env()` function is deprecated in v1.20.1 (`Error: validation failed`), and `alloy fmt` wanted tab indentation. The snippet was fixed to `sys.env` and canonical formatting, and then passed (`fmt` unchanged, `validate` exit 0). The fix and install notes are in PR #93; the deployed `config.alloy` is byte-identical to that file (SHA-256 `c017c2826a7759377b8ea681003cbdc01a5497d6f981b6fb9161bd333e038828`).
+
+**Install.** Silent official installer: `/S /CONFIG=C:\ProgramData\GrafanaLabs\Alloy\config.alloy /DISABLEREPORTING=yes /USERNAME="NT SERVICE\Alloy"`, with the validated config placed first (the sample config was never used). The service was installed as the virtual account `NT SERVICE\Alloy` (no password; not LocalSystem), start mode Automatic, in `C:\Program Files\GrafanaLabs\Alloy`. `/DISABLEREPORTING=yes` keeps Alloy's usage reporting off.
+
+**Installer problem.** `/ENVIRONMENT=HERMES_HOME_LOKI_PUSH_URL=http://...` was stored truncated as `HERMES_HOME_LOKI_PUSH_URL=http:`, and the installer started the service immediately. It was stopped about seconds later, before the export directory was readable by the account and before any push could occur, and the registry value `HKLM\Software\GrafanaLabs\Alloy\Environment` was set directly to `HERMES_HOME_LOKI_PUSH_URL=http://ops.taila59979.ts.net:3100/loki/api/v1/push`.
+
+**Permissions.** `NT SERVICE\Alloy` was granted `(OI)(CI)(RX)` on `C:\ProgramData\HermesHome\diagnostics\export` only, and `(OI)(CI)M` on `C:\ProgramData\GrafanaLabs\Alloy\data` only (positions file). The parent `diagnostics\` ACL was verified unchanged; `HermesHome\` and `secrets\` were not modified.
+
+**Verification (Alloy UI `127.0.0.1:12345`, loopback only; Home metrics; LogQL from the Mac).**
+
+| Check | Result |
+| --- | --- |
+| Service | Running as `NT SERVICE\Alloy`; listener `127.0.0.1:12345` only |
+| Components | `loki.write.household`, `loki.process.hermes_home_export`, `local.file_match.hermes_home_export`, `loki.source.file.hermes_home_export` all `healthy` |
+| Alloy metrics | `loki_source_file_read_lines_total` 4,119 = file line count 4,119; `loki_write_sent_entries_total` 4,119 (1.94 MB); every `loki_write_dropped_entries_total{reason}` 0; `loki_write_batch_retries_total` 0; push requests `204` |
+| Loki (GET from the Mac, `http://100.106.8.34:3100`) | `{job="hermes-home-export",host="caticornqueen"}`: 4,119 entries over 1 h; by `record_type`: `safe_event` 4,100 and `batch_ledger` 19 (sum 4,119 = sent); stream labels `job`, `host`, `record_type` plus `filename`, `service_name`, `detected_level` that Alloy and Loki add |
+| Guard ports from CaticornQueen | 3100 True; 9090 and 12345 False |
+| Home | export status `reachable`, queue 0, `dropped_unuploaded_event_count` 0; Hermes Home task Running, untouched by the Alloy install |
+| Client reports | **No `client-reports.*.jsonl` exists yet**: only `safe-events.20261008.0001.jsonl` is in the export directory (1,898,990 bytes, last written 10:19:29 host time). No new client report has been accepted since the 10:12 cutover, so the client-report export and its Loki path are still unobserved on the host |
+
+The existing 1.9 MB file was ingested once at first start, stamped with ingestion time (not event time). If Alloy's data directory (positions) is wiped, the files are ingested again and lines duplicate in Loki; the household Loki accepts duplicates (ingestion-time stamps), and removing them needs an ops-side delete.
+
+**Open item.** `positions.yml` records offset `432` for the 1.9 MB file, and `loki_source_file_read_bytes_total` reads 432, while read lines, sent entries and the Loki count all equal the full file. Whether a service restart resumes at the end of the file, or re-reads from offset 432 and duplicates lines, was **not tested**, to avoid duplicating about 4,100 entries in Loki. The offset should be re-read after the next new export line arrives: if it follows the file size, positions are fine. Until then treat an Alloy restart as a possible duplicate-ingest risk.
+
+**Rollback.** Stop Alloy and uninstall: `Stop-Service Alloy; & "$env:ProgramFiles\GrafanaLabs\Alloy\uninstall.exe" /S`; remove the ACL entries (`icacls <export dir> /remove "NT SERVICE\Alloy"`, same for `C:\ProgramData\GrafanaLabs\Alloy\data`); remove `C:\ProgramData\GrafanaLabs` if no longer wanted. The Home export, Home task and local JSONL are independent and unchanged. Loki data from this job ages out after the household Loki's 30 days; sooner purge is an ops-side delete. If the grant is withdrawn, Alloy backs off and buffers, then drops; stop the service.
+
+**Not claimed.** AC-10 (the owner has not reviewed this data in Grafana; no Loki datasource, dashboard import or review was done here), AC-8 real-device acceptance, or the first client-report export line.
+
+### Surprise: broader permissions on existing files
+
+Listing ACLs (names and principals only; no contents read) showed that `C:\ProgramData\HermesHome` grants `BUILTIN\Users` read and execute by inheritance, so `home.sqlite3`, `run.ps1`, `secrets\conversation-grants.json`, its two `.bak` copies, and three `home-before-*.sqlite3` copies in `secrets\` have `BUILTIN\Users` readable ACLs (inheritance not protected). The secret files `admin-token`, `credential-root`, `standard-token`, `live-gate-signing.key` and `home-before-main-73d58e5.sqlite3` are protected (SYSTEM and Administrators only). This predates this work and nothing was changed; see the report to the owner.
 
 ### Still not claimed
 
-AC-8 real-device captures (attributed Apple and Android automatic uploads, one real dropped-connection capture), AC-10 Grafana review, any Loki delivery or Alloy installation (the Alloy shipper, Loki endpoint, authentication and tenant remain with ops and nothing was applied), the first exported client-report line on the host, and the sweep on aged files. Both HOME-NW-06 children remain `review`; the exporter story remains `review`.
+AC-8 real-device captures (attributed Apple and Android automatic uploads, one real dropped-connection capture), AC-10 Grafana review (the Alloy shipper, Loki endpoint, authentication and tenant remain with ops and nothing was applied), the first exported client-report line on the host, and the sweep on aged files. Both HOME-NW-06 children remain `review`; the exporter story remains `review`.
