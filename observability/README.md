@@ -86,7 +86,8 @@ The provisionable dashboards
 [`hermes-home-diagnostics-logs.json`](grafana/dashboards/hermes-home-diagnostics-logs.json)
 (Loki) cover these series and the exported lines. The logs dashboard needs the
 Loki shipper in [`../deploy/windows/hermes-home-export.alloy`](../deploy/windows/hermes-home-export.alloy),
-which is a documented placeholder that is not applied.
+which is validated with Alloy v1.20.1; installing it is a separate host step
+documented in [`../deploy/windows/README.md`](../deploy/windows/README.md).
 
 ## Scrape
 

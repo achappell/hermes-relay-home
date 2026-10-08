@@ -131,15 +131,18 @@ def test_logs_dashboard_queries_only_the_low_cardinality_export_labels() -> None
     assert any('record_type="safe_event"' in e for e in expressions)
 
 
-def test_export_shipper_snippet_is_a_documented_unapplied_placeholder() -> None:
+def test_export_shipper_snippet_is_validated_and_documented() -> None:
     root = Path(__file__).parents[1] / "deploy" / "windows"
     snippet = (root / "hermes-home-export.alloy").read_text()
     readme = (root / "README.md").read_text()
 
-    assert "NOT APPLIED" in snippet
+    assert "NOT APPLIED" not in snippet
+    assert "Alloy v1.20.1" in snippet
     assert 'loki.source.file "hermes_home_export"' in snippet
     assert 'loki.write "household"' in snippet
-    assert 'env("HERMES_HOME_LOKI_PUSH_URL")' in snippet
+    # Bare `env(...)` is deprecated in Alloy v1.20.1 and fails `alloy validate`.
+    assert 'url = sys.env("HERMES_HOME_LOKI_PUSH_URL")' in snippet
+    assert ' env("' not in snippet
     assert "safe-events.*.jsonl" in snippet
     assert "client-reports.*.jsonl" in snippet
     # Only the record type is promoted to a label; identifiers stay in the body.
@@ -149,7 +152,10 @@ def test_export_shipper_snippet_is_a_documented_unapplied_placeholder() -> None:
     assert "password" not in snippet.lower()
     assert "HERMES_HOME_EXPORT_DIR" in readme
     assert "hermes-home-export.alloy" in readme
-    assert "not applied" in readme.lower()
+    assert "sys.env" in readme
+    assert "NT SERVICE\\Alloy" in readme
+    assert "never the default LocalSystem" in readme
+    assert "HKLM:\\Software\\GrafanaLabs\\Alloy" in readme
 
 
 def test_observability_readme_documents_export_retention_and_not_configured() -> None:
