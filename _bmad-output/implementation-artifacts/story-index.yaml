@@ -293,6 +293,18 @@ stories:
     release_scope: later
     depends_on:
       - home:HOME-NW-06
+  - id: HOME-NW-06-diagnostics-exporter
+    title: Wire the deployed safe-event exporter
+    kind: local
+    spec: _bmad-output/implementation-artifacts/spec-home-nw-06-diagnostics-exporter.md
+    github_issue: https://github.com/achappell/hermes-relay-home/issues/89
+    tracker_key: home-nw-06-diagnostics-exporter
+    product_epic: 6
+    owner: hermes-relay-home
+    release_scope: later
+    depends_on:
+      - home:HOME-NW-06
+    evidence_note: Owner decision 2026-10-08 (option A) makes a deployed exporter a current HOME-NW-06 acceptance requirement; both HOME-NW-06 children stay in review until it is wired and real-device captures exist. Spec ready-for-dev: owner approved D1-D5 on 2026-10-08 and the D6 Grafana direction (local JSONL source of truth, Alloy shipper to Loki); Loki endpoint and auth remain blocked on ops.
 epic_scheme: hermes-home-2026-09-23
 epics:
   1: Connect personal clients through HomeBridge
