@@ -28,9 +28,29 @@ Validate the compose configuration and reload Alloy after the change. Confirm
 that the Alloy health page is ready, the scrape has no authentication error,
 and Prometheus reports `up{job="hermes-home",host="caticornqueen"} == 1`.
 
-The Windows installer must be run with `-BindHost 100.78.105.19` for this
-cross-host scrape. That Tailscale-only binding keeps the service off the LAN
-while making it reachable from the ops collector.
+Home on CaticornQueen must listen on a non-loopback address for this
+cross-host scrape, but **not** on the tailnet address alone: Tailscale Serve
+proxies the pairing paths to `127.0.0.1:8780`, so a `100.78.105.19` bind breaks
+pairing (the installer rejects it). The supported setup is
+`HERMES_HOME_BIND_HOST=0.0.0.0` plus a Windows Firewall inbound allow that is
+limited to the tailnet, applied by the installer's opt-in switch:
+
+```powershell
+.\install.ps1 -WheelPath $wheel.FullName -BindHost 0.0.0.0 -AllowTailnetMetricsScrape
+```
+
+The rule is named `Hermes Home metrics from Tailscale`: TCP `8780`, remote
+address `100.64.0.0/10`, Private profile. The local Prometheus job keeps
+scraping `127.0.0.1:8780`. Later installer runs preserve the stored bind and
+never open the port without `-AllowTailnetMetricsScrape`; package-only cutovers
+do not touch these settings. Verification (listener, tailnet TCP test, LAN
+timeout) and rollback (`Remove-NetFirewallRule`, restore the bind) are in
+[`../windows/README.md`](../windows/README.md#bind-host-and-metrics-scrape).
+After any change confirm on ops that the Alloy `prometheus.scrape.hermes_home`
+component is healthy with an `up` target (no timeout, no 401), and that
+`Test-NetConnection 100.78.105.19 -Port 8780` succeeds from a tailnet device
+while the LAN address times out. Rolling back to loopback makes this scrape
+fail until the Alloy target is removed.
 
 ## Standard-backed Home pilot
 

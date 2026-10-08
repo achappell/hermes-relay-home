@@ -8,9 +8,10 @@ param(
 
     [string] $InstallRoot = 'C:\ProgramData\HermesHome',
     [string] $PrometheusConfigPath = 'C:\Program Files\Prometheus\prometheus.yml',
-    [string] $BindHost = '127.0.0.1',
+    [string] $BindHost,
     [ValidateRange(1, 65535)]
     [int] $Port = 8780,
+    [switch] $AllowTailnetMetricsScrape,
     [string] $BridgeBindHost = '127.0.0.1',
     [ValidateRange(1, 65535)]
     [int] $BridgePort = 8766,
@@ -30,6 +31,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$tailnetMetricsRuleName = 'Hermes Home metrics from Tailscale'
+$tailnetMetricsRemoteAddress = '100.64.0.0/10'
 
 function Resolve-UvPath {
     param([string] $RequestedPath)
@@ -182,6 +185,166 @@ function Update-PrometheusConfig {
     return $backupPath
 }
 
+function Test-WildcardBindHost {
+    param([string] $Address)
+
+    $parsed = $null
+    $candidate = $Address.Trim().TrimStart('[').TrimEnd(']')
+    if (-not [System.Net.IPAddress]::TryParse($candidate, [ref] $parsed)) {
+        return $false
+    }
+    return (
+        $parsed.Equals([System.Net.IPAddress]::Any) -or
+        $parsed.Equals([System.Net.IPAddress]::IPv6Any)
+    )
+}
+
+function Test-TailnetAddress {
+    # Tailscale assigns 100.64.0.0/10 (IPv4) and fd7a:115c:a1e0::/48 (IPv6).
+    param([string] $Address)
+
+    $parsed = $null
+    $candidate = $Address.Trim().TrimStart('[').TrimEnd(']')
+    if (-not [System.Net.IPAddress]::TryParse($candidate, [ref] $parsed)) {
+        return $false
+    }
+    $bytes = $parsed.GetAddressBytes()
+    if ($bytes.Length -eq 4) {
+        return ($bytes[0] -eq 100 -and ($bytes[1] -band 0xC0) -eq 64)
+    }
+    $prefix = @(0xFD, 0x7A, 0x11, 0x5C, 0xA1, 0xE0)
+    for ($index = 0; $index -lt $prefix.Count; $index++) {
+        if ($bytes[$index] -ne $prefix[$index]) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Resolve-BindHostPlan {
+    # Decides the machine HERMES_HOME_BIND_HOST before any state changes.
+    # An omitted -BindHost preserves the existing machine value; the loopback
+    # default applies only when nothing is set (first install).
+    param(
+        [string] $Requested,
+        [bool] $RequestedSupplied,
+        [string] $Existing
+    )
+
+    $previous = if ([string]::IsNullOrWhiteSpace($Existing)) { $null } else { $Existing.Trim() }
+    if ($RequestedSupplied) {
+        if ([string]::IsNullOrWhiteSpace($Requested)) {
+            throw 'BindHost must not be blank'
+        }
+        $resolved = $Requested.Trim()
+        $source = 'explicit'
+    }
+    elseif ($null -ne $previous) {
+        $resolved = $previous
+        $source = 'preserved'
+    }
+    else {
+        $resolved = '127.0.0.1'
+        $source = 'default'
+    }
+
+    if (Test-TailnetAddress -Address $resolved) {
+        throw "HERMES_HOME_BIND_HOST '$resolved' is a Tailscale address. Tailscale Serve proxies the pairing paths to 127.0.0.1, so a tailnet-address-only bind breaks pairing. Rerun with -BindHost 0.0.0.0 and -AllowTailnetMetricsScrape (tailnet-scoped firewall rule) for remote metrics scraping, or -BindHost 127.0.0.1 to stay on loopback."
+    }
+
+    return [pscustomobject] @{
+        Host     = $resolved
+        Source   = $source
+        Previous = $previous
+        Changed  = ($source -eq 'explicit' -and $previous -ne $resolved)
+    }
+}
+
+function Get-LocalScrapeHost {
+    # The local Prometheus job always dials loopback when Home listens on
+    # loopback or a wildcard; only a specific address is used as given.
+    param([string] $BindHost)
+
+    $address = $BindHost.Trim()
+    if ($address -eq '127.0.0.1' -or (Test-WildcardBindHost -Address $address)) {
+        return '127.0.0.1'
+    }
+    $parsed = $null
+    $candidate = $address.TrimStart('[').TrimEnd(']')
+    if ([System.Net.IPAddress]::TryParse($candidate, [ref] $parsed) -and
+        $parsed.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6) {
+        return "[$candidate]"
+    }
+    return $address
+}
+
+function Test-TailnetMetricsRuleShape {
+    param(
+        [string] $Direction,
+        [string] $Action,
+        [string] $Enabled,
+        [string] $Profile,
+        [string] $Protocol,
+        [string[]] $LocalPort,
+        [string[]] $RemoteAddress,
+        [int] $ExpectedPort
+    )
+
+    return (
+        $Direction -eq 'Inbound' -and
+        $Action -eq 'Allow' -and
+        $Enabled -eq 'True' -and
+        $Profile -eq 'Private' -and
+        $Protocol -eq 'TCP' -and
+        @($LocalPort).Count -eq 1 -and [string] $LocalPort[0] -eq [string] $ExpectedPort -and
+        @($RemoteAddress).Count -eq 1 -and
+        $RemoteAddress[0] -in @($tailnetMetricsRemoteAddress, '100.64.0.0/255.192.0.0')
+    )
+}
+
+function Set-TailnetMetricsFirewallRule {
+    # Opt-in only. Creates or converges the single inbound allow that lets the
+    # household ops collector scrape /metrics over the tailnet. The rule is
+    # scoped to the Tailscale range and the Private profile, never to any
+    # address, and is read back before the installer continues.
+    param([int] $LocalPort)
+
+    $rules = @(Get-NetFirewallRule -DisplayName $tailnetMetricsRuleName -ErrorAction SilentlyContinue)
+    if ($rules.Count -eq 0) {
+        New-NetFirewallRule -DisplayName $tailnetMetricsRuleName `
+            -Description 'Allow the household ops collector to scrape Hermes Home /metrics over Tailscale only.' `
+            -Direction Inbound -Action Allow -Enabled True -Profile Private `
+            -Protocol TCP -LocalPort $LocalPort -RemoteAddress $tailnetMetricsRemoteAddress | Out-Null
+        $outcome = 'created'
+    }
+    else {
+        $rules | Set-NetFirewallRule -Direction Inbound -Action Allow -Enabled True -Profile Private
+        $rules | Get-NetFirewallPortFilter | Set-NetFirewallPortFilter -Protocol TCP -LocalPort $LocalPort
+        $rules | Get-NetFirewallAddressFilter | Set-NetFirewallAddressFilter -RemoteAddress $tailnetMetricsRemoteAddress
+        $outcome = 'updated'
+    }
+
+    $applied = @(Get-NetFirewallRule -DisplayName $tailnetMetricsRuleName)
+    if ($applied.Count -eq 0) {
+        throw "Firewall rule '$tailnetMetricsRuleName' was not found after it was applied"
+    }
+    foreach ($rule in $applied) {
+        $portFilter = $rule | Get-NetFirewallPortFilter
+        $addressFilter = $rule | Get-NetFirewallAddressFilter
+        $shapeOk = Test-TailnetMetricsRuleShape `
+            -Direction ([string] $rule.Direction) -Action ([string] $rule.Action) `
+            -Enabled ([string] $rule.Enabled) -Profile ([string] $rule.Profile) `
+            -Protocol ([string] $portFilter.Protocol) `
+            -LocalPort @($portFilter.LocalPort | ForEach-Object { [string] $_ }) `
+            -RemoteAddress @($addressFilter.RemoteAddress | ForEach-Object { [string] $_ }) `
+            -ExpectedPort $LocalPort
+        if (-not $shapeOk) {
+            throw "Firewall rule '$tailnetMetricsRuleName' does not match TCP $LocalPort from $tailnetMetricsRemoteAddress on the Private profile after it was applied"
+        }
+    }
+    Write-Output "Firewall rule '$tailnetMetricsRuleName' $outcome"
+}
+
 function Register-HermesHomeTask {
     param(
         [string] $Name,
@@ -310,6 +473,28 @@ if (-not (Test-Path -LiteralPath $runnerSource -PathType Leaf)) {
     throw "The deployment bundle is missing run.ps1 beside install.ps1"
 }
 
+$existingBindHost = [Environment]::GetEnvironmentVariable('HERMES_HOME_BIND_HOST', 'Machine')
+$bindPlan = Resolve-BindHostPlan -Requested $BindHost -RequestedSupplied $PSBoundParameters.ContainsKey('BindHost') -Existing $existingBindHost
+$localScrapeHost = Get-LocalScrapeHost -BindHost $bindPlan.Host
+switch ($bindPlan.Source) {
+    'default' { Write-Output "HERMES_HOME_BIND_HOST not set; first install defaults to $($bindPlan.Host)" }
+    'preserved' { Write-Output "HERMES_HOME_BIND_HOST preserved: $($bindPlan.Host) (pass -BindHost to change it)" }
+    'explicit' {
+        if ($bindPlan.Changed) {
+            Write-Warning "HERMES_HOME_BIND_HOST changes from '$($bindPlan.Previous)' to '$($bindPlan.Host)' because -BindHost was supplied"
+        }
+        else {
+            Write-Output "HERMES_HOME_BIND_HOST already $($bindPlan.Host)"
+        }
+    }
+}
+if ($AllowTailnetMetricsScrape -and -not (Test-WildcardBindHost -Address $bindPlan.Host)) {
+    Write-Warning "-AllowTailnetMetricsScrape creates the tailnet-scoped firewall rule, but Home is bound to '$($bindPlan.Host)', so a tailnet collector cannot reach it. Remote scraping needs HERMES_HOME_BIND_HOST 0.0.0.0 (pass -BindHost 0.0.0.0)."
+}
+elseif (-not $AllowTailnetMetricsScrape -and (Test-WildcardBindHost -Address $bindPlan.Host)) {
+    Write-Output "NOTE: Home listens on every interface; inbound reachability of TCP $Port is decided by Windows Firewall. This installer opens no firewall port unless -AllowTailnetMetricsScrape is passed."
+}
+
 $existingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 $taskWasRunning = $null -ne $existingTask -and $existingTask.State -eq 'Running'
 try {
@@ -341,7 +526,7 @@ try {
     $token = Ensure-AdminToken -Path $tokenPath
     [Environment]::SetEnvironmentVariable('HERMES_HOME_DATA_DIR', $root, 'Machine')
     [Environment]::SetEnvironmentVariable('HERMES_HOME_DIAGNOSTICS_DIR', $diagnosticsRoot, 'Machine')
-    [Environment]::SetEnvironmentVariable('HERMES_HOME_BIND_HOST', $BindHost, 'Machine')
+    [Environment]::SetEnvironmentVariable('HERMES_HOME_BIND_HOST', $bindPlan.Host, 'Machine')
     [Environment]::SetEnvironmentVariable('HERMES_HOME_PORT', [string] $Port, 'Machine')
     [Environment]::SetEnvironmentVariable('HERMES_HOME_BRIDGE_BIND_HOST', $BridgeBindHost, 'Machine')
     [Environment]::SetEnvironmentVariable('HERMES_HOME_BRIDGE_PORT', [string] $BridgePort, 'Machine')
@@ -398,15 +583,22 @@ try {
         [Environment]::SetEnvironmentVariable('HERMES_HOME_CLIENT_RECONNECT_GRACE_SECONDS', $null, 'Machine')
     }
 
-    $backup = Update-PrometheusConfig -ConfigPath $PrometheusConfigPath -PrometheusTokenPath $tokenPath -TargetHost $BindHost -TargetPort $Port
+    if ($AllowTailnetMetricsScrape) {
+        Set-TailnetMetricsFirewallRule -LocalPort $Port
+    }
+    $backup = Update-PrometheusConfig -ConfigPath $PrometheusConfigPath -PrometheusTokenPath $tokenPath -TargetHost $localScrapeHost -TargetPort $Port
     Register-HermesHomeTask -Name $TaskName -RunnerPath $runnerPath -WorkingDirectory $root
     Start-ScheduledTask -TaskName $TaskName
-    Wait-ForHomeMetrics -HostName $BindHost -TargetPort $Port -Token $token
+    Wait-ForHomeMetrics -HostName $localScrapeHost -TargetPort $Port -Token $token
     Wait-ForPrometheusTarget
 
     Write-Output "Hermes Home installed under $root"
     Write-Output "Prometheus configuration backup: $backup"
     Write-Output "Scheduled task: $TaskName"
+    Write-Output "Home listener: $($bindPlan.Host)`:$Port ($($bindPlan.Source)); local scrape target: $localScrapeHost`:$Port"
+    if ($AllowTailnetMetricsScrape) {
+        Write-Output "Firewall rule '$tailnetMetricsRuleName': TCP $Port from $tailnetMetricsRemoteAddress, Private profile"
+    }
     Write-Output "Bridge listener: $BridgeBindHost`:$BridgePort"
     Write-Output "Bridge route ID: $($BridgeRouteId.Trim())"
     if ($standardConfigured) {

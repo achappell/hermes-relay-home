@@ -4,6 +4,8 @@ Date: 2026-10-08. Status: review. Local implementation verified; deployed accept
 
 Spec: [spec-home-nw-06-diagnostics-exporter.md](spec-home-nw-06-diagnostics-exporter.md). Owner decisions: D1-D5 approved as proposed, D6 approved in direction (local JSONL source of truth, Alloy shipper to Loki), 2026-10-08.
 
+Installer hazard follow-up (2026-10-08): re-running `deploy/windows/install.ps1` used to reset the machine `HERMES_HOME_BIND_HOST` to `-BindHost` (default loopback) and point the local Prometheus job at that value, undoing the tailnet metrics scrape setup recorded for the CaticornQueen deployment. Fixed in source; see [validation-installer-bind-durability.md](validation-installer-bind-durability.md). Installer reruns now preserve the bind, and `-BindHost 100.78.105.19` is rejected.
+
 ## Local gates (observed)
 
 - Test-first: the new tests were written and run red (`ModuleNotFoundError` for `hermes_home.observability.export`, and failing runtime, intake and artifact tests) before any implementation.

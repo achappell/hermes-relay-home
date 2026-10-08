@@ -6,11 +6,14 @@ environment, runs it as a SYSTEM scheduled task, stores the admin credential in
 an ACL-protected file, and adds an authenticated `hermes-home` scrape job to
 Prometheus.
 
-The installer defaults to loopback on port `8780` because CaticornQueen already
-uses port `8765` for the Qwen TTS service. The sibling bridge listener defaults
-to loopback on port `8766`; its bind host, port, and non-secret route label are
-set by the installer as well. Prometheus scrapes the Home process locally; LAN
-binding remains a separate, deliberate trust-boundary decision.
+The installer uses port `8780` because CaticornQueen already uses port `8765`
+for the Qwen TTS service. A first install binds Home to loopback; later runs
+keep whatever bind host is already configured (see
+[Bind host and metrics scrape](#bind-host-and-metrics-scrape)). The sibling
+bridge listener defaults to loopback on port `8766`; its bind host, port, and
+non-secret route label are set by the installer as well. The local Prometheus
+job always scrapes `127.0.0.1:8780`; exposing Home beyond loopback is a
+separate, deliberate trust-boundary decision.
 
 ## Build and copy
 
@@ -68,6 +71,106 @@ The installer never creates that root secret. Without it, and without the
 legacy `-DeviceCredentialsFile` option, endpoint authentication remains
 disabled. The two credential modes cannot be supplied together.
 
+## Bind host and metrics scrape
+
+Home reads its listen address from the machine environment variable
+`HERMES_HOME_BIND_HOST`. The installer manages it as follows; the deployed
+CaticornQueen state is `0.0.0.0`.
+
+- `-BindHost` omitted: the existing machine value is kept. Only a first install
+  (no value set) defaults to `127.0.0.1`. A rerun therefore never changes the
+  bind.
+- `-BindHost <address>` supplied: the value is applied and the installer prints
+  a warning showing the old and new value.
+- A Tailscale address (`100.64.0.0/10` or `fd7a:115c:a1e0::/48`, for example
+  `100.78.105.19`) is rejected, whether supplied or already stored. Tailscale
+  Serve proxies the pairing paths to `127.0.0.1:8780` (see
+  [Personal-client pairing](#personal-client-pairing-home-nw-17)), so a bind to
+  the tailnet address alone breaks pairing.
+- The local Prometheus job and the installer's `/metrics` readiness probe are
+  derived separately from the bind: `0.0.0.0`, `::` and `127.0.0.1` all scrape
+  `127.0.0.1:<Port>`; only another specific address is used as given (IPv6 is
+  bracketed).
+
+| `-BindHost` | Stored bind | Local scrape target |
+| --- | --- | --- |
+| omitted, nothing stored | `127.0.0.1` | `127.0.0.1:8780` |
+| omitted, `0.0.0.0` stored | `0.0.0.0` (kept) | `127.0.0.1:8780` |
+| omitted, `127.0.0.1` stored | `127.0.0.1` (kept) | `127.0.0.1:8780` |
+| `0.0.0.0` | `0.0.0.0` | `127.0.0.1:8780` |
+| `127.0.0.1` | `127.0.0.1` | `127.0.0.1:8780` |
+| `192.168.0.4` | `192.168.0.4` | `192.168.0.4:8780` |
+| a Tailscale address | rejected before any change | none |
+
+### Remote scraping from the ops Alloy
+
+[`../ops/hermes-home.alloy`](../ops/hermes-home.alloy) scrapes
+`100.78.105.19:8780/metrics` with the admin token. That needs Home listening on
+a non-loopback address and a Windows Firewall allow that is limited to the
+tailnet. The supported setup is `0.0.0.0` plus a tailnet-scoped rule, not a bind
+to the tailnet address:
+
+```powershell
+.\install.ps1 -WheelPath $wheel.FullName -BindHost 0.0.0.0 -AllowTailnetMetricsScrape
+```
+
+`-AllowTailnetMetricsScrape` is opt-in. It creates or converges exactly one
+inbound rule and reads it back; a mismatch fails the install:
+
+| Field | Value |
+| --- | --- |
+| Display name | `Hermes Home metrics from Tailscale` |
+| Direction / action | Inbound / Allow |
+| Protocol / local port | TCP / `-Port` (`8780`) |
+| Remote address | `100.64.0.0/10` (Windows reads it back as `100.64.0.0/255.192.0.0`) |
+| Profile | Private |
+
+Without the switch the installer never touches the firewall, so it never opens
+the port to the LAN or to any other address. With the switch and a loopback
+bind it still creates the rule but warns that scraping needs `-BindHost 0.0.0.0`.
+Once `HERMES_HOME_BIND_HOST` is `0.0.0.0`, later runs need no `-BindHost`; pass
+`-AllowTailnetMetricsScrape` again only to converge the rule.
+
+Verify on CaticornQueen (elevated PowerShell) after any install:
+
+```powershell
+[Environment]::GetEnvironmentVariable('HERMES_HOME_BIND_HOST', 'Machine')   # 0.0.0.0
+Get-NetTCPConnection -State Listen -LocalPort 8780 | Select-Object LocalAddress, LocalPort
+Get-NetFirewallRule -DisplayName 'Hermes Home metrics from Tailscale' |
+  Format-List DisplayName, Enabled, Direction, Action, Profile
+Get-NetFirewallRule -DisplayName 'Hermes Home metrics from Tailscale' |
+  Get-NetFirewallAddressFilter | Select-Object RemoteAddress
+Select-String -Path 'C:\Program Files\Prometheus\prometheus.yml' -Pattern "targets: \['127.0.0.1:8780'\]"
+```
+
+The listener must be `0.0.0.0:8780`, the rule must be Inbound/Allow/Private
+with remote `100.64.0.0/255.192.0.0`, and the local Prometheus target must be
+`127.0.0.1:8780`. From another tailnet device, `Test-NetConnection
+100.78.105.19 -Port 8780` must succeed and `/metrics` must return `401` without
+the token and `200` with it. From a device on the LAN but not the tailnet,
+`curl --max-time 5 http://<LAN address of CaticornQueen>:8780/metrics` must time
+out. On the ops host the Alloy `prometheus.scrape.hermes_home` component must be
+`healthy` with an `up` target. `https://<home tailnet name>/pair` must still
+answer `200` through Tailscale Serve.
+
+Roll back by removing the rule and restoring the previous bind, then restarting
+only the Home task:
+
+```powershell
+Remove-NetFirewallRule -DisplayName 'Hermes Home metrics from Tailscale'
+[Environment]::SetEnvironmentVariable('HERMES_HOME_BIND_HOST', '127.0.0.1', 'Machine')
+Stop-ScheduledTask -TaskName 'Hermes Home'
+Start-ScheduledTask -TaskName 'Hermes Home'
+```
+
+(or `.\install.ps1 -WheelPath $wheel.FullName -BindHost 127.0.0.1`). Ops Alloy
+will then report the target down; remove or disable the `hermes_home` scrape
+there if loopback is the intended end state.
+
+Package-only cutovers (stop the task, `uv pip install --force-reinstall` the
+wheel, start the task) do not run the installer and so touch neither the bind,
+the firewall rule, nor the Prometheus job.
+
 ## Standard-backed bridge
 
 The Home route uses one dedicated Standard gateway target. Home creates each
@@ -109,9 +212,10 @@ unavailable bridge. The route remains tailnet-only; a connected physical
 Android device and an approved live Profile are still required for the final
 audio/reconnect proof.
 
-The installer is idempotent: it preserves the existing admin token, replaces only its marked
-Prometheus job, validates the candidate configuration with `promtool`, saves a
-timestamped backup, and restarts the Prometheus service.
+The installer is idempotent: it preserves the existing admin token and the
+existing `HERMES_HOME_BIND_HOST`, replaces only its marked Prometheus job,
+validates the candidate configuration with `promtool`, saves a timestamped
+backup, and restarts the Prometheus service.
 
 The resulting process is managed by the `Hermes Home` scheduled task. Its data,
 logs, virtual environment, and secret live beneath
