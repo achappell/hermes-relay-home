@@ -133,3 +133,15 @@ context:
 - `uv run --python 3.14 --locked --extra dev pytest -q` -- expected: full Home suite passes.
 - `uvx ruff check src tests` and `uvx ruff format --check src tests` -- expected: clean.
 - `git diff --check` -- expected: no whitespace errors.
+
+## Acceptance
+
+**Owner acceptance: 2026-10-07**
+
+Amanda (owner) reviewed the completed specification, implementation evidence, and review follow-up triage. This is not a new test run; it closes the delivered work against the approved spec.
+
+**Accepted caveats:**
+- Upstream Standard privacy dependency (spec Boundary Dependency, line ~30): Home forwards protected input through existing Standard `secret.respond` and `sudo.respond` operations and documents the non-transcript/non-history prerequisite without enforcing Hermes internals. Standard peer failure to provide that privacy guarantee results in Home returning a safe unavailable result.
+- Deferred E3 cross-store atomicity (spec Review Triage Log, line ~117): Protected use-time revalidation occurs immediately before Standard delivery. No atomic lock spans the independent configuration store and transport; closing that window would require a broader authority transaction and is deferred.
+
+**Status:** Closed as done.
