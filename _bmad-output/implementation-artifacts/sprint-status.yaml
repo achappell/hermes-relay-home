@@ -28,7 +28,7 @@ development_status:
   home-nw-06-diagnostics-incident-review: done
   home-nw-06-client-reports: review
   home-nw-06-connection-diagnostics: review
-  home-nw-06-diagnostics-exporter: backlog
+  home-nw-06-diagnostics-exporter: ready-for-dev
   home-nw-08-watch-safe-preview: done
   home-nw-09-device-health-check: done
   epic-7: in-progress

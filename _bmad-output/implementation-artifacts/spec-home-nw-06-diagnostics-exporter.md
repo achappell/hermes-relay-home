@@ -1,7 +1,7 @@
 ---
 id: HOME-NW-06-diagnostics-exporter
 parent: HOME-NW-06
-status: draft
+status: ready-for-dev
 product_epic: 6
 created: 2026-10-08
 github_issue: https://github.com/achappell/hermes-relay-home/issues/89
@@ -9,7 +9,7 @@ github_issue: https://github.com/achappell/hermes-relay-home/issues/89
 
 # Deployed safe-event exporter
 
-**Status: draft, spec only.** No source, configuration or deployment change is made or authorized by this document. Every default below is **PROPOSED, awaiting owner approval**. Implementation MUST NOT start until the owner approves or amends D1-D6.
+**Status: ready-for-dev.** Owner decisions 2026-10-08 are recorded below: D1-D5 APPROVED as proposed; D6 approved in direction, with the shipper detail blocked on ops. Implementation is authorized for the repo-only tasks (1-8). Applying any shipper, deploying, and real-device captures remain separate owner-approved steps.
 
 ## Owner decision (recorded)
 
@@ -36,30 +36,30 @@ Evidence: [validation-home-nw-06-connection-failure-diagnostics.md](validation-h
 - Retention constants: events 14 days, incidents 7 days, metrics 30 days (`diagnostics.py:23-25`).
 - Live work never retries, replays or blocks on collector failure (parent SPEC CAP-6; diagnostics-contract.md "Automatic collector unreachable").
 
-## Decisions for owner approval (all PROPOSED)
+## Decisions (D1-D5 APPROVED 2026-10-08; D6 approved direction)
 
 ### D1. Collector ownership and destination
 
-- **PROPOSED default:** Home owns the destination. A Home-host-local, append-only JSONL export store in a new directory under the protected diagnostics area (separate from the operational JSONL files), written by an in-process `FileEventCollector` for safe events and a sibling sink for accepted client reports (see D6). Operator: the single household owner; the SYSTEM-owned ACL already used for `C:\ProgramData\HermesHome\diagnostics` (validation supplement, 2026-10-04) applies.
+- **APPROVED default (2026-10-08):** Home owns the destination. A Home-host-local, append-only JSONL export store in a new directory under the protected diagnostics area (separate from the operational JSONL files), written by an in-process `FileEventCollector` for safe events and a sibling sink for accepted client reports (see D6). Operator: the single household owner; the SYSTEM-owned ACL already used for `C:\ProgramData\HermesHome\diagnostics` (validation supplement, 2026-10-04) applies.
 - **Rationale:** It is the cheapest option: no new service, no network, no new credential, no new dependency (`pyproject.toml:12` has no HTTP client), and it exercises the real ack, idempotency and drain path end to end. The port stays swappable.
 - **Alternatives:** (a) HTTPS POST to a household receiver over the tailnet. Grafana, Prometheus, Loki and Alloy run on the household `ops` host, but no Loki push endpoint or auth is recorded anywhere readable, so the owner or ops must confirm one if wanted (see D6); (b) a separate receiver process on the Home host bound to loopback.
 - **Honesty caveat:** with the default, `collector_reachable` means "the last export write was durably acknowledged by the local export store", not "a remote collector is up". Status wording and docs MUST say so.
 
 ### D2. Transport and encoding
 
-- **PROPOSED default:** No network transport. Encoding is one JSON object per line (UTF-8) with a `record_type` field (`safe_event` or `client_report`). Safe events use `DiagnosticEvent.to_dict()` (`diagnostics.py:342`); one batch is appended as consecutive lines followed by a single batch-ledger line holding `idempotency_key` and the event IDs, then `flush` plus `fsync` before returning the acknowledgement. Client reports are one line each (stored payload, `device_id`, `received_at`), not part of the `EventCollector` batch/acknowledgement path. Rotation by size with a bounded file count.
+- **APPROVED default (2026-10-08):** No network transport. Encoding is one JSON object per line (UTF-8) with a `record_type` field (`safe_event` or `client_report`). Safe events use `DiagnosticEvent.to_dict()` (`diagnostics.py:342`); one batch is appended as consecutive lines followed by a single batch-ledger line holding `idempotency_key` and the event IDs, then `flush` plus `fsync` before returning the acknowledgement. Client reports are one line each (stored payload, `device_id`, `received_at`), not part of the `EventCollector` batch/acknowledgement path. Rotation by size with a bounded file count.
 - **Rationale:** Matches the existing JSONL operational sink style and makes the acknowledgement truthful (fsync before ack).
 - **Alternatives:** HTTPS `POST` with the same JSON-lines body and `Idempotency-Key` header using stdlib `urllib` or `http.client` (no new dependency); gRPC/OTLP (heavier; new dependency).
 
 ### D3. Authentication and TLS
 
-- **PROPOSED default:** Not applicable to the local file store. Access control is OS ACL: SYSTEM modify, Administrators read, no Users write (the posture already verified for the diagnostics directory). No credential is added to config, logs or URLs.
+- **APPROVED default (2026-10-08):** Not applicable to the local file store. Access control is OS ACL: SYSTEM modify, Administrators read, no Users write (the posture already verified for the diagnostics directory). No credential is added to config, logs or URLs.
 - **Rationale:** Avoids a new secret. If D1 is overridden to a network receiver, the default becomes: tailnet-only destination, HTTPS with certificate verification on (no skip-verify), and a static per-Home bearer secret read from a protected file named by an env var, never placed in URLs or logs. This follows the existing `HERMES_HOME_STANDARD_TOKEN_FILE` pattern (`src/hermes_home/runtime.py:196`).
 - **Alternatives:** tailnet identity only (rely on tailnet ACL) with no bearer; mTLS (highest assurance, highest setup cost).
 
 ### D4. Failure, timeout and size behavior
 
-- **PROPOSED default:**
+- **APPROVED default (2026-10-08):**
   - Batch size: at most 256 events per upload and 1 MiB encoded per batch (new bounded constants; the recorder bound stays 4096).
   - Drain cadence: independent timer thread, default every 30 s, plus one final bounded drain at shutdown (timeout at most 2 s; never blocks process exit past that).
   - Per-attempt deadline: 5 s write budget. On timeout or exception the existing failure path applies (`diagnostics.py:846-851`): batch stays queued, reachability false, `uploads_total{outcome="unavailable"}` incremented.
@@ -71,21 +71,21 @@ Evidence: [validation-home-nw-06-connection-failure-diagnostics.md](validation-h
 
 ### D5. Remote retention, review and deletion responsibility
 
-- **PROPOSED default:** Safe-event export lines are retained 14 days, matching `EVENT_RETENTION_SECONDS` (`diagnostics.py:24`). Client-report export lines are retained 7 days, matching the stored report retention (`client_reports.py:15`); a 14-day copy would extend it. The Home owner is the sole reviewer, through the host filesystem and the existing admin-authenticated diagnostics status, plus Grafana per D6 if approved; no new Home review route. Deletion is by the retention sweep (delete whole rotated files past each class's retention) or explicit owner deletion of the directory; a sweep result is logged as a count only. Incident bundles are out of scope (they keep their separate 7-day rule).
+- **APPROVED default (2026-10-08):** Safe-event export lines are retained 14 days, matching `EVENT_RETENTION_SECONDS` (`diagnostics.py:24`). Client-report export lines are retained 7 days, matching the stored report retention (`client_reports.py:15`); a 14-day copy would extend it. The Home owner is the sole reviewer, through the host filesystem and the existing admin-authenticated diagnostics status, plus Grafana per D6 if approved; no new Home review route. Deletion is by the retention sweep (delete whole rotated files past each class's retention) or explicit owner deletion of the directory; a sweep result is logged as a count only. Incident bundles are out of scope (they keep their separate 7-day rule).
 - **Rationale:** Same retention class and responsibility as the data already kept locally; no new data class and no new reader.
 - **Alternatives:** shorter (7 days) to match incidents; longer for incident forensics (requires owner policy change); a named off-host reviewer with a documented erasure procedure (needed only if D1 changes to a remote receiver).
 
-### D6. Grafana review path (PROPOSED, awaiting owner approval)
+### D6. Grafana review path (APPROVED direction 2026-10-08; shipper detail blocked on ops)
 
 Owner requirement 2026-10-08: the owner wants to review diagnostics logs and events, including the opted-in client reports that surfaces send automatically, in Grafana. Repo and household-note findings: Grafana, Prometheus, Loki and Alloy run on the household `ops` host (`deploy/ops/README.md:3`); Home exposes Prometheus metrics (`observability/README.md`) and has two dashboards that use no `hermes_home_diagnostics_*` series; no Home data goes to Loki today. Client reports sit only in the `client_diagnostic_reports` SQLite table (`client_reports.py:288-292`), viewable only in the signed-in `/pair` page (`application.py:1025`), and today only iOS (opt-in) sends them automatically; Android is manual Share only, and TUI, browser and ESP32 surfaces have no sender.
 
-- **PROPOSED default:** (1) Prometheus counters and dashboard panels first (repo-only, no ops access). (2) For row-level review, keep the local JSONL as the source of truth and ship it with an Alloy `loki.source.file` to `loki.write` shipper on CaticornQueen. (3) Client reports are written to the same export area (AC-11) so one shipper covers both record types.
+- **APPROVED default (2026-10-08):** (1) Prometheus counters and dashboard panels first (repo-only, no ops access). (2) For row-level review, keep the local JSONL as the source of truth and ship it with an Alloy `loki.source.file` to `loki.write` shipper on CaticornQueen. (3) Client reports are written to the same export area (AC-11) so one shipper covers both record types.
 - **Rationale:** Counters are cheapest and need no new service. The shipper keeps the file as the truth and follows the household plan to redact at the collector rather than at query time.
 - **Alternatives:** Home pushes directly to Loki `/loki/api/v1/push` from an in-process collector (fewer moving parts, but adds a network dependency and drops the local source of truth); a JSON-file Grafana datasource (poor fit); keep the `/pair` viewer only (does not meet the Grafana goal).
-- **Unknown, needs ops confirmation:** Loki push URL, auth and tenant, Loki retention, whether the ops Alloy `hermes-home` snippet (`deploy/ops/hermes-home.alloy`) is applied, and whether the Home dashboards are provisioned in the live Grafana.
+- **Blocked on ops (unknown, cannot be read without host access):** Loki push URL, auth and tenant, Loki retention, whether the ops Alloy `hermes-home` snippet (`deploy/ops/hermes-home.alloy`) is applied, and whether the Home dashboards are provisioned in the live Grafana.
 - **Privacy and ACL:** the shipper needs read access to the protected export directory (today SYSTEM modify, Administrators read). Use a dedicated read-only account or document SYSTEM. Client reports are already content-free and closed-vocabulary (`client_reports.py:118-190`), stored 7 days (`client_reports.py:15`).
 
-Changes to D1-D5 implied by D6 (all PROPOSED): D1 and D2 add `client_report` as a second record type with a `record_type` field; D3 adds Loki auth and tailnet-only transport only if a shipper or direct push is chosen; D4 requires that a failed export of a client report never affects intake; D5 sets client-report copies to 7 days (matching `client_reports.py:15`) and safe-event copies to 14 days.
+Changes to D1-D5 implied by D6 (all APPROVED 2026-10-08): D1 and D2 add `client_report` as a second record type with a `record_type` field; D3 adds Loki auth and tailnet-only transport only if a shipper or direct push is chosen; D4 requires that a failed export of a client report never affects intake; D5 sets client-report copies to 7 days (matching `client_reports.py:15`) and safe-event copies to 14 days.
 
 ### Cheapest path
 
@@ -99,13 +99,13 @@ D1-D5 defaults are the cheapest for the safe-event export: one new in-process ad
 4. **Queue and drop reporting.** Keep `queued_event_count`, `dropped_event_count` and `collector_reachable` truthful. Add an upload-attempt metric series (attempts, success, failure, last attempt time), since none exists today (PR #88: "no upload-attempt metric series"). Distinguish "evicted before upload" from "evicted after upload" in status or metrics, since the current single counter does not.
 5. **Configuration and docs.** Document the export directory, ACL, retention, rotation and status semantics in the runbook and README; update validation records.
 6. **Tests** (code stories only; none in this spec PR): adapter ack exactness and idempotent replay; fsync-before-ack ordering; failure and timeout leaving the queue intact; no content or unknown field emitted; bounded batch and shutdown; not-configured status; metric series; runtime wiring and close ordering.
-7. **Client-report sink and intake metrics (PROPOSED).** Add a bounded sink so accepted client reports (`ClientReportStore.receive`, `client_reports.py:559`) are also written to the export area, and add counters for received, rejected-by-reason, rate-limited and retained-by-platform reports. Today intake emits no metrics (`application.py:1998-2005` excludes it from request accounting).
-8. **Dashboard panels (PROPOSED).** Add panels for `hermes_home_diagnostics_*` (queue depth, collector state, last upload, uploads by outcome, drops) and the new client-report counters to the versioned dashboards in `observability/grafana/dashboards/`. No current panel uses any `hermes_home_diagnostics_*` series.
-9. **Grafana log shipper (PROPOSED, only if D6 selects it).** Document, and provide as repo artifacts, the Alloy/Promtail configuration or direct Loki adapter chosen in D6. Applying it on CaticornQueen or `ops` is an owner-approved ops step, not part of the code PR.
+7. **Client-report sink and intake metrics (APPROVED).** Add a bounded sink so accepted client reports (`ClientReportStore.receive`, `client_reports.py:559`) are also written to the export area, and add counters for received, rejected-by-reason, rate-limited and retained-by-platform reports. Today intake emits no metrics (`application.py:1998-2005` excludes it from request accounting).
+8. **Dashboard panels (APPROVED).** Add panels for `hermes_home_diagnostics_*` (queue depth, collector state, last upload, uploads by outcome, drops) and the new client-report counters to the versioned dashboards in `observability/grafana/dashboards/`. No current panel uses any `hermes_home_diagnostics_*` series.
+9. **Grafana log shipper (APPROVED as repo artifact only).** Document, and provide as repo artifacts, the Alloy/Promtail configuration or direct Loki adapter chosen in D6. Applying it on CaticornQueen or `ops` is an owner-approved ops step, not part of the code PR.
 
 ## Acceptance criteria
 
-- **AC-1 Owner approval gate.** D1-D6 are explicitly approved or amended by the owner, and the approved values are recorded in this file replacing "PROPOSED" markers before any code merges.
+- **AC-1 Owner approval gate.** Satisfied 2026-10-08: D1-D5 approved as proposed, D6 approved in direction. The Loki endpoint, auth and tenant (ops-owned) must still be recorded before the shipper is applied.
 - **AC-2 Honest not-configured.** With no collector configured, status and metrics report `not configured` (a distinct, documented state), never `collector_reachable=true`, and the queue does not present as a permanently growing failure. Existing missing-collector behavior (`diagnostics.py:830-832`) stays truthful for the injected-port case.
 - **AC-3 Wired and draining.** In a deployed runtime with the exporter configured, the pending queue drains, `last_successful_upload_at` becomes non-null, upload-attempt metrics appear, and the 4096-event backlog observed in PR #88 is exported or its bounded loss is counted.
 - **AC-4 Exactness and idempotency.** Acknowledgement key and ordered IDs match the request; a replayed key adds no duplicate export record; a mismatched acknowledgement is treated as failure.
@@ -118,8 +118,8 @@ D1-D5 defaults are the cheapest for the safe-event export: one new in-process ad
   - Deployment evidence (installed provenance, wheel/source fingerprint, exporter status snapshot) is recorded by the deploying operator in the two NW-06 validation files.
   - Stored receive/resolve assertions and manual Android Share are not accepted as substitutes (PR #88).
 - **AC-9 Tracker.** Only after AC-1 to AC-11 are met may the two children move from `review` to `done`, by owner acceptance, recorded in `sprint-status.yaml` and `story-index.yaml`.
-- **AC-10 Grafana review (PROPOSED, depends on D6).** The owner can see, in the household Grafana, upload and queue status for the safe-event exporter and intake counts for client reports (Prometheus path), and, if D6 approves a log shipper, at least one real client report and one real safe event as log lines. No device ID, launch ID, report ID or correlation ID is used as a metric or log label.
-- **AC-11 Client reports in the export (PROPOSED).** Each accepted client report is written once to the protected export area with `record_type=client_report`, its stored payload, `device_id` and `received_at`. A failed sink write never changes the client's intake response, rate limiting, or stored report. Export copies expire at 7 days.
+- **AC-10 Grafana review (APPROVED).** The owner can see, in the household Grafana, upload and queue status for the safe-event exporter and intake counts for client reports (Prometheus path), and, if D6 approves a log shipper, at least one real client report and one real safe event as log lines. No device ID, launch ID, report ID or correlation ID is used as a metric or log label.
+- **AC-11 Client reports in the export (APPROVED).** Each accepted client report is written once to the protected export area with `record_type=client_report`, its stored payload, `device_id` and `received_at`. A failed sink write never changes the client's intake response, rate limiting, or stored report. Export copies expire at 7 days.
 
 ## Dependencies and non-goals
 
@@ -128,4 +128,4 @@ D1-D5 defaults are the cheapest for the safe-event export: one new in-process ad
 
 ## Readiness
 
-Draft. Blocked on owner approval of D1-D6. No implementation, deployment or runtime acceptance is claimed.
+Ready for development of tasks 1-8. D6 decision record: option C (Alloy `loki.source.file` to `loki.write` tailing the local JSONL) is the default; option B (direct Loki push) is used only if ops makes C impractical. Blocked on ops (host access not available): Loki push URL, auth and tenant, whether the ops Alloy `hermes-home` snippet is applied, and Loki retention. Also pending: deployment and real-device captures (AC-8). No deployment or runtime acceptance is claimed.
