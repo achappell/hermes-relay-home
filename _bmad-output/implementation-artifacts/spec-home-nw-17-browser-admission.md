@@ -27,7 +27,7 @@ What already works and needs no change: `POST /api/v1/client-claims` (new sessio
 ## Proposed contract change (minimal)
 
 - **H1. `browser` endpoint kind.** Add `browser` to `CLIENT_ENDPOINT_TYPES` so a browser appliance can be enrolled, approved on `/pair`, and hold `client_claim` grants. It follows the personal-client rules: no Room, no wake mapping, opaque `grant_id`s, per-device claim limit. The pairing page shows the type; the existing `personal_client` flag (`api/pairing.py:231-232`) needs a wording check because a shared display is not personal.
-- **H2. Not an owner approver.** A `browser` device holds grants and claims but is excluded from `pending_owner_grants`, `decide_owner_grant`, and the approver side of `profile_holders` (it may still appear in other holders' lists). Its own grants to owned Profiles follow the existing `pending_owner` flow, approved by a non-browser holder, with the recorded first-device bootstrap unchanged (`credentials.py:1180-1215`).
+- **H2. Not an owner approver (APPROVED 2026-10-08).** A browser device may hold grants and claims but is excluded from `pending_owner_grants`, `decide_owner_grant`, and the approver side of `profile_holders` (it may still appear in other holders' lists). Its own grants to owned Profiles follow the existing `pending_owner` flow and are approved through existing Home administration tools by a non-browser holder; the recorded first-device bootstrap remains unchanged (`credentials.py:1180-1215`). This approval does not approve H1 (`browser` endpoint kind), H3 (storage attestation), H5 (self-health), or implementation/deployment.
 - **H3. Storage attestation for a service-hosted appliance.** Accept one additional `secure_storage` value, for example `service_private_file`, only when `type == "browser"`. The pairing page shows it before approval. All other kinds keep `platform_secure_store`. Alternative: the appliance uses Secret Service on its host if it exists (**UNKNOWN**), which would need no Home change.
 - **H4. Capabilities.** A `browser` credential is issued `client_claim` only; `sensitive_entry` and `consequence_confirm` stay omitted, so structured secret/sudo prompts are unavailable to the shared display, matching the browser UI's own limit (TUI `docs/ops-web-deployment.md:35-38`). Add a test, not new behaviour.
 - **H5 (optional, separable). Self-health for a roomless client device.** Let a `browser` device with `health_view` read its own health (the four-stage projection), so an appliance can show Standard-readiness without creating a Standard session. If H5 is not approved, the appliance reports Home reachability and credential state only, and Standard outages are visible through Home's existing diagnostics and metrics.
@@ -39,7 +39,7 @@ What already works and needs no change: `POST /api/v1/client-claims` (new sessio
 Every remaining design choice below is **PROPOSED**.
 
 1. **H1. `browser` kind.** Add the `browser` kind rather than pair the appliance as `tui`. **PROPOSED:** add `browser`; the `tui` route works today but mislabels a shared display and makes it an owner approver (H2).
-2. **H2 owner-approver exclusion.** **PROPOSED:** yes, for `browser` only.
+2. **H2 owner-approver exclusion (APPROVED 2026-10-08).** A browser appliance is never able to approve other devices' access; grant approvals remain in existing Home administration tools. This does not approve H1, H3, H5, or implementation/deployment.
 3. **H3 attestation.** **PROPOSED:** add `service_private_file`, `browser` only. Needs an owner decision because it changes the pairing rule "platform secure store" for one kind (`HOME-NW-17` spec `:294`).
 4. **H5 self-health.** **PROPOSED:** include as a separate slice after H1-H4; defer if cost is high.
 5. **Naming.** **PROPOSED:** keep `HOME-NW-17-browser-admission` (child of the personal-client admission story, epic 3) instead of reserving a new `NW-19`.
@@ -48,7 +48,7 @@ Every remaining design choice below is **PROPOSED**.
 
 - A `browser` enrollment is approved on the pairing page with only `client_claim`; any other capability or an attempt to carry `wake_claim`/`touch_claim` is refused.
 - The appliance is paired once; it can list and use all grants Home authorizes for that appliance, including newly approved Profile grants. Browser tabs/connections make separate client claims for fresh conversations; they do not pair separately or sign in.
-- A `browser` device cannot list pending owner grants or approve/reject one.
+- A browser device cannot list pending owner grants or approve/reject any grant; these approval actions remain available through existing Home administration tools only.
 - Revoking the device or an owned grant closes its claims, as for other clients.
 - A `browser` device receives `forbidden`/unavailable for protected prompts (`sensitive_entry`, `consequence_confirm`).
 - The attestation value is shown on the page and rejected for every other kind.
