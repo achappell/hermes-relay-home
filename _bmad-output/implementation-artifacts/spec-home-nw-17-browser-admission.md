@@ -9,13 +9,13 @@ github_issue: https://github.com/achappell/hermes-relay-home/issues/101
 
 # Admit the production W/K browser appliance as a Home client
 
-**Status: draft stub. Nothing here is approved and no implementation is claimed.** Every item below is a `PROPOSED` default for the owner. Tracker: `home-nw-17-browser-admission`, `backlog`. This is a Home-only record (`AGENTS.md`); it changes no TUI, iOS or Android file. The consuming story is the TUI repository's `WK-HOME-01` ("Migrate the production W/K browser and iPad appliance to HomeBridge"), whose draft spec is in the TUI docs PR for the same change; its status stays with the TUI tracker.
+**Status: draft stub.** Nothing here is approved beyond the owner decisions dated 2026-10-08 below; no implementation is claimed. Remaining design choices are `PROPOSED`. Tracker: `home-nw-17-browser-admission`, `backlog`. This is a Home-only record (`AGENTS.md`); it changes no TUI, iOS or Android file. The consuming story is the TUI repository's `WK-HOME-01` ("Migrate the production W/K browser and iPad appliance to HomeBridge"), whose draft spec is in the TUI docs PR for the same change; its status stays with the TUI tracker.
 
 Evidence tags: **[FACT]** cites a file and line on `origin/main` (`71539fc`). **[INFERENCE]** is my conclusion. **UNKNOWN** is not established by any artifact I could read.
 
 ## Why Home needs a story
 
-The production browser appliance is a server-side process on the Ops host that serves several unauthenticated browsers. The TUI repository wants it to use Home like any other client: pair once, hold Profile grants, and make one client claim per browser connection. Home has the mechanism but not the vocabulary:
+The production browser appliance is a server-side process on the Ops host that serves several browsers reachable only over the household Tailscale network, not the public Internet. The TUI repository wants it to use Home like any other client: pair the appliance once, hold grants for every Home-authorized Profile, and make one independent client claim per browser tab/connection. No browser sign-in is provided; anyone reaching the page can use those authorized Profiles. Home has the mechanism but not the vocabulary:
 
 - **No browser or display kind.** `CLIENT_ENDPOINT_TYPES = {"tui","ios","macos","android"}` (`src/hermes_home/domain/credentials.py:39`). `client_claim` is refused for any other type (`credentials.py:604-611`) and the pairing page refuses to approve any other type (`api/pairing.py:345`). A grep of `src/hermes_home` for `browser`/`kiosk` finds only an Origin check (`api/pairing.py:427`).
 - **Every grant holder is an owner approver.** `pending_owner_grants`, `decide_owner_grant` and `profile_holders` select approvers by holding an active grant for the Profile and never read the device type (`credentials.py:1011-1075`; rule at `HOME-NW-17` spec `:48`). A shared kitchen display holding the Amanda grant could therefore approve other devices' grants to that Profile if its credential were used for that call.
@@ -34,20 +34,25 @@ What already works and needs no change: `POST /api/v1/client-claims` (new sessio
 
 ## Owner decisions
 
-1. **Add the `browser` kind (H1), or pair the appliance as `tui` with no Home change?** **PROPOSED:** add `browser`. The `tui` route works today but mislabels a shared display and makes it an owner approver (H2).
+**Approved 2026-10-08:** pair the appliance once, not once per browser; the one appliance Device holds grants for all Home-authorized Profiles, including new Profiles when their grants are approved; no separate browser sign-in, so anyone reaching the page can use those authorized Profiles; household Tailscale access only, not public, including WebSocket/backend bypass protection; each reload or reconnect starts a fresh conversation without automatic replay, and tabs are independent.
+
+Every remaining design choice below is **PROPOSED**.
+
+1. **H1. `browser` kind.** Add the `browser` kind rather than pair the appliance as `tui`. **PROPOSED:** add `browser`; the `tui` route works today but mislabels a shared display and makes it an owner approver (H2).
 2. **H2 owner-approver exclusion.** **PROPOSED:** yes, for `browser` only.
-3. **H3 attestation.** **PROPOSED:** add `service_private_file`, `browser` only. Needs an owner decision because it weakens the wording of the pairing rule "platform secure store" for one kind (`HOME-NW-17` spec `:294`).
+3. **H3 attestation.** **PROPOSED:** add `service_private_file`, `browser` only. Needs an owner decision because it changes the pairing rule "platform secure store" for one kind (`HOME-NW-17` spec `:294`).
 4. **H5 self-health.** **PROPOSED:** include as a separate slice after H1-H4; defer if cost is high.
 5. **Naming.** **PROPOSED:** keep `HOME-NW-17-browser-admission` (child of the personal-client admission story, epic 3) instead of reserving a new `NW-19`.
 
 ## Acceptance (for when the owner approves)
 
 - A `browser` enrollment is approved on the pairing page with only `client_claim`; any other capability or an attempt to carry `wake_claim`/`touch_claim` is refused.
-- A `browser` device can list grants, make client claims (new session), close them, and list and close its own claims; nothing returns a Profile ID, Standard Session ID or handle other than the claim's own handle.
+- The appliance is paired once; it can list and use all grants Home authorizes for that appliance, including newly approved Profile grants. Browser tabs/connections make separate client claims for fresh conversations; they do not pair separately or sign in.
 - A `browser` device cannot list pending owner grants or approve/reject one.
 - Revoking the device or an owned grant closes its claims, as for other clients.
 - A `browser` device receives `forbidden`/unavailable for protected prompts (`sensitive_entry`, `consequence_confirm`).
 - The attestation value is shown on the page and rejected for every other kind.
+- The deployed browser page and WebSocket are household-Tailscale-only; neither they nor appliance backend routes are publicly reachable or directly accessible through a proxy/backend bypass.
 - Existing `tui`, `ios`, `macos` and `android` behaviour and tests are unchanged.
 
 ## Code map (expected, from existing files)
@@ -61,7 +66,7 @@ What already works and needs no change: `POST /api/v1/client-claims` (new sessio
 
 ## Risks
 
-- A shared display holding an owned-Profile grant is a standing credential on an unauthenticated browser surface; H2 removes the approver power but not the conversation access.
+- A shared display holding an owned-Profile grant is a standing credential usable by anyone reaching its page; H2 removes the approver power but not the conversation access. Tailscale-only household reachability is the access boundary, not per-user browser authentication; public access and proxy/backend bypass are prohibited.
 - Adding a kind and an attestation value widens the contract; both stay `browser`-only to avoid changing personal-client rules.
 - The appliance's concurrency (default 8 browser sockets) shares Home's per-device claim limit (default 8, `bridge/production.py:53`; `runtime.py:232`); Home does not expose that limit to a device (**UNKNOWN**), so sizing is a deploy-time check in the TUI story.
 
