@@ -9,7 +9,7 @@ github_issue: https://github.com/achappell/hermes-relay-home/issues/89
 
 # Deployed safe-event exporter
 
-**Status: review.** Repo-only tasks 1-8 are implemented and locally verified (see the implementation record at the end). Deployed acceptance, the Loki shipper, and real-device captures remain pending owner-approved steps; none is claimed.
+**Status: review.** Repo-only tasks 1-8 are implemented, locally verified, and deployed to CaticornQueen (`d3d816a`), with the Alloy v1.20.1 shipper running and the export in Loki (evidence in [validation-home-nw-06-diagnostics-exporter.md](validation-home-nw-06-diagnostics-exporter.md)). Real-device captures (AC-8) and the owner's Grafana review (AC-10) remain pending; neither is claimed.
 
 ## Owner decision (recorded)
 
@@ -134,7 +134,7 @@ Ready for development of tasks 1-8. D6 decision record: option C (Alloy `loki.so
 
 Implemented on `feat/home-nw-06-diagnostics-exporter` (stacked on the approved spec). Evidence: [validation-home-nw-06-diagnostics-exporter.md](validation-home-nw-06-diagnostics-exporter.md).
 
-Where the code lives: `src/hermes_home/observability/export.py` (store, `FileEventCollector`, `ClientReportExporter`, `ExportScheduler`, `DiagnosticsExport`); runtime wiring in `src/hermes_home/runtime.py`; status, eviction split and metrics in `observability/diagnostics.py`, `storage/diagnostics.py`, `observability/metrics.py`; report sink, conflict type and retained counts in `observability/client_reports.py`; intake counters in `api/application.py`; dashboards in `observability/grafana/dashboards/hermes-home-diagnostics*.json`; shipper placeholder `deploy/windows/hermes-home-export.alloy`.
+Where the code lives: `src/hermes_home/observability/export.py` (store, `FileEventCollector`, `ClientReportExporter`, `ExportScheduler`, `DiagnosticsExport`); runtime wiring in `src/hermes_home/runtime.py`; status, eviction split and metrics in `observability/diagnostics.py`, `storage/diagnostics.py`, `observability/metrics.py`; report sink, conflict type and retained counts in `observability/client_reports.py`; intake counters in `api/application.py`; dashboards in `observability/grafana/dashboards/hermes-home-diagnostics*.json`; Alloy shipper config `deploy/windows/hermes-home-export.alloy` (validated with Alloy v1.20.1 and deployed; see the validation record).
 
 Deviations and additions to the approved defaults (all additive; none changes a D1-D6 decision):
 
@@ -147,4 +147,4 @@ Deviations and additions to the approved defaults (all additive; none changes a 
 7. **Status JSON gained** `collector_configured`, `collector_state` and `dropped_unuploaded_event_count`. `collector_reachable` is forced false when no collector is configured, even if SQLite holds an older true.
 8. The installer and `run.ps1` are unchanged; the operator sets `HERMES_HOME_EXPORT_DIR`.
 
-Still pending and not claimed: AC-3 and AC-4 on a deployed runtime, AC-6 scan on deployed data, AC-7 sweep on real aged files, AC-8 real-device captures, AC-10 Grafana review (needs the Loki endpoint, authentication and tenant from ops, and the shipper applied), and any deployment. The Alloy snippet has not been validated with the Alloy binary.
+Deployment status (2026-10-08): deployed to CaticornQueen at `d3d816a`; the snippet was validated with Alloy v1.20.1 (PR #93) and runs as `NT SERVICE\Alloy`, pushing to the household Loki, which has no authentication or tenant. The record shows AC-3 (queue drained) and AC-6 (export scan) observed on the deployed host for safe events; AC-4 idempotent replay was exercised only in the local smoke. Still pending and not claimed: AC-4 on the host, AC-7 sweep on real aged files, AC-8 real-device captures, AC-10 Grafana review, and the first exported client-report line on the host.
