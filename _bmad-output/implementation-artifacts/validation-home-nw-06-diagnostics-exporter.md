@@ -187,6 +187,26 @@ The existing 1.9 MB file was ingested once at first start, stamped with ingestio
 
 Note: processes in a non-elevated `achap` desktop session no longer read `HermesHome` (Windows filters the Administrators token); elevated sessions and SSH are unaffected.
 
+## Grafana review (AC-10) — 2026-10-08, partial
+
+**Datasources and import.** Owner imported the two Home dashboards (`hermes-home-diagnostics` and `hermes-home-diagnostics-logs`) into the household Grafana instance (grafana.chappell-home.dev) using the existing Loki datasource (uid `P8E80F9AEF21F6940`, http://loki:3100) and Prometheus datasource (uid `PBFA97CFB590B2093`, http://prometheus:9090). Both datasources are healthy. The dashboards were imported by hand in the Grafana UI (not provisioned from the repository), and the stored dashboard JSON retains the datasource variables `${DS_PROMETHEUS}` and `${DS_LOKI}`.
+
+**Owner observations (by eye; no screenshots captured).** The owner reports seeing numbers displayed in the panels when viewing the Grafana dashboards.
+
+**API checks (read-only, 2026-10-08 ~14:00 host time).** A worker queried the Loki and Prometheus APIs using a Viewer-scope service-account token on behalf of this record:
+
+| Datasource | Query | Result |
+| --- | --- | --- |
+| Loki | `sum by (record_type) (count_over_time({job="hermes-home-export",host="caticornqueen"}[24h]))` | safe_event 4,105; batch_ledger 21; client_report none |
+| Prometheus | `up{job="hermes-home"}` | 1 |
+| Prometheus | `hermes_home_diagnostics_collector_configured` | 1 |
+| Prometheus | `hermes_home_diagnostics_queue_depth` | 0 |
+| Prometheus | `hermes_home_diagnostics_uploads_total` | series present |
+
+**AC-10 acceptance status: not met.** AC-10 requires the owner to see a real client report and a real safe event in Grafana. Safe events are visible (4,105 lines in Loki over 24h). **No client_report record has been exported**: no iOS or macOS client has reported to Home since the 2026-10-08 10:12 CDT cutover; the client-report panels in Grafana are empty. AC-8 real-device captures are also still open. Both HOME-NW-06 children (`home-nw-06-client-reports`, `home-nw-06-connection-diagnostics`) and the exporter story remain `review`.
+
+**Operational note:** A service-account token exposure was identified and the token was rotated by the owner. No token value or prefix is recorded here.
+
 ### Still not claimed
 
 AC-8 real-device captures (attributed Apple and Android automatic uploads, one real dropped-connection capture), AC-10 Grafana review (a Loki datasource, dashboard import and the owner's own review are not done), the first exported client-report line on the host, an Alloy service restart (positions are now known to follow the file; the restart itself was not exercised), and the sweep on aged files. Both HOME-NW-06 children remain `review`; the exporter story remains `review`.
