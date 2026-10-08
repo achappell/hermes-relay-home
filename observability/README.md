@@ -35,6 +35,59 @@ upload remain injected ports until the final encrypted store and trusted
 review roles are selected. A failed turn never uploads incident evidence by
 itself.
 
+## Safe-event and client-report export
+
+Set `HERMES_HOME_EXPORT_DIR` to enable the local export. Home then writes
+append-only JSONL files that are `fsync`-ed before a batch is acknowledged:
+
+- `safe-events.<UTC day>.<seq>.jsonl` holds `record_type` `safe_event` lines
+  (the same fields as `DiagnosticEvent.to_dict()`) and one `batch_ledger` line
+  per upload batch carrying its idempotency key and event IDs. Replaying a
+  batch with a remembered key writes nothing again. Retention is 14 days.
+- `client-reports.<UTC day>.<seq>.jsonl` holds one `client_report` line per newly
+  accepted opted-in client report (`device_id`, `received_at` and the stored
+  payload). A failed or blocked export never changes the client's response,
+  rate limit or stored report. Retention is 7 days, matching the stored table.
+
+Files roll by size (4 MiB) and by UTC day, at most 8 per stream, and a sweep
+deletes a file only once every line it could hold is past retention. Files are
+created owner-only; on Windows protect the directory with the same DACL as the
+operational diagnostics directory. `HERMES_HOME_EXPORT_INTERVAL_SECONDS`
+(default 30, 1 to 3600) sets the drain cadence. Drain batches are at most 256
+events and 1 MiB, run on their own thread, and back off from 30 seconds to 15
+minutes with jitter after a failure. Shutdown does one final drain bounded to
+about two seconds.
+
+With no `HERMES_HOME_EXPORT_DIR`, status reports `collector_configured: false`
+and `collector_state: "not_configured"`, `hermes_home_diagnostics_collector_configured`
+is `0`, `collector_reachable` is never true, and no upload attempt is counted.
+With it set, `collector_state` is `reachable` or `unreachable` (events are queued
+and the last attempt did not succeed) or `idle` (nothing queued). It describes the
+last export attempt and means the local export store acknowledged the write, not
+that a remote collector is up. `dropped_unuploaded_event_count` counts events
+evicted from the bounded 4096-event queue before they were exported.
+
+Added metrics (labels never include device, report, launch or correlation IDs):
+
+- `hermes_home_diagnostics_collector_configured`,
+  `hermes_home_diagnostics_export_last_attempt_timestamp_seconds`,
+  `hermes_home_diagnostics_events_evicted_total{state}`
+- `hermes_home_export_records_written_total{record_type}`,
+  `hermes_home_export_write_failures_total{record_type}`,
+  `hermes_home_export_records_dropped_total{record_type,reason}`,
+  `hermes_home_export_files_removed_total{record_type,reason}`
+- `hermes_home_client_reports_total{outcome,platform}` for accepted, duplicate,
+  invalid, conflict, rate_limited, unauthorized and storage_error intake, and
+  `hermes_home_client_reports_retained{platform}`, refreshed on each scrape.
+
+The provisionable dashboards
+[`hermes-home-diagnostics.json`](grafana/dashboards/hermes-home-diagnostics.json)
+(Prometheus) and
+[`hermes-home-diagnostics-logs.json`](grafana/dashboards/hermes-home-diagnostics-logs.json)
+(Loki) cover these series and the exported lines. The logs dashboard needs the
+Loki shipper in [`../deploy/windows/hermes-home-export.alloy`](../deploy/windows/hermes-home-export.alloy),
+which is a documented placeholder that is not applied.
+
 ## Scrape
 
 Run Prometheus where it can reach the Home service and configure the admin

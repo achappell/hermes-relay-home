@@ -1,0 +1,60 @@
+// Ship the Home local JSONL export (safe events and client reports) to Loki.
+//
+// NOT APPLIED. This file is a reviewed repo artifact only. It has not been
+// installed on CaticornQueen or `ops`, and it has not been validated with the
+// Alloy binary. The local JSONL files remain the source of truth; this
+// shipper only reads them.
+//
+// Blocked on ops (owner-held, not discoverable from this repo):
+//   * the Loki push URL, supplied through the environment variable below;
+//   * the Loki authentication scheme and tenant (add them to the endpoint
+//     block once ops decides; no credential belongs in this file);
+//   * Loki retention (the export is kept 14 days for safe events and 7 days
+//     for client reports on the Home host).
+//
+// Run Alloy on CaticornQueen as a read-only account that can read the export
+// directory only. Set HERMES_HOME_LOKI_PUSH_URL (for example
+// https://<loki-host>/loki/api/v1/push) in that service's environment.
+//
+// Loki receives line ingestion time. Only `job`, `host` and `record_type`
+// become labels. Device, report, launch and correlation identifiers stay in
+// the log line body and must never be promoted to labels.
+
+local.file_match "hermes_home_export" {
+  path_targets = [
+    {
+      "__path__" = "C:/ProgramData/HermesHome/diagnostics/export/safe-events.*.jsonl",
+      "job"      = "hermes-home-export",
+      "host"     = "caticornqueen",
+    },
+    {
+      "__path__" = "C:/ProgramData/HermesHome/diagnostics/export/client-reports.*.jsonl",
+      "job"      = "hermes-home-export",
+      "host"     = "caticornqueen",
+    },
+  ]
+  sync_period = "15s"
+}
+
+loki.source.file "hermes_home_export" {
+  targets    = local.file_match.hermes_home_export.targets
+  forward_to = [loki.process.hermes_home_export.receiver]
+}
+
+loki.process "hermes_home_export" {
+  forward_to = [loki.write.household.receiver]
+
+  stage.json {
+    expressions = { record_type = "record_type" }
+  }
+
+  stage.labels {
+    values = { record_type = "" }
+  }
+}
+
+loki.write "household" {
+  endpoint {
+    url = env("HERMES_HOME_LOKI_PUSH_URL")
+  }
+}

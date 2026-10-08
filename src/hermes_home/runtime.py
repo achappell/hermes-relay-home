@@ -28,6 +28,7 @@ from hermes_home.observability.diagnostics import (
     DiagnosticsRecorder,
     QueuedDiagnosticsRecorder,
 )
+from hermes_home.observability.export import DiagnosticsExport
 from hermes_home.observability.metrics import MetricsRegistry
 from hermes_home.storage.credentials import SQLiteCredentialStore
 from hermes_home.storage.diagnostics import SQLiteDiagnosticsStore
@@ -64,6 +65,8 @@ class RuntimeSettings:
     client_reconnect_grace_seconds: float = 120.0
     diagnostics_dir: Path | None = None
     diagnostics_proxy_link: bool = False
+    export_dir: Path | None = None
+    export_interval_seconds: int = 30
 
     @property
     def auth_mode(self) -> str:
@@ -91,6 +94,7 @@ class HomeRuntime:
     transport_log_handler: SafeTransportLogHandler | None = field(
         default=None, repr=False
     )
+    export: DiagnosticsExport | None = field(default=None, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
 
     def close(self) -> None:
@@ -108,6 +112,8 @@ class HomeRuntime:
         if self.transport_log_handler is not None:
             logging.getLogger("websockets").removeHandler(self.transport_log_handler)
             self.transport_log_handler.close()
+        if self.export is not None:
+            self.export.close()
         self.diagnostics.close(timeout=0.1)
         self.operational_diagnostics.close(timeout=0.1)
         if self.credential_store is not None:
@@ -204,6 +210,18 @@ def load_settings(
     if proxy_link_value not in {"0", "1"}:
         raise RuntimeConfigurationError("proxy diagnostic link setting must be 0 or 1")
     diagnostics_proxy_link = proxy_link_value == "1"
+    export_dir_value = values.get("HERMES_HOME_EXPORT_DIR", "").strip()
+    export_dir = (
+        _path_value(export_dir_value, default=None, name="export directory")
+        if export_dir_value
+        else None
+    )
+    export_interval_seconds = _bounded_int_value(
+        values.get("HERMES_HOME_EXPORT_INTERVAL_SECONDS", "30"),
+        name="export interval",
+        minimum=1,
+        maximum=3600,
+    )
     if diagnostics_proxy_link and not standard_configured:
         raise RuntimeConfigurationError(
             "proxy diagnostic link requires a configured local proxy gateway"
@@ -265,6 +283,8 @@ def load_settings(
         client_reconnect_grace_seconds=client_reconnect_grace_seconds,
         diagnostics_dir=diagnostics_dir,
         diagnostics_proxy_link=diagnostics_proxy_link,
+        export_dir=export_dir,
+        export_interval_seconds=export_interval_seconds,
     )
 
 
@@ -296,6 +316,7 @@ def create_runtime(
     conversation_store = None
     operational_diagnostics: OperationalDiagnostics | None = None
     transport_log_handler: SafeTransportLogHandler | None = None
+    export: DiagnosticsExport | None = None
     server: ThreadingHTTPServer | None = None
     bridge_server = None
     credential_service: CredentialService | None = None
@@ -335,8 +356,17 @@ def create_runtime(
 
     try:
         diagnostics_store = SQLiteDiagnosticsStore(settings.database_path)
-        client_reports = ClientReportStore(settings.database_path)
         metrics = MetricsRegistry()
+        if settings.export_dir is not None:
+            export = DiagnosticsExport(
+                settings.export_dir,
+                metrics=metrics,
+                interval_seconds=settings.export_interval_seconds,
+            )
+        client_reports = ClientReportStore(
+            settings.database_path,
+            export_sink=export.reports.submit if export is not None else None,
+        )
         source_root = Path(__file__).parent.parent
         try:
             app_version = version("hermes-relay-home")
@@ -358,8 +388,11 @@ def create_runtime(
         recorder = DiagnosticsRecorder(
             store=diagnostics_store,
             metrics=metrics,
+            collector=export.collector if export is not None else None,
         )
         diagnostics = QueuedDiagnosticsRecorder(recorder)
+        if export is not None:
+            export.start(diagnostics)
 
         def resolve_credential_scope(device_id: str, generation: int):
             if credential_service is None:
@@ -487,6 +520,8 @@ def create_runtime(
         if transport_log_handler is not None:
             logging.getLogger("websockets").removeHandler(transport_log_handler)
             transport_log_handler.close()
+        if export is not None:
+            export.close()
         if diagnostics is not None:
             diagnostics.close(timeout=0.1)
         if operational_diagnostics is not None:
@@ -516,6 +551,7 @@ def create_runtime(
         bridge_server=bridge_server,
         bridge_thread=bridge_thread,
         transport_log_handler=transport_log_handler,
+        export=export,
     )
 
 

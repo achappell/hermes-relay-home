@@ -30,9 +30,45 @@ _METRIC_DEFINITIONS = {
         "gauge",
         "Currently observed active configuration revision.",
     ),
+    "hermes_home_client_reports_retained": (
+        "gauge",
+        "Unexpired client connection reports retained by Home, by platform.",
+    ),
+    "hermes_home_client_reports_total": (
+        "counter",
+        "Client connection report intake outcomes by outcome and platform.",
+    ),
+    "hermes_home_diagnostics_collector_configured": (
+        "gauge",
+        "Whether a diagnostics collector is configured (0 means not configured).",
+    ),
     "hermes_home_diagnostics_collector_reachable": (
         "gauge",
-        "Whether the configured diagnostics collector is reachable.",
+        "Whether the last diagnostics export attempt succeeded.",
+    ),
+    "hermes_home_diagnostics_events_evicted_total": (
+        "counter",
+        "Safe diagnostic events evicted by the bounded store, by upload state.",
+    ),
+    "hermes_home_diagnostics_export_last_attempt_timestamp_seconds": (
+        "gauge",
+        "Unix timestamp of the last diagnostics export attempt.",
+    ),
+    "hermes_home_export_files_removed_total": (
+        "counter",
+        "Export files removed by retention or file-count capacity.",
+    ),
+    "hermes_home_export_records_dropped_total": (
+        "counter",
+        "Export records dropped before being written.",
+    ),
+    "hermes_home_export_records_written_total": (
+        "counter",
+        "Records durably written to the local export store.",
+    ),
+    "hermes_home_export_write_failures_total": (
+        "counter",
+        "Failed local export store writes.",
     ),
     "hermes_home_diagnostics_events_dropped_total": (
         "counter",

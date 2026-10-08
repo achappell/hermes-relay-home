@@ -828,3 +828,189 @@ def test_load_settings_reads_and_bounds_client_claim_settings(tmp_path) -> None:
     ):
         with pytest.raises(RuntimeConfigurationError):
             load_settings({**base, name: value})
+
+
+def _export_environment(tmp_path, **extra):
+    token_file = tmp_path / "admin-token"
+    token_file.write_text("admin-secret", encoding="utf-8")
+    credentials = tmp_path / "devices.json"
+    credentials.write_text(json.dumps({"device-secret": "phone"}), encoding="utf-8")
+    return {
+        "HERMES_HOME_DATA_DIR": str(tmp_path / "data"),
+        "HERMES_HOME_ADMIN_TOKEN_FILE": str(token_file),
+        "HERMES_HOME_DEVICE_CREDENTIALS_FILE": str(credentials),
+        "HERMES_HOME_PORT": "0",
+        "HERMES_HOME_BRIDGE_PORT": "0",
+        **extra,
+    }
+
+
+def test_load_settings_reads_the_optional_export_settings(tmp_path) -> None:
+    export_dir = tmp_path / "export"
+    configured = load_settings(
+        _export_environment(
+            tmp_path,
+            HERMES_HOME_EXPORT_DIR=str(export_dir),
+            HERMES_HOME_EXPORT_INTERVAL_SECONDS="5",
+        )
+    )
+    blank = load_settings(_export_environment(tmp_path, HERMES_HOME_EXPORT_DIR="  "))
+    unset = load_settings(_export_environment(tmp_path))
+
+    assert configured.export_dir == export_dir
+    assert configured.export_interval_seconds == 5
+    assert blank.export_dir is None
+    assert unset.export_dir is None
+    assert unset.export_interval_seconds == 30
+
+
+@pytest.mark.parametrize("value", ["0", "3601", "fast"])
+def test_load_settings_rejects_an_invalid_export_interval(tmp_path, value) -> None:
+    with pytest.raises(RuntimeConfigurationError, match="export interval"):
+        load_settings(
+            _export_environment(
+                tmp_path,
+                HERMES_HOME_EXPORT_DIR=str(tmp_path / "export"),
+                HERMES_HOME_EXPORT_INTERVAL_SECONDS=value,
+            )
+        )
+
+
+def _request(runtime, method, path, headers, body=None):
+    host, port = runtime.server.server_address
+    connection = http.client.HTTPConnection(host, port)
+    connection.request(method, path, body=body, headers=headers)
+    response = connection.getresponse()
+    data = response.read()
+    connection.close()
+    return response.status, data
+
+
+def test_runtime_without_an_export_directory_reports_not_configured(tmp_path) -> None:
+    runtime = create_runtime(load_settings(_export_environment(tmp_path)))
+    thread = threading.Thread(target=runtime.server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, body = _request(
+            runtime,
+            "GET",
+            "/api/v1/diagnostics/status",
+            {"Authorization": "Bearer admin-secret"},
+        )
+        _, metrics = _request(
+            runtime, "GET", "/metrics", {"Authorization": "Bearer admin-secret"}
+        )
+
+        assert status == 200
+        payload = json.loads(body)
+        assert payload["collector_configured"] is False
+        assert payload["collector_state"] == "not_configured"
+        assert b"hermes_home_diagnostics_collector_configured 0" in metrics
+        assert runtime.export is None
+    finally:
+        runtime.server.shutdown()
+        runtime.close()
+        thread.join(timeout=2)
+
+
+def test_runtime_exports_safe_events_and_client_reports_and_closes_promptly(
+    tmp_path,
+) -> None:
+    import time
+    import uuid
+
+    export_dir = tmp_path / "export"
+    runtime = create_runtime(
+        load_settings(
+            _export_environment(
+                tmp_path,
+                HERMES_HOME_EXPORT_DIR=str(export_dir),
+                HERMES_HOME_EXPORT_INTERVAL_SECONDS="1",
+            )
+        )
+    )
+    thread = threading.Thread(target=runtime.server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        now = time.time()
+        report = {
+            "schema": 1,
+            "report_id": str(uuid.uuid4()),
+            "created_at": now,
+            "app_version": "0.5.0",
+            "build": "1",
+            "platform": "ios",
+            "os_version": "26.6.2",
+            "model": "iPhone18,1",
+            "events": [
+                {
+                    "time": now,
+                    "name": "connection_lost",
+                    "launch_id": str(uuid.uuid4()),
+                }
+            ],
+        }
+        status, _ = _request(
+            runtime,
+            "POST",
+            "/api/v1/client-diagnostics",
+            {"Authorization": "Device device-secret"},
+            json.dumps(report),
+        )
+        assert status == 200
+        runtime.diagnostics.record(
+            DiagnosticEvent.create(
+                correlation_id=runtime.diagnostics.new_correlation_id(),
+                source="home",
+                phase="turn",
+                outcome="unavailable",
+                occurred_at=runtime.diagnostics.now(),
+                failure_code="hermes_unavailable",
+            )
+        )
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            _, raw = _request(
+                runtime,
+                "GET",
+                "/api/v1/diagnostics/status",
+                {"Authorization": "Bearer admin-secret"},
+            )
+            payload = json.loads(raw)
+            if (
+                payload["queued_event_count"] == 0
+                and payload["last_successful_upload_at"]
+                and list(export_dir.glob("client-reports.*.jsonl"))
+            ):
+                break
+            time.sleep(0.1)
+
+        assert payload["collector_state"] == "reachable"
+        assert payload["last_successful_upload_at"] is not None
+        _, metrics = _request(
+            runtime, "GET", "/metrics", {"Authorization": "Bearer admin-secret"}
+        )
+        assert b"hermes_home_diagnostics_collector_configured 1" in metrics
+        assert b'hermes_home_client_reports_total{outcome="accepted"' in metrics
+    finally:
+        runtime.server.shutdown()
+        started = time.monotonic()
+        runtime.close()
+        elapsed = time.monotonic() - started
+        thread.join(timeout=2)
+
+    assert elapsed < 5
+    lines = [
+        json.loads(line)
+        for path in sorted(export_dir.glob("client-reports.*.jsonl"))
+        for line in path.read_text().splitlines()
+    ]
+    assert [line["record_type"] for line in lines] == ["client_report"]
+    assert lines[0]["report"]["report_id"] == report["report_id"]
+    safe = [
+        json.loads(line)
+        for path in sorted(export_dir.glob("safe-events.*.jsonl"))
+        for line in path.read_text().splitlines()
+    ]
+    assert "safe_event" in {line["record_type"] for line in safe}
+    assert "batch_ledger" in {line["record_type"] for line in safe}

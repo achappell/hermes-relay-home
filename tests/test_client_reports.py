@@ -875,3 +875,192 @@ def test_http_android_device_report_is_accepted_and_malformed_is_400(tmp_path):
         good["report_id"]
     ]
     reports.close()
+
+
+def test_export_sink_receives_each_new_report_once_and_never_duplicates():
+    seen = []
+    store = ClientReportStore(
+        clock=lambda: 1790000000,
+        export_sink=lambda device, received, body: seen.append(
+            (device, received, body["report_id"])
+        ),
+    )
+    value = report()
+
+    first = store.receive_result("device-a", json.dumps(value))
+    again = store.receive_result("device-a", json.dumps(value))
+
+    assert first.report_id == again.report_id == value["report_id"]
+    assert (first.duplicate, again.duplicate) == (False, True)
+    assert first.platform == "ios"
+    assert seen == [("device-a", 1790000000, value["report_id"])]
+    store.close()
+
+
+def test_failing_export_sink_never_rejects_or_loses_the_stored_report():
+    def broken(device, received, body):
+        raise OSError("disk full")
+
+    store = ClientReportStore(clock=lambda: 1790000000, export_sink=broken)
+    value = report()
+
+    assert store.receive("device-a", json.dumps(value)) == value["report_id"]
+    assert [r["report"]["report_id"] for r in store.recent()["reports"]] == [
+        value["report_id"]
+    ]
+    store.close()
+
+
+def test_rejected_and_rate_limited_reports_are_not_exported():
+    seen = []
+    store = ClientReportStore(
+        clock=lambda: 1790000000,
+        export_sink=lambda *args: seen.append(args),
+    )
+    store.receive("device-a", json.dumps(report()))
+    with pytest.raises(ReportRateLimited):
+        store.receive("device-a", json.dumps(report()))
+    with pytest.raises(ValueError):
+        store.receive("device-b", json.dumps({"schema": 1}))
+
+    assert len(seen) == 1
+    store.close()
+
+
+def test_conflicts_are_a_distinct_error_type():
+    from hermes_home.observability.client_reports import ReportConflict
+
+    store = ClientReportStore(clock=lambda: 1790000000)
+    first = report_v2()
+    store.receive("device-a", json.dumps(first))
+    changed = json.loads(json.dumps(first))
+    changed["events"][0]["phase"] = "open"
+
+    with pytest.raises(ReportConflict):
+        store.receive("device-a", json.dumps(changed))
+    assert issubclass(ReportConflict, ValueError)
+    store.close()
+
+
+def test_retained_by_platform_counts_only_unexpired_reports_and_zero_fills():
+    now = [1790000000]
+    store = ClientReportStore(clock=lambda: now[0])
+    store.receive("device-a", json.dumps(report()))
+    now[0] += 31
+    store.receive("device-a", json.dumps(android_report()))
+
+    assert store.retained_by_platform() == {"ios": 1, "macos": 0, "android": 1}
+    now[0] += 8 * 86400
+    assert store.retained_by_platform() == {"ios": 0, "macos": 0, "android": 0}
+    store.close()
+
+
+def make_app(reports, metrics, tmp_path):
+    config = SQLiteConfigurationStore(tmp_path / "home.db")
+    config.replace(
+        expected_revision=0,
+        candidate={"rooms": [], "profiles": [], "devices": [], "wake_mappings": []},
+    )
+    return HomeApplication(
+        configuration_store=config,
+        arbitration_engine=ArbitrationEngine(configuration=config.read),
+        admin_token="admin",
+        device_credentials={"device-token": "device-a"},
+        client_reports=reports,
+        metrics=metrics,
+    )
+
+
+def post(app, body, token="Device device-token"):
+    return app.handle(
+        "POST",
+        "/api/v1/client-diagnostics",
+        {"Authorization": token} if token else {},
+        body,
+    )
+
+
+def test_intake_outcomes_are_counted_without_identifying_labels(tmp_path):
+    from hermes_home.observability.metrics import MetricsRegistry
+
+    metrics = MetricsRegistry()
+    now = [1790000000]
+    reports = ClientReportStore(clock=lambda: now[0])
+    app = make_app(reports, metrics, tmp_path)
+    value = report()
+
+    assert post(app, json.dumps(value)).status == 200
+    assert post(app, json.dumps(value)).status == 200  # duplicate
+    assert post(app, json.dumps(report())).status == 429  # inside 30 s
+    assert post(app, "{bad").status == 400
+    assert post(app, json.dumps(value), token="Bearer admin").status == 401
+    now[0] += 31
+    first = report_v2()
+    assert post(app, json.dumps(first)).status == 200
+    now[0] += 31
+    changed = json.loads(json.dumps(first))
+    changed["events"][0]["phase"] = "open"
+    assert post(app, json.dumps(changed)).status == 400
+
+    rendered = metrics.render()
+    for outcome, platform, count in (
+        ("accepted", "ios", 2),
+        ("duplicate", "ios", 1),
+        ("rate_limited", "unknown", 1),
+        ("invalid", "unknown", 1),
+        ("unauthorized", "unknown", 1),
+        ("conflict", "unknown", 1),
+    ):
+        assert (
+            f'hermes_home_client_reports_total{{outcome="{outcome}",'
+            f'platform="{platform}"}} {count}'
+        ) in rendered, rendered
+    assert value["report_id"] not in rendered
+    assert "device-a" not in rendered
+    reports.close()
+
+
+def test_retained_gauge_is_refreshed_when_metrics_are_scraped(tmp_path):
+    from hermes_home.observability.metrics import MetricsRegistry
+
+    metrics = MetricsRegistry()
+    reports = ClientReportStore(clock=lambda: 1790000000)
+    app = make_app(reports, metrics, tmp_path)
+    post(app, json.dumps(report()))
+
+    scrape = app.handle("GET", "/metrics", {"Authorization": "Bearer admin"}, b"")
+
+    assert 'hermes_home_client_reports_retained{platform="ios"} 1' in scrape.body
+    assert 'hermes_home_client_reports_retained{platform="android"} 0' in scrape.body
+    reports.close()
+
+
+def test_a_blocked_export_never_delays_or_rejects_the_clients_200(tmp_path):
+    import threading
+    import time
+
+    from hermes_home.observability.export import ClientReportExporter, JsonlExportStore
+    from hermes_home.observability.metrics import MetricsRegistry
+
+    metrics = MetricsRegistry()
+    gate = threading.Event()
+    store = JsonlExportStore(tmp_path / "export", clock=lambda: 1790000000)
+    real = store.write
+    store.write = lambda *a, **k: (gate.wait(10), real(*a, **k))[1]
+    exporter = ClientReportExporter(store, metrics=metrics, capacity=1)
+    now = [1790000000]
+    reports = ClientReportStore(clock=lambda: now[0], export_sink=exporter.submit)
+    app = make_app(reports, metrics, tmp_path)
+
+    started = time.monotonic()
+    statuses = []
+    for _ in range(5):
+        statuses.append(post(app, json.dumps(report())).status)
+        now[0] += 31
+    elapsed = time.monotonic() - started
+
+    assert statuses == [200] * 5
+    assert elapsed < 1.0
+    gate.set()
+    exporter.close(timeout=2.0)
+    reports.close()

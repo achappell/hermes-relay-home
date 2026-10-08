@@ -79,6 +79,7 @@ class SQLiteDiagnosticsStore:
                 )
                 """
             )
+            self._migrate_unuploaded_drop_column()
             self._connection.execute(
                 "INSERT OR IGNORE INTO diagnostic_state (id) VALUES (1)"
             )
@@ -89,6 +90,18 @@ class SQLiteDiagnosticsStore:
             raise DiagnosticStoreError(
                 "diagnostics database cannot be initialized"
             ) from error
+
+    def _migrate_unuploaded_drop_column(self) -> None:
+        """Count evictions of events that were never exported, separately."""
+        columns = {
+            row[1]
+            for row in self._connection.execute("PRAGMA table_info(diagnostic_state)")
+        }
+        if "dropped_unuploaded_count" not in columns:
+            self._connection.execute(
+                "ALTER TABLE diagnostic_state "
+                "ADD COLUMN dropped_unuploaded_count INTEGER NOT NULL DEFAULT 0"
+            )
 
     def _migrate_expiry_column(self) -> None:
         """Give databases created before ``expires_at`` a deadline per event.
@@ -151,15 +164,20 @@ class SQLiteDiagnosticsStore:
                         ).fetchone()[0]
                         >= max_events
                     ):
-                        removed = self._connection.execute(
+                        oldest = self._connection.execute(
                             """
-                            DELETE FROM diagnostic_events
-                            WHERE rowid = (
-                                SELECT rowid FROM diagnostic_events
-                                ORDER BY occurred_at, rowid LIMIT 1
-                            )
+                            SELECT rowid, uploaded FROM diagnostic_events
+                            ORDER BY occurred_at, rowid LIMIT 1
                             """
-                        ).rowcount
+                        ).fetchone()
+                        removed = (
+                            0
+                            if oldest is None
+                            else self._connection.execute(
+                                "DELETE FROM diagnostic_events WHERE rowid = ?",
+                                (oldest[0],),
+                            ).rowcount
+                        )
                         if removed != 1:
                             raise DiagnosticStoreError(
                                 "diagnostic event bound could not be enforced"
@@ -167,9 +185,12 @@ class SQLiteDiagnosticsStore:
                         self._connection.execute(
                             """
                             UPDATE diagnostic_state
-                            SET dropped_event_count = dropped_event_count + 1
+                            SET dropped_event_count = dropped_event_count + 1,
+                                dropped_unuploaded_count =
+                                    dropped_unuploaded_count + ?
                             WHERE id = 1
-                            """
+                            """,
+                            (0 if oldest[1] else 1,),
                         )
                         dropped = True
 
@@ -342,7 +363,8 @@ class SQLiteDiagnosticsStore:
                 row = self._connection.execute(
                     """
                     SELECT dropped_event_count, rejected_event_count,
-                           last_successful_upload_at, collector_reachable
+                           last_successful_upload_at, collector_reachable,
+                           dropped_unuploaded_count
                     FROM diagnostic_state WHERE id = 1
                     """
                 ).fetchone()
@@ -359,6 +381,7 @@ class SQLiteDiagnosticsStore:
             collector_reachable=bool(row[3]),
             dropped_event_count=row[0],
             rejected_event_count=row[1],
+            dropped_unuploaded_event_count=min(row[4], row[0]),
         )
 
     def record_rejection(self) -> None:
