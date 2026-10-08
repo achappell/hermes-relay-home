@@ -17,7 +17,10 @@ from hermes_home.domain.arbitration import (
     ClaimSubmission,
     WakeDecision,
 )
-from hermes_home.domain.configuration import ConfigurationValidationError
+from hermes_home.domain.configuration import (
+    ConfigurationValidationError,
+    validate_candidate,
+)
 from hermes_home.domain.conversations import (
     ConversationClaimConflict,
     ConversationClaimStore,
@@ -1157,6 +1160,7 @@ class HomeApplication:
             if not isinstance(snapshot, Mapping):
                 raise TypeError("snapshot must be an object")
             if self._credential_service is not None:
+                snapshot = validate_candidate(snapshot)
                 self._credential_service.validate_client_labels(
                     {profile["id"]: profile["name"] for profile in snapshot["profiles"]}
                 )

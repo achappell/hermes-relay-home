@@ -471,3 +471,17 @@ def test_pairing_admin_tool_admits_browser_and_adds_exact_profile(tmp_path):
     assert added.status == 200, added.body
     assert page.call("POST", path, body).body == added.body
     assert len(page.service.client_grants(material["device_id"])) == 2
+
+
+@pytest.mark.parametrize("candidate", [{}, {"profiles": [{}]}])
+def test_label_policy_preserves_invalid_configuration_rejection(tmp_path, candidate):
+    home = Home(tmp_path)
+    before = home.configuration.read()
+    response = home.call(
+        "PUT",
+        "/api/v1/configuration",
+        {"schema": 1, "expected_revision": before["revision"], "snapshot": candidate},
+        admin=True,
+    )
+    assert response.status == 400
+    assert home.configuration.read() == before

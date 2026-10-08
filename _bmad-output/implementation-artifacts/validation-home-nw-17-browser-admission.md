@@ -18,11 +18,11 @@ Supported interpreter: Python 3.14.8. All commands below ran in the isolated wor
 
 ### Final targeted verification and retained full-suite failure
 
-After transactional label enforcement and atomic grant-list/revision discovery:
+After transactional label enforcement, atomic grant-list/revision discovery, and validating configuration shape before label-policy access:
 
 ```text
 uv run --extra dev --python 3.14 pytest -q -s tests/test_browser_admission.py tests/test_client_grants.py tests/test_client_claims_api.py tests/test_credentials.py tests/test_pairing_page.py tests/test_home_issue_tracking.py tests/test_home_issue_tracking_workflows.py tests/test_home_next_wave_contracts.py tests/test_standard_compatibility_artifacts.py
-155 passed in 1.73s
+157 passed in 1.73s
 uvx ruff check src tests
 All checks passed!
 uvx ruff format --check src tests
@@ -74,6 +74,12 @@ Independent reviewer additionally ran the label-tightened browser tests:
 projection delta received a subsequent read-only recheck, not another independent
 test run. Permanent tests assert authorization, durable grant transitions,
 identity/revision, and real HTTP behavior; no throwaway smoke script was created.
+
+Final compatibility correction reuses `validate_candidate` before the new label
+policy reads Profile fields. Two permanent regressions assert malformed snapshots
+return 400 and leave durable configuration unchanged; this avoids introducing
+KeyError/500 responses before the existing configuration validator can run.
+
 Initial setup attempts did not pass: plain `uv run` omitted the optional test dependencies; then the new test module used an incorrect import path. Both were corrected. First regression run had two failures because the new storage error message omitted the existing `secure storage` wording; preserving that wording fixed them. These are not hidden successful runs.
 
 ## Actual localhost HTTP smoke

@@ -615,14 +615,18 @@ Home answers both with `404 not_found`.
 
 ### Profile grants
 
-A device that holds an active grant for a Profile can manage that Profile's
-other grants:
+A device holding an active Profile grant can list that Profile's holders and
+pending grants. Only an eligible non-browser holder can approve or reject:
 
 - `GET /api/v1/profile-grants/pending` — grants waiting for this owner;
 - `GET /api/v1/profile-grants/holders` — every device holding this device's
   Profiles, by label and type only;
 - `POST /api/v1/profile-grants/{grant_id}/approve`, `/reject`, `/revoke` with
   `{"schema": 1}`.
+
+Browser credentials receive `403 forbidden` for both `/approve` and `/reject`,
+even when they hold the Profile. Revocation retains the existing ownership rules;
+on a shared Profile, a Device may revoke only its own grant.
 
 A pending grant expires after 24 hours. Revoking a grant closes its claims.
 
