@@ -186,6 +186,25 @@ The existing 1.9 MB file was ingested once at first start, stamped with ingestio
 **Rollback.** `icacls C:\ProgramData /restore C:\ProgramData\HermesHome\backups\home-acl-lockdown-20261008\HermesHome-acl.txt /C` (the saved paths are relative `HermesHome\...`, so the restore target is the parent; also stored as `rollback-acl.ps1` in that folder). Verified on a scratch tree: restoring from the parent brings Users back on the root and children. It restores the stale `achap`, `CodexSandboxUsers` and unresolvable-SID entries too. No Home or Alloy restart is needed.
 
 Note: processes in a non-elevated `achap` desktop session no longer read `HermesHome` (Windows filters the Administrators token); elevated sessions and SSH are unaffected.
+## Grafana review (AC-10) — 2026-10-08, partial
+
+**Datasources and import.** Owner imported the two Home dashboards (`hermes-home-diagnostics` and `hermes-home-diagnostics-logs`) into the household Grafana instance (grafana.chappell-home.dev) using the existing Loki datasource (uid `P8E80F9AEF21F6940`, http://loki:3100) and Prometheus datasource (uid `PBFA97CFB590B2093`, http://prometheus:9090). Both datasources are healthy. The dashboards were imported by hand in the Grafana UI (not provisioned from the repository), and the stored dashboard JSON retains the datasource variables `${DS_PROMETHEUS}` and `${DS_LOKI}`, which render correctly per the owner.
+
+**Owner observations (by eye; no screenshots captured).** The owner reports seeing numbers displayed in the panels when viewing the Grafana dashboards.
+
+**API checks (read-only, 2026-10-08 ~14:00 host time).** A worker queried the Loki and Prometheus APIs using a Viewer-scope service-account token on behalf of this record:
+
+| Datasource | Query | Result |
+| --- | --- | --- |
+| Loki | `{job="hermes-home-export"} \| count by (record_type)` last 24h | safe_event 4,105; batch_ledger 21; client_report none |
+| Prometheus | `up{job="hermes-home"}` | 1 |
+| Prometheus | `hermes_home_diagnostics_collector_configured` | 1 |
+| Prometheus | `hermes_home_diagnostics_queue_depth` | 0 |
+| Prometheus | `hermes_home_export_records_written_total` | series present |
+
+**AC-10 acceptance status: not met.** AC-10 requires the owner to see a real client report and a real safe event in Grafana. Safe events are visible (4,105 lines in Loki over 24h). **No client_report record has been exported**: no iOS or macOS client has reported to Home since the 2026-10-08 10:12 CDT cutover; the client-report panels in Grafana are empty. AC-8 real-device captures are also still open. Both HOME-NW-06 children (`home-nw-06-client-reports`, `home-nw-06-connection-diagnostics`) and the exporter story remain `review`.
+
+**Operational note:** A service-account token exposure was identified and the token was rotated by the owner. No token value or prefix is recorded here.
 
 ### Still not claimed
 
