@@ -173,4 +173,4 @@ Listing ACLs (names and principals only; no contents read) showed that `C:\Progr
 
 ### Still not claimed
 
-AC-8 real-device captures (attributed Apple and Android automatic uploads, one real dropped-connection capture), AC-10 Grafana review (the Alloy shipper, Loki endpoint, authentication and tenant remain with ops and nothing was applied), the first exported client-report line on the host, and the sweep on aged files. Both HOME-NW-06 children remain `review`; the exporter story remains `review`.
+AC-8 real-device captures (attributed Apple and Android automatic uploads, one real dropped-connection capture), AC-10 Grafana review (a Loki datasource, dashboard import and the owner's own review are not done), the first exported client-report line on the host, the Alloy restart/positions behavior (open item above), and the sweep on aged files. Both HOME-NW-06 children remain `review`; the exporter story remains `review`.
