@@ -11,7 +11,7 @@ github_issue: https://github.com/achappell/hermes-relay-home/issues/101
 
 # Admit the production W/K browser appliance as a Home client
 
-**Home implementation under review; not deployed acceptance.** The owner approved required H1/H2/H3/H4/H6 on 2026-10-08 (“ok lets do it”) after the corrected-spec review. H5 self-health/monitoring, downstream TUI changes, hosts, production grants, deployment and browser WK acceptance are excluded. This implementation stacks on the reviewed specification PR #102, head `3614fde02b557b76deb0aca4fad517e922f44489`. The consuming TUI spec remains PR #226, head `760da1865991009b57bb1e73784525b34afdd486`; its tracker is not changed here.
+**Home implementation under review; not deployed acceptance.** The owner approved required H1/H2/H3/H4/H6 on 2026-10-08 (“ok lets do it”) after the corrected-spec review. H5 self-health/monitoring, downstream TUI changes, hosts, production grants, deployment and browser WK acceptance are excluded. The original specification PR #102 (head `3614fde02b557b76deb0aca4fad517e922f44489`) has merged. Implementation PR #103 has integrated current main and is now based on `main`. The consuming TUI spec remains PR #226, head `760da1865991009b57bb1e73784525b34afdd486`; its tracker is not changed here.
 
 ## Intent
 
@@ -57,3 +57,4 @@ See the colocated `validation-home-nw-17-browser-admission.md` for exercised com
 
 - 2026-10-08: Original draft/backlog stub and independent corrective/recheck updates published in PR #102.
 - 2026-10-08: Owner approved H1/H2/H3/H4/H6 implementation; H5 and deployment remain excluded. Implemented Home contract, added behavioral and real HTTP smoke coverage, and documented the exact administrator API and revision/identity semantics. Status is in-review, not done/deployed.
+- 2026-10-08: User authorized resolving the retained full-suite test gate. Reused the existing request-ID response matcher in the idle recovery test, preserving completion and reconnect/shutdown checks; no production workaround. Integrated main after PR #102 merged and retained approved implementation/review tracking during conflict resolution. PR #103 retargeted to main; deployment/WK acceptance remains open.
