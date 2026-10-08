@@ -147,6 +147,7 @@ stories:
       - epic:3
     source_story: _bmad-output/specs/spec-standard-hermes-compatibility-migration/stories.yaml#9
     github_issue: https://github.com/achappell/hermes-relay-home/issues/55
+    validation: _bmad-output/implementation-artifacts/validation-home-mig-09-readiness.md
   - id: HOME-NW-15
     title: Add safe Linux and macOS deployment for other homes
     kind: next-wave
