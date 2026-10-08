@@ -105,6 +105,38 @@ Manual rollback without the script: `Stop-ScheduledTask 'Hermes Home'`; restore 
 
 No rollback was needed.
 
+### Ops metrics scrape fix (owner option a) — 2026-10-08
+
+Owner approved fixing the ops Alloy scrape of Home. Done through the trusted `caticornqueen` alias only; ops was not accessed over SSH, and no ops, Alloy, Prometheus or Grafana setting was changed.
+
+Root cause (read-only research, then re-verified before acting): Home listened only on `127.0.0.1:8780`, so ops Alloy's scrape of `100.78.105.19:8780` timed out (`context deadline exceeded`, not 401), and no Windows Firewall rule allowed TCP 8780. Re-verified before the change: machine `HERMES_HOME_BIND_HOST` was `127.0.0.1`; the installed `run.ps1` does not read or set it (it only overrides `HERMES_HOME_DIAGNOSTICS_DIR`) and the task XML carries no Home variables, so the machine variable is what the runtime reads (`runtime.py` `HERMES_HOME_BIND_HOST`); the local Prometheus job target was `127.0.0.1:8780` (config last written 2026-09-28); the bridge listener uses the separate `HERMES_HOME_BRIDGE_BIND_HOST` and stays on loopback.
+
+Changes:
+
+- Firewall: inbound allow `Hermes Home metrics from Tailscale`, TCP 8780, RemoteAddress `100.64.0.0/10`, Private profile (read back as `remote=100.64.0.0/255.192.0.0`).
+- Machine `HERMES_HOME_BIND_HOST` `127.0.0.1` to `0.0.0.0` (previous value saved in `backups\home-pr91-20261008\bind-host-before.json`; the installer was not re-run).
+- Restarted only the Hermes Home task (new pid `32808`, started 10:18:58 host time).
+- Rollback script `backups\home-pr91-20261008\rollback-part1.ps1` (removes the rule, restores the saved bind value, restarts the task). Not executed.
+
+Verification:
+
+| Check | Result |
+| --- | --- |
+| Listeners | `0.0.0.0:8780` and `127.0.0.1:8766` (bridge unchanged) |
+| Loopback and tailnet IP on CQ | `/pair` 200 on both; `/metrics` 401 without token and 200 with the admin token on `100.78.105.19:8780` |
+| Serve paths | `https://caticornqueen.taila59979.ts.net/pair` 200; `/api/v1/client-claims` 401 |
+| Local Prometheus | job `hermes-home` target still `127.0.0.1:8780` (config unchanged), `up` 1 |
+| Home / export | diagnostics status `collector_state` `reachable`, queue 0, dropped_unuploaded 0; export file still growing |
+| ops Alloy (read-only GET from the Mac) | `prometheus.scrape.hermes_home`: component `healthy`, target `http://100.78.105.19:8780/metrics` `health` `up`, scrape 29.6 ms; the earlier timeout is gone and no 401/403 appeared, so the ops token file is not the problem |
+| ops Prometheus | `up{job="hermes-home",host="caticornqueen"}` 1 (was 0 for 23 days); `hermes_home_diagnostics_collector_configured` 1 is now present on ops |
+| LAN exposure | from this Mac on the same LAN (192.168.0.200), `http://192.168.0.194:8780/pair` and `/metrics` both time out (curl exit 28); the same host reached over the tailnet answers 200. The tailnet-scoped rule is the only allow for 8780 |
+
+Notes: re-running `install.ps1` resets machine `HERMES_HOME_BIND_HOST` to its `-BindHost` parameter (default `127.0.0.1`, line 344) and rewrites the local Prometheus job target to that same value (line 401), so a future redeploy through the installer must be given a bind that keeps the tailnet scrape working or this change must be re-applied afterwards; do not pass `-BindHost 100.78.105.19` because the Tailscale Serve paths proxy to `127.0.0.1:8780`. The package-only cutovers used so far do not touch the variable. The Mac's access to ops Alloy and Prometheus used read-only HTTP GETs only.
+
+### Alloy and Loki shipper — not started
+
+The owner approved installing Alloy on CaticornQueen once the tailnet grant exists. On 2026-10-08 the grant was not in place: from CaticornQueen `Test-NetConnection 100.106.8.34 -Port 3100` was False, ports 9090 and 12345 were False (guards), and `http://ops.taila59979.ts.net:3100/ready` timed out. Per the owner's instruction nothing was installed and the LAN URL was not used. Pending: the owner's `tag:home` to `tag:ops` `tcp:3100` grant.
+
 ### Still not claimed
 
-AC-8 real-device captures (attributed Apple and Android automatic uploads, one real dropped-connection capture), AC-10 Grafana review, any Loki delivery (the Alloy shipper, Loki endpoint, authentication and tenant remain with ops and nothing was applied), the first exported client-report line on the host, and the sweep on aged files. Both HOME-NW-06 children remain `review`; the exporter story remains `review`.
+AC-8 real-device captures (attributed Apple and Android automatic uploads, one real dropped-connection capture), AC-10 Grafana review, any Loki delivery or Alloy installation (the Alloy shipper, Loki endpoint, authentication and tenant remain with ops and nothing was applied), the first exported client-report line on the host, and the sweep on aged files. Both HOME-NW-06 children remain `review`; the exporter story remains `review`.
