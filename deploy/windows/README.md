@@ -168,12 +168,36 @@ Verify the ACL with `icacls` before relying on it. Files,
 retention (14 days safe events, 7 days client reports) and status fields are
 described in [`../../observability/README.md`](../../observability/README.md).
 
-[`hermes-home-export.alloy`](hermes-home-export.alloy) is an Alloy snippet
-(`loki.source.file` to `loki.process` to `loki.write`) that would ship the
-export to Loki. It is **not applied** and has not been run through Alloy. Its
-Loki push URL is the placeholder environment variable
-`HERMES_HOME_LOKI_PUSH_URL`; the real URL, authentication and tenant belong to
-`ops` and are not recorded in this repository.
+[`hermes-home-export.alloy`](hermes-home-export.alloy) is the Alloy configuration
+(`loki.source.file` to `loki.process` to `loki.write`) that ships the export to
+Loki. It is validated with Grafana Alloy v1.20.1 (`alloy fmt` leaves it
+unchanged and `alloy validate` passes); it uses `sys.env`, because the bare `env`
+function is deprecated in that release and fails validation. Installing it is a
+host step, separate from the Home package. The household Loki has no
+authentication and no tenant, so the push URL is the only setting:
+`HERMES_HOME_LOKI_PUSH_URL=http://ops.taila59979.ts.net:3100/loki/api/v1/push`
+(this needs the tailnet grant from the Home host's tag to ops `tcp:3100`).
+
+Install with the official release from the Grafana Alloy GitHub releases page:
+verify `SHA256SUMS`, run the silent installer with `/S /CONFIG=<config path>
+/DISABLEREPORTING=yes /USERNAME="NT SERVICE\Alloy"` (a virtual service account,
+no password; never the default LocalSystem), then check these three things:
+
+- **Set the service environment in the registry, not with `/ENVIRONMENT`.** In
+  v1.20.1 the installer truncated the URL at `//` (stored `...=http:`). Set
+  `HKLM:\Software\GrafanaLabs\Alloy` value `Environment` (multi-string) to the
+  full `HERMES_HOME_LOKI_PUSH_URL=...` line and restart the `Alloy` service.
+- **Grant read on the export directory only**, after the service exists:
+  `icacls <export dir> /grant "NT SERVICE\Alloy:(OI)(CI)(RX)"`. Grant nothing on
+  `HermesHome\`, `diagnostics\` or `secrets\`. Give the account Modify on
+  `C:\ProgramData\GrafanaLabs\Alloy\data` (positions file) only.
+- **Verify** on `http://127.0.0.1:12345` (the UI binds loopback only) that
+  `loki.source.file` and `loki.write` are healthy, `loki_write_sent_entries_total`
+  rises and `loki_write_dropped_entries_total` stays 0. Wiping the Alloy data
+  directory resets positions and re-ingests the export files, duplicating lines in
+  Loki. To roll back, stop and uninstall the `Alloy` service
+  (`%PROGRAMFILES%\GrafanaLabs\Alloy\uninstall.exe /S`) and remove the ACL entry;
+  the local JSONL files stay the source of truth.
 
 ## Personal-client pairing (HOME-NW-17)
 
