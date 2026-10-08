@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from scripts import home_issue_tracking
 from scripts.home_issue_tracking import (
@@ -253,3 +254,46 @@ stories:
         )
         == "27"
     )
+
+
+def test_story_index_and_sprint_status_yaml_parse() -> None:
+    """Regression test: ensure story-index and sprint-status YAML files parse without errors.
+
+    Catches syntax errors like unquoted scalars containing ': ' that cause
+    "mapping values are not allowed here" parser errors. Added after 2026-10-08
+    incident where PR #90 introduced unquoted colons in evidence_note field.
+    """
+    repo_root = Path(__file__).parents[1]
+    story_index_path = (
+        repo_root / "_bmad-output/implementation-artifacts/story-index.yaml"
+    )
+    sprint_status_path = (
+        repo_root / "_bmad-output/implementation-artifacts/sprint-status.yaml"
+    )
+
+    # Parse story-index.yaml
+    with open(story_index_path) as f:
+        story_index = yaml.safe_load(f)
+
+    assert "stories" in story_index
+    assert isinstance(story_index["stories"], list)
+    assert len(story_index["stories"]) > 0
+
+    # Verify every story has required fields
+    for story in story_index["stories"]:
+        assert "id" in story, "Story missing 'id' field"
+        assert "title" in story, f"Story {story.get('id')} missing 'title' field"
+        assert "kind" in story, f"Story {story.get('id')} missing 'kind' field"
+
+    # Parse sprint-status.yaml
+    with open(sprint_status_path) as f:
+        sprint_status = yaml.safe_load(f)
+
+    assert "development_status" in sprint_status
+    assert isinstance(sprint_status["development_status"], dict)
+
+    # Verify development_status contains valid keys and values are strings (not further validation)
+    for key, status in sprint_status["development_status"].items():
+        assert isinstance(status, str), (
+            f"Status value for '{key}' is not a string: {type(status).__name__}"
+        )
