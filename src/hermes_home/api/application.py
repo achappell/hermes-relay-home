@@ -17,7 +17,10 @@ from hermes_home.domain.arbitration import (
     ClaimSubmission,
     WakeDecision,
 )
-from hermes_home.domain.configuration import ConfigurationValidationError
+from hermes_home.domain.configuration import (
+    ConfigurationValidationError,
+    validate_candidate,
+)
 from hermes_home.domain.conversations import (
     ConversationClaimConflict,
     ConversationClaimStore,
@@ -284,6 +287,8 @@ class HomeApplication:
                 )
             if len(parts) == 6 and parts[1:4] == ["api", "v1", "devices"]:
                 device_id = parts[4]
+                if method == "POST" and parts[5] == "profile-grants":
+                    return self._add_profile_grant(headers, body, device_id)
                 if method == "POST" and parts[5] == "revoke":
                     return self._revoke_device(headers, body, device_id)
                 if method == "GET" and parts[5] == "configuration":
@@ -480,6 +485,10 @@ class HomeApplication:
                 raise ValueError("invalid scope")
             client_profiles = _approved_client_profiles(scope_data.get("client_grants"))
             snapshot = self._configuration_store.read()
+            self._credential_service.validate_client_labels(
+                {profile["id"]: profile["name"] for profile in snapshot["profiles"]},
+                additional_profiles=client_profiles,
+            )
             mapping_ids = _approved_wake_mapping_ids(
                 snapshot, scope_data["wake_mapping_grant"]
             )
@@ -587,7 +596,11 @@ class HomeApplication:
         }
         if "client_claim" in context.scope.capabilities and self._credential_service:
             try:
-                grants = self._credential_service.client_grants(device_id)
+                configuration["revision"], grants = (
+                    self._credential_service.client_configuration(
+                        device_id, snapshot["revision"]
+                    )
+                )
             except CredentialStoreError, CredentialValidationError:
                 return _error(503, "service_unavailable")
             configuration["client_grants"] = _client_grant_views(grants, snapshot)
@@ -1146,6 +1159,11 @@ class HomeApplication:
             snapshot = request["snapshot"]
             if not isinstance(snapshot, Mapping):
                 raise TypeError("snapshot must be an object")
+            if self._credential_service is not None:
+                snapshot = validate_candidate(snapshot)
+                self._credential_service.validate_client_labels(
+                    {profile["id"]: profile["name"] for profile in snapshot["profiles"]}
+                )
             try:
                 previous = self._configuration_store.read()
             except (
@@ -1459,6 +1477,9 @@ class HomeApplication:
 
         try:
             snapshot = self._configuration_store.read()
+            current_revision, _ = self._credential_service.client_configuration(
+                context.device_id, snapshot["revision"]
+            )
         except ConfigurationMigrationRequired as error:
             return HTTPResponse(
                 409,
@@ -1472,7 +1493,7 @@ class HomeApplication:
             )
         except OSError, RuntimeError, TypeError, ValueError:
             return _error(503, "service_unavailable")
-        if configuration_revision != snapshot["revision"]:
+        if configuration_revision != current_revision:
             return _error(409, "stale_configuration")
         profile = next(
             (item for item in snapshot["profiles"] if item["id"] == grant.profile_id),
@@ -1750,6 +1771,50 @@ class HomeApplication:
         except KeyError, OSError, RuntimeError, TypeError, ValueError:
             return _error(503, "service_unavailable")
         return HTTPResponse(200, {"schema": 1, "sessions": sessions})
+
+    def _add_profile_grant(
+        self, headers: Mapping[str, str], body: bytes | str, device_id: str
+    ) -> HTTPResponse:
+        if not self._authenticator.authenticate_admin(headers):
+            return _error(401, "unauthorized")
+        if self._credential_service is None:
+            return _error(503, "service_unavailable")
+        try:
+            request = self._json_request(
+                headers,
+                body,
+                {"schema", "profile_id", "idempotency_key", "authorize_bootstrap"},
+                optional_fields={"authorize_bootstrap"},
+            )
+            snapshot = self._configuration_store.read()
+            grant = self._credential_service.add_client_grant(
+                device_id,
+                request["profile_id"],
+                idempotency_key=request["idempotency_key"],
+                profile_labels={
+                    profile["id"]: profile["name"] for profile in snapshot["profiles"]
+                },
+                configured_profiles=(
+                    profile["id"]
+                    for profile in snapshot["profiles"]
+                    if profile["available"] is True
+                ),
+                shared_profiles=_shared_profile_ids(snapshot),
+                authorize_bootstrap=request.get("authorize_bootstrap", False),
+            )
+        except CredentialStateError as error:
+            return _credential_error(error)
+        except CredentialValidationError, TypeError, ValueError, json.JSONDecodeError:
+            return _error(400, "invalid_request")
+        except CredentialStoreError, OSError, RuntimeError:
+            return _error(503, "service_unavailable")
+        return HTTPResponse(
+            200,
+            {
+                "schema": 1,
+                "grant": {"grant_id": grant.grant_id, "status": grant.status},
+            },
+        )
 
     def _get_pending_profile_grants(self, headers: Mapping[str, str]) -> HTTPResponse:
         context, failure = self._client_context(headers)
@@ -2246,7 +2311,7 @@ def _is_admin_route(method: str, path: str) -> bool:
     if len(parts) == 7 and parts[1:5] == ["api", "v1", "enrollment", "requests"]:
         return parts[6] in {"approve", "reject"}
     if len(parts) == 6 and parts[1:4] == ["api", "v1", "devices"]:
-        return parts[5] == "revoke"
+        return parts[5] in {"revoke", "profile-grants"}
     if len(parts) == 7 and parts[1:4] == ["api", "v1", "devices"]:
         return parts[5] == "credentials" and parts[6] == "rotate"
     return False

@@ -311,6 +311,37 @@ class PairingSurface:
         body: bytes | str,
     ) -> HTTPResponse:
         try:
+            if kind == "devices" and action == "profile-grants":
+                request = _json_body(
+                    body, {"profile_id", "idempotency_key", "authorize_bootstrap"}
+                )
+                snapshot = self._configuration()
+                grant = self._service.add_client_grant(
+                    identifier,
+                    request["profile_id"],
+                    idempotency_key=request["idempotency_key"],
+                    authorize_bootstrap=request["authorize_bootstrap"],
+                    profile_labels={
+                        profile["id"]: profile["name"]
+                        for profile in snapshot["profiles"]
+                    },
+                    configured_profiles=(
+                        profile["id"]
+                        for profile in snapshot["profiles"]
+                        if profile["available"] is True
+                    ),
+                    shared_profiles=(
+                        profile["id"]
+                        for profile in snapshot["profiles"]
+                        if profile.get("shared") is True
+                    ),
+                )
+                return _json(
+                    {
+                        "schema": 1,
+                        "grant": {"grant_id": grant.grant_id, "status": grant.status},
+                    }
+                )
             if kind == "requests" and action == "approve":
                 request = _json_body(body, {"profiles"})
                 return self._approve(identifier, request["profiles"])
@@ -345,6 +376,10 @@ class PairingSurface:
         if request.endpoint_type not in CLIENT_ENDPOINT_TYPES:
             return _error(400, "unsupported_endpoint_type")
         snapshot = self._configuration()
+        self._service.validate_client_labels(
+            {profile["id"]: profile["name"] for profile in snapshot["profiles"]},
+            additional_profiles=profiles,
+        )
         self._service.approve_request(
             request_id,
             CredentialScope.from_values(rooms=(), capabilities=("client_claim",)),

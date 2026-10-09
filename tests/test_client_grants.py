@@ -47,6 +47,11 @@ def _pair(
     endpoint_type: str = "tui",
     shared: tuple[str, ...] = (),
 ):
+    storage = (
+        "service_private_file"
+        if endpoint_type == "browser"
+        else "platform_secure_store"
+    )
     offer = service.create_offer()
     request = service.submit_request(
         enrollment_code=offer.enrollment_code,
@@ -55,7 +60,7 @@ def _pair(
         endpoint_type=endpoint_type,
         requested_rooms=[],
         requested_capabilities=["client_claim"],
-        secure_storage="platform_secure_store",
+        secure_storage=storage,
     )
     service.approve_request(
         request.request_id,
@@ -67,7 +72,7 @@ def _pair(
     return service.consume_request(
         request.request_id,
         enrollment_code=offer.enrollment_code,
-        secure_storage="platform_secure_store",
+        secure_storage=storage,
         shared_profiles=shared,
     )
 

@@ -104,6 +104,11 @@ class Home:
         return self.app.handle(method, path, headers, payload)
 
     def pair(self, endpoint_id: str, profiles: list[str], endpoint_type="tui"):
+        storage = (
+            "service_private_file"
+            if endpoint_type == "browser"
+            else "platform_secure_store"
+        )
         offer = self.call(
             "POST", "/api/v1/enrollment/offers", {"schema": 1}, admin=True
         ).body
@@ -118,14 +123,14 @@ class Home:
                 "type": endpoint_type,
                 "requested_rooms": [],
                 "requested_capabilities": ["client_claim"],
-                "secure_storage": "platform_secure_store",
+                "secure_storage": storage,
             },
         ).body
         consume_path = f"/api/v1/enrollment/requests/{request['request_id']}/consume"
         consume_body = {
             "schema": 1,
             "enrollment_code": offer["enrollment_code"],
-            "secure_storage": "platform_secure_store",
+            "secure_storage": storage,
         }
         pending = self.call("POST", consume_path, consume_body)
         assert pending.status == 409

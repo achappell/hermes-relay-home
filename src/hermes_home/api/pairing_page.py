@@ -345,6 +345,27 @@ fieldset.profiles { border: 0; padding: 8px 0; margin: 0; }
         line.append(revokeGrant);
         item.append(line);
       }
+      if (device.status === "active" && ["tui", "ios", "macos", "android", "browser"].includes(device.type)) {
+        const choices = el("select");
+        choices.setAttribute("aria-label", "Profile to add to " + device.label);
+        for (const profile of state.profiles.filter((p) => p.available && !device.grants.some((g) => g.profile_id === p.id))) {
+          const option = el("option", profile.name); option.value = profile.id; choices.append(option);
+        }
+        const add = el("button", "Add Profile"); add.type = "button";
+        add.disabled = choices.options.length === 0;
+        const idempotencyKey = crypto.randomUUID();
+        add.addEventListener("click", async () => {
+          if (!window.confirm("Authorize " + choices.selectedOptions[0].textContent + " for " + device.label + "? If it has no holder, this records Home administrator first-holder authorization; otherwise its owner must approve.")) return;
+          add.disabled = true;
+          try {
+            await api("/pair/api/devices/" + encodeURIComponent(device.device_id) + "/profile-grants", {
+              profile_id: choices.value, idempotency_key: idempotencyKey, authorize_bootstrap: true
+            });
+            refresh();
+          } catch (error) { add.disabled = false; fail(error); }
+        });
+        item.append(choices, add);
+      }
       const revoke = el("button", "Unpair device", "danger"); revoke.type = "button";
       revoke.addEventListener("click", async () => {
         if (!window.confirm("Unpair " + device.label + "? It will need to pair again.")) return;

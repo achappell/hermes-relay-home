@@ -354,7 +354,7 @@ After `playback_complete`, Home keeps an eight-second idle tail. A valid Touch
 claim during that tail closes the old claim as `superseded_by_touch` and opens
 the new one. Once the tail expires, it no longer blocks admission.
 
-## Personal clients (HOME-NW-17)
+## Client admission (HOME-NW-17 and browser appliance)
 
 TUI, iOS, macOS, and Android clients are paired personal clients. They hold the
 `client_claim` capability and one grant per approved Profile. They belong to no
@@ -371,8 +371,8 @@ hermes-home://pair?home=https%3A%2F%2Fhome.example.ts.net&code=K7Q4MX2PNV
 ```
 
 The client submits the existing `POST /api/v1/enrollment/requests` body with
-`type` of `tui`, `ios`, `macos`, or `android` and `requested_capabilities` containing
-`client_claim`. Short codes are accepted in any case, with or without the dash.
+`type` of `tui`, `ios`, `macos`, `android`, or `browser` and `requested_capabilities`
+containing `client_claim`. Short codes are accepted in any case, with or without the dash.
 The client shows the returned confirmation code and polls
 `POST /api/v1/enrollment/requests/{request_id}/consume`:
 
@@ -396,9 +396,23 @@ The client shows the returned confirmation code and polls
 }
 ```
 
-Clients must store the credential in the platform secure store and keep it per
-Home. A Device credential is always 32 random bytes encoded as 43 unpadded
-base64url characters; clients may validate that shape. Profile IDs never reach a client; `grant_id` and `label` do.
+Personal clients attest `secure_storage: platform_secure_store` and store their
+credential in that platform store, per Home. A `browser` appliance instead
+attests `secure_storage: service_private_file`: a persistent private server-side
+file readable only by the service account and administrators, never browser
+storage, logs, or the repository. Both enrollment request and consumption enforce
+the endpoint-specific attestation; consumption cannot change the stored type or
+attestation. Every non-browser kind still requires the platform secure store.
+A Device credential is always 32 random bytes encoded as 43 unpadded base64url
+characters; clients may validate that shape. Profile IDs never reach a client;
+`grant_id` and `label` do.
+
+Pair the browser appliance once, not each browser/tab. It may hold several exact
+Profile grants and discover later grants without re-pairing. Its scope is exactly
+`client_claim`, with no Rooms, wake mappings, touch binding, `sensitive_entry`,
+`consequence_confirm`, `health_view`, `wake_claim`, or `touch_claim`. Home rejects
+broader browser requests and approvals. This contract adds no self-health,
+monitoring, browser sign-in, deployment, or downstream credential-file implementation.
 
 **Staying paired.** Credentials last 90 days. A client renews itself with
 `POST /api/v1/devices/{device_id}/credentials/renew` during the last 14 days,
@@ -408,10 +422,61 @@ from the page, or re-enrollment, ends the pairing.
 **Profile ownership.** A Profile with `"shared": true` in configuration can be
 granted on the page directly. Any other Profile is owned: the first device to
 receive it is a recorded bootstrap, and every later grant is
-`pending_owner` until a device already holding that Profile approves it.
+`pending_owner` until an eligible non-browser device already holding that Profile
+approves it. Browser credentials cannot approve or reject grants, including direct
+HTTP requests and the domain mutation boundary. Existing holder-list visibility
+is unchanged; visibility does not confer approval authority.
 
 `GET /api/v1/devices/{device_id}/configuration` returns the current
-`client_grants` beside the configuration `revision`.
+`client_grants` beside the configuration `revision`. This revision is scoped to
+that Device's projection and advances when its current grants or the household
+configuration change. Use the revision from this response in client claims, not
+the administrator's household configuration revision. Refresh on
+`stale_configuration`; do not replay conversation input.
+
+### Add an exact Profile to an already-paired Device
+
+`POST /api/v1/devices/{device_id}/profile-grants` requires the existing Home
+administrator Bearer credential on loopback. Proxied admin-token requests return
+`403 admin_local_only`; Device credentials, including browser credentials, cannot
+request additions. The signed-in `/pair` page offers **Add Profile**, using its
+existing secure-cookie/same-origin administrative boundary.
+
+```json
+{
+  "schema": 1,
+  "profile_id": "amanda",
+  "idempotency_key": "operator-generated-unique-request-id",
+  "authorize_bootstrap": true
+}
+```
+
+`authorize_bootstrap` is optional and defaults to `false`. One request targets one
+available exact Profile and one live paired client Device; wildcards are rejected.
+The operation appends without replacing/revoking existing grants or renewing/
+re-enrolling the Device. A shared Profile becomes active. An owned Profile with
+another live holder stays `pending_owner`, even with bootstrap authorization.
+Without another holder, explicit administrator bootstrap authorization activates
+the grant and records `bootstrap`, `decided_by: home_admin`, and decision time;
+otherwise it remains pending. Approval of pending grants uses the existing
+eligible non-browser holder path.
+
+Success is `200 {"schema":1,"grant":{"grant_id":"grant-…","status":"active"}}`
+(or `pending_owner`). Retries with the same device/key and identical arguments
+return the same grant's current status, including after revocation; changing its
+Profile or bootstrap argument returns `409 conflict`. A new key for an already
+current grant also returns that grant, without duplicates. After revocation,
+deliberate re-issuance needs a new key and creates a distinct opaque grant ID.
+
+Labels are canonical Profile names, not an extra per-grant alias. Names must be
+unique within each Device's current active/pending selection: a colliding
+addition, pairing approval, or configuration rename is rejected. Rename through
+the existing revision-checked configuration API; a valid rename changes the
+Device projection revision without changing the grant ID. Reusing a former
+label cannot reassign an old grant ID. Clients must bind shortcuts by ID, never
+resolve stale shortcuts by label. Grant/device revocation uses existing endpoints
+and closes associated claims. Appliance/browser deployment acceptance remains
+owned by the TUI WK story.
 
 ### `POST /api/v1/client-claims`
 
@@ -550,14 +615,18 @@ Home answers both with `404 not_found`.
 
 ### Profile grants
 
-A device that holds an active grant for a Profile can manage that Profile's
-other grants:
+A device holding an active Profile grant can list that Profile's holders and
+pending grants. Only an eligible non-browser holder can approve or reject:
 
 - `GET /api/v1/profile-grants/pending` — grants waiting for this owner;
 - `GET /api/v1/profile-grants/holders` — every device holding this device's
   Profiles, by label and type only;
 - `POST /api/v1/profile-grants/{grant_id}/approve`, `/reject`, `/revoke` with
   `{"schema": 1}`.
+
+Browser credentials receive `403 forbidden` for both `/approve` and `/reject`,
+even when they hold the Profile. Revocation retains the existing ownership rules;
+on a shared Profile, a Device may revoke only its own grant.
 
 A pending grant expires after 24 hours. Revoking a grant closes its claims.
 
