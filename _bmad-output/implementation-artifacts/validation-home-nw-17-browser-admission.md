@@ -93,7 +93,7 @@ LOCAL HOME HTTP SMOKE: browser enrollment/consume=200; health=403; browser grant
 
 Additional behavioral assertions cover endpoint-specific attestation; consume type/attestation substitution without consuming approval; all denied browser capabilities; direct domain approve/reject denial; existing native owner approval; shared/owned/explicit bootstrap addition rules; no wildcard; same-key conflict and revoked-grant replay; distinct replacement identity; rename revision and stable identity; label collision rejection; admin-token proxy denial; same-origin signed-in pairing tool addition and browser Device-credential denial.
 
-## Gates
+## Implementation-stage gates (historical)
 
 - Home implementation review/merge remains open. PR #102 has merged; PR #103 is now based on `main`. No PR #103 merge or deployment was performed.
 - No deployment, host smoke, browser appliance credential-file persistence/restart acceptance, browser/TUI integration, Tailscale exposure acceptance, or production authorization was performed.
@@ -153,3 +153,103 @@ The final full-suite gate passes after a real test correction, not an unchanged
 retry. The seven WebSocket deprecation warnings and 26 skips remain explicit.
 No production workaround, suppressed failure, dropped completion assertion,
 deployment, PR merge, or CI watch was introduced.
+
+## Authorized Home-only production rollout
+
+After PR #103 merged, the user authorized updating Home on CaticornQueen.
+This section supersedes the historical no-deployment statements above only
+for Home. Browser appliance pairing, Ops deployment, real turns and browser
+WK acceptance remain open; the Ops owner reports the TUI release-tag gate.
+
+### Exact source and verified package
+
+- Previous deployed revision: `d3d816a0ee40c5d44778864daacf6f510291d006`.
+- Deployed merged `origin/main`: `3a0eec0b9739524e2a8c54fd5a3308b3c3abb90b`.
+- Built `hermes_relay_home-0.1.0-py3-none-any.whl` from that clean source;
+  SHA256 `4b5553b25fb9790009106fac6a73efae6aff75935c7f181f7b12278498559a80`.
+- All 35 wheel Python sources matched the checkout; staged wheel checksum
+  matched; all 35 installed Python sources matched after the update.
+- Merged-source verification: **1119 passed, 26 skipped, 7 warnings in
+  31.77s**; Ruff checks passed; **79 files already formatted**; wheel build
+  succeeded. The earlier test race is corrected; no full-suite failure remains.
+- Used the documented merged-source wheel/package-only procedure in
+  `deploy/windows/README.md`, not a newly created public release/tag.
+
+### Live safety and preservation
+
+Strict existing SSH alias/host keys were used throughout. Active claims were
+zero initially, during backup, and immediately before stopping Home
+(411 closed claims). Only the SYSTEM `Hermes Home` task was restarted;
+`uv pip install --no-deps --force-reinstall` exited zero. No installer,
+configuration reset, dependencies, other services, user grants or credentials
+were changed. Host Python remained 3.14.7.
+
+SQLite integrity was `ok` before and after. Durable credential-state SHA256
+remained `2c24570fedc901335238d8547f7c4af8f975c0f2efc234ad4db7dba596bdf508`;
+configuration response SHA256 remained
+`d2e71cb9ea5cab5800f11ecc49c92e3f2cf1c81e6fb32709c3f60a59b9721af3`.
+All 11 secret files, runner, scheduled-task definition and Prometheus/Alloy
+configuration hashes were unchanged. Of 19 Home machine settings, only the
+deployment revision changed.
+
+Home remains bound to `0.0.0.0:8780` behind the existing Private-profile
+TCP8780 inbound firewall allowance restricted to `100.64.0.0/10`; bridge
+remains `127.0.0.1:8766`. Tailscale Serve stayed byte-for-byte unchanged, with
+Home proxies targeting loopback and no Funnel stanza. Prometheus retained
+its localhost scrape; `up{job="hermes-home"}` was **1**.
+
+Recursive ACL inspection found zero Users/Authenticated Users/Everyone
+grants before and after. Database remains SYSTEM/Admin only; diagnostics
+remain SYSTEM Modify/Admin Read, with the existing Alloy ReadAndExecute
+exception only on export. Alloy stayed running with its original PID and
+loopback readiness HTTP200. No legacy-gateway/media-server action occurred.
+
+### Actual installed-service smoke
+
+Authenticated metrics/configuration/diagnostics returned **200**;
+unauthenticated metrics/client-claims returned **401**; `/pair` returned
+**200** locally and over tailnet HTTPS. `/healthz` returned the existing
+**404** because Home does not expose that route; it is not the readiness
+criterion. Post-update active claims remained zero.
+
+Synthetic invalid-code enrollment probes returned **401** for browser
+`service_private_file` (storage policy accepted, nonexistent offer denied)
+and **400** for native TUI using the same attestation (storage policy denied).
+Durable credential-state equality was checked after these probes: no offer,
+device, grant or pairing was created. Tailnet-proxied admin grant-add returned
+**403**, preserving its local-admin boundary. No tokens, credential contents,
+private Profile selections or grant/device identifiers were printed.
+
+After restart, exporter counters showed **4** records written and **1**
+successful upload batch; queue **1**, dropped-unuploaded **0**, collector
+reachable. Alloy reported **4140** sent entries, **0** dropped and **0**
+batch retries. Existing export files remained, with new-day safe events
+written. This is observed local export/shipper continuity, not a separate
+Loki/end-to-end monitoring acceptance claim.
+
+### Private backup and rollback
+
+Backup directory:
+`C:\ProgramData\HermesHome\backups\home-browser-3a0eec0-20261008`
+(SYSTEM/Admin only). It contains 44 previous package/metadata files,
+online SQLite backup, runner, task definition, machine settings and private
+hash manifests. Package archive SHA256:
+`1010c996a81e8475e6f458c04496c5d89cbde082ebf9a51b2a3938c6cca03a26`;
+SQLite backup SHA256:
+`79c47681433b81d7efd9e523781de4195e4be3c4dd91600674db99f36511c328`,
+integrity `ok`.
+
+`rollback-package.ps1` parsed with zero errors, SHA256
+`DA605FD5E67759E4F8FFF71D7611F62CB0D5B3675D6A3FBDBF6920D33C457DA5`.
+It was **not executed**. It refuses active claims or active browser
+credentials: old code lacks the browser approval-authority restriction, so
+rollback after later pairing requires separately coordinated operator action.
+Otherwise it backs up current DB, restores/verifies the old package and
+deployment revision, then starts only Home, preserving live DB/configuration
+and durable pairing. It never automatically revokes user grants.
+
+Home readiness/revision/endpoint were sent privately to the Ops owner.
+Ops deployment, appliance pairing, Profile approvals, real browser turn
+and browser lifecycle/WK acceptance remain **unperformed** behind the
+reported TUI tagged-release prerequisite. No deployment or evidence PR was
+merged and no CI watch was started.
