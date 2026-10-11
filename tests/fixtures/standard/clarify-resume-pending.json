@@ -1,0 +1,277 @@
+{
+ "standard": {
+  "hermes_release": "0.21.1",
+  "source_commit": "2237be355906fbe6065ce1815711eee52b2d646e",
+  "server": "hermes serve --isolated (tui_gateway /api/ws), loopback, throwaway HERMES_HOME and HOME",
+  "model": "scripted OpenAI-compatible stub (no real model)",
+  "captured": "2026-10-11"
+ },
+ "title": "Client socket dropped with a clarify pending; new socket session.resume",
+ "note": "session.resume result carries pending_clarify (same payload and request_id), running:true, same session_id; clarify.request is NOT re-emitted as an event; the original request_id is still answerable",
+ "frames": [
+  {
+   "dir": "in",
+   "t": 0.024,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "gateway.ready",
+     "payload": {
+      "change_events": true,
+      "heartbeat": true,
+      "replay_epoch": "6c9cca47be4a4e3ea9cd444b4cb18b5e",
+      "skin": "<omitted>"
+     }
+    }
+   },
+   "conn": "resume_a"
+  },
+  {
+   "dir": "out",
+   "t": 0.024,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "resume_a-1",
+    "method": "session.create",
+    "params": {
+     "source": "home"
+    }
+   },
+   "conn": "resume_a"
+  },
+  {
+   "dir": "in",
+   "t": 0.045,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "resume_a-1",
+    "result": {
+     "session_id": "89583fcd",
+     "stored_session_id": "20261011_180922_77ee6e",
+     "message_count": 0,
+     "messages": "<omitted>",
+     "info": "<omitted>"
+    }
+   },
+   "conn": "resume_a"
+  },
+  {
+   "dir": "out",
+   "t": 0.045,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "resume_a-2",
+    "method": "prompt.submit",
+    "params": {
+     "session_id": "89583fcd",
+     "text": "ask:single resume"
+    }
+   },
+   "conn": "resume_a"
+  },
+  {
+   "dir": "in",
+   "t": 0.05,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "resume_a-2",
+    "result": {
+     "status": "streaming"
+    }
+   },
+   "conn": "resume_a"
+  },
+  {
+   "dir": "in",
+   "t": 0.126,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "clarify.request",
+     "session_id": "89583fcd",
+     "payload": {
+      "questions": [
+       {
+        "qid": "q0",
+        "question": "Which color?",
+        "choices": [
+         "red (Recommended)",
+         "green",
+         "blue"
+        ],
+        "multi_select": false
+       }
+      ],
+      "request_id": "ce97177b"
+     },
+     "seq": 9
+    }
+   },
+   "conn": "resume_a"
+  },
+  {
+   "dir": "in",
+   "t": 1.342,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "gateway.ready",
+     "payload": {
+      "change_events": true,
+      "heartbeat": true,
+      "replay_epoch": "6c9cca47be4a4e3ea9cd444b4cb18b5e",
+      "skin": "<omitted>"
+     }
+    }
+   },
+   "conn": "resume_b"
+  },
+  {
+   "dir": "out",
+   "t": 1.342,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "resume_b-1",
+    "method": "session.resume",
+    "params": {
+     "session_id": "20261011_180922_77ee6e",
+     "source": "home"
+    }
+   },
+   "conn": "resume_b"
+  },
+  {
+   "dir": "in",
+   "t": 1.391,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "resume_b-1",
+    "result": {
+     "info": "<omitted>",
+     "message_count": 2,
+     "messages": "<omitted>",
+     "messages_omitted": false,
+     "running": true,
+     "turn_started_at": 1791760162.5102248,
+     "session_id": "89583fcd",
+     "session_key": "20261011_180922_77ee6e",
+     "started_at": 1791760162.487981,
+     "status": "waiting",
+     "inflight": "<omitted>",
+     "pending_clarify": {
+      "questions": [
+       {
+        "qid": "q0",
+        "question": "Which color?",
+        "choices": [
+         "red (Recommended)",
+         "green",
+         "blue"
+        ],
+        "multi_select": false
+       }
+      ],
+      "request_id": "ce97177b"
+     },
+     "resumed": "20261011_180922_77ee6e"
+    }
+   },
+   "conn": "resume_b"
+  },
+  {
+   "dir": "out",
+   "t": 5.392,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "resume_b-2",
+    "method": "clarify.respond",
+    "params": {
+     "session_id": "89583fcd",
+     "request_id": "ce97177b",
+     "question_id": "q0",
+     "answer": "green"
+    }
+   },
+   "conn": "resume_b"
+  },
+  {
+   "dir": "in",
+   "t": 5.395,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "resume_b-2",
+    "result": {
+     "status": "ok",
+     "remaining": []
+    }
+   },
+   "conn": "resume_b"
+  },
+  {
+   "dir": "in",
+   "t": 5.4,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "tool.complete",
+     "session_id": "89583fcd",
+     "payload": {
+      "tool_id": "call_6257c7e5",
+      "name": "clarify",
+      "args": {
+       "questions": [
+        {
+         "question": "Which color?",
+         "choices": [
+          "red",
+          "green",
+          "blue"
+         ]
+        }
+       ]
+      },
+      "duration_s": 5.273972988128662,
+      "result": {
+       "responses": [
+        {
+         "question": "Which color?",
+         "choices_offered": [
+          "red",
+          "green",
+          "blue"
+         ],
+         "user_response": "green"
+        }
+       ]
+      }
+     },
+     "seq": 11
+    }
+   },
+   "conn": "resume_b"
+  },
+  {
+   "dir": "in",
+   "t": 5.416,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "message.complete",
+     "session_id": "89583fcd",
+     "payload": {
+      "text": "STUB-RECEIVED: {\"responses\": [{\"question\": \"Which color?\", \"choices_offered\": [\"red\", \"green\", \"blue\"], \"user_response\": \"green\"}]}",
+      "usage": "<omitted>",
+      "status": "complete"
+     },
+     "seq": 17
+    }
+   },
+   "conn": "resume_b"
+  }
+ ]
+}

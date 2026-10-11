@@ -1,0 +1,162 @@
+{
+ "standard": {
+  "hermes_release": "0.21.1",
+  "source_commit": "2237be355906fbe6065ce1815711eee52b2d646e",
+  "server": "hermes serve --isolated (tui_gateway /api/ws), loopback, throwaway HERMES_HOME and HOME",
+  "model": "scripted OpenAI-compatible stub (no real model)",
+  "captured": "2026-10-11"
+ },
+ "title": "Socket dropped with clarify pending; new socket answers by request_id without session.resume",
+ "note": "still answerable after 6 s on a new connection (reap grace is 20 s by source; a running turn is protected longer)",
+ "frames": [
+  {
+   "dir": "in",
+   "t": 0.027,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "gateway.ready",
+     "payload": {
+      "change_events": true,
+      "heartbeat": true,
+      "replay_epoch": "6c9cca47be4a4e3ea9cd444b4cb18b5e",
+      "skin": "<omitted>"
+     }
+    }
+   },
+   "conn": "orphan_a"
+  },
+  {
+   "dir": "out",
+   "t": 0.027,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "orphan_a-1",
+    "method": "session.create",
+    "params": {
+     "source": "home"
+    }
+   },
+   "conn": "orphan_a"
+  },
+  {
+   "dir": "in",
+   "t": 0.051,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "orphan_a-1",
+    "result": {
+     "session_id": "83ba5250",
+     "stored_session_id": "20261011_180931_5baab3",
+     "message_count": 0,
+     "messages": "<omitted>",
+     "info": "<omitted>"
+    }
+   },
+   "conn": "orphan_a"
+  },
+  {
+   "dir": "out",
+   "t": 0.051,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "orphan_a-2",
+    "method": "prompt.submit",
+    "params": {
+     "session_id": "83ba5250",
+     "text": "ask:single orphan"
+    }
+   },
+   "conn": "orphan_a"
+  },
+  {
+   "dir": "in",
+   "t": 0.056,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "orphan_a-2",
+    "result": {
+     "status": "streaming"
+    }
+   },
+   "conn": "orphan_a"
+  },
+  {
+   "dir": "in",
+   "t": 0.135,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "clarify.request",
+     "session_id": "83ba5250",
+     "payload": {
+      "questions": [
+       {
+        "qid": "q0",
+        "question": "Which color?",
+        "choices": [
+         "red (Recommended)",
+         "green",
+         "blue"
+        ],
+        "multi_select": false
+       }
+      ],
+      "request_id": "3917ea4a"
+     },
+     "seq": 9
+    }
+   },
+   "conn": "orphan_a"
+  },
+  {
+   "dir": "in",
+   "t": 6.34,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "gateway.ready",
+     "payload": {
+      "change_events": true,
+      "heartbeat": true,
+      "replay_epoch": "6c9cca47be4a4e3ea9cd444b4cb18b5e",
+      "skin": "<omitted>"
+     }
+    }
+   },
+   "conn": "orphan_b"
+  },
+  {
+   "dir": "out",
+   "t": 6.34,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "orphan_b-1",
+    "method": "clarify.respond",
+    "params": {
+     "session_id": "83ba5250",
+     "request_id": "3917ea4a",
+     "question_id": "q0",
+     "answer": "red"
+    }
+   },
+   "conn": "orphan_b"
+  },
+  {
+   "dir": "in",
+   "t": 6.34,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "orphan_b-1",
+    "result": {
+     "status": "ok",
+     "remaining": []
+    }
+   },
+   "conn": "orphan_b"
+  }
+ ]
+}
