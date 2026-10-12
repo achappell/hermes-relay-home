@@ -16,6 +16,15 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 STANDARD_GATEWAY_PATH = "/api/ws"
 STANDARD_AUDIO_PATH = "/api/audio/speak-stream"
 MAX_TYPED_CHOICE_REVISIONS_PER_TURN = 128
+MAX_CHOICE_OPTIONS = 32
+MAX_CHOICE_ID_LENGTH = 64
+MAX_CHOICE_TEXT_LENGTH = 1024
+MAX_CHOICE_LABEL_LENGTH = 256
+# A projected clarify choice stays answerable as long as Standard's default
+# ``agent.clarify_timeout`` keeps the clarify itself open. Home cannot read that
+# setting, so this is a documented constant; Standard's own ``clarify.expire``
+# ends the choice sooner whenever Standard times out first.
+CLARIFY_CHOICE_TTL_SECONDS = 3600.0
 MAX_PROTECTED_INPUT_BYTES = 4096
 PROTECTED_CAPABILITIES = frozenset({"sensitive_entry", "consequence_confirm"})
 PROTECTED_PROMPT_TYPES = frozenset(
@@ -250,6 +259,9 @@ class BridgeEvent:
         default_factory=frozenset, repr=False, compare=False
     )
     capability_revision: int | None = field(default=None, repr=False, compare=False)
+    # Set only by Home's bridge for a typed choice it projected from a Standard
+    # clarify; never read from an event payload.
+    choice_ttl_seconds: float | None = field(default=None, repr=False, compare=False)
 
     def to_endpoint(self) -> dict[str, object]:
         if self.type == "prompt.request":
@@ -286,6 +298,48 @@ class AudioFrame:
     metadata: Mapping[str, object] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class _ProjectedClarify:
+    """A single-select Standard clarify that Home presents as a typed choice.
+
+    ``answers`` keeps Standard's exact choice strings; ``labels`` are the same
+    strings with Standard's ``(Recommended)`` decoration removed for display.
+    Option ``opt-<n>`` maps to ``answers[n - 1]``, and only that mapping decides
+    what Home sends back, never client text.
+    """
+
+    request_id: str
+    correlation_id: str
+    qid: str
+    text: str
+    labels: tuple[str, ...]
+    answers: tuple[str, ...]
+
+    def typed_choice_payload(self) -> dict[str, object]:
+        return {
+            "request_id": self.request_id,
+            "prompt_kind": "choice",
+            "text": self.text,
+            # The source identity Home's choice authority re-mints publicly.
+            "choice": {
+                "object_id": self.request_id,
+                "freshness": "clarify",
+                "operations": ["choose"],
+            },
+            "options": [
+                {"id": f"opt-{index}", "label": label}
+                for index, label in enumerate(self.labels, start=1)
+            ],
+        }
+
+    def answer_for(self, option_id: str) -> str | None:
+        prefix, _, number = option_id.partition("-")
+        if prefix != "opt" or not number.isdigit():
+            return None
+        index = int(number)
+        return self.answers[index - 1] if 1 <= index <= len(self.answers) else None
+
+
 @dataclass(slots=True)
 class _ActiveTurn:
     turn_id: str
@@ -313,6 +367,11 @@ class _ActiveTurn:
     event_start_seq: int | None = None
     last_event_seq: int | None = None
     standard_turn_id: str | None = None
+    # Standard request IDs deduplicate re-emission; each record retains its
+    # Home prompt correlation. State dies with this bounded turn.
+    projected_clarifies: dict[str, _ProjectedClarify] = field(
+        default_factory=dict, repr=False
+    )
 
 
 class StandardGatewayClient:
@@ -893,6 +952,10 @@ class HomeBridge:
         self._unpersisted_session_id: str | None = None
         self._advertised_commands: frozenset[str] = frozenset()
         self._endpoint_capabilities: dict[str, object] = {}
+        # True when this conversation's grant is interactive and pinned Standard
+        # advertises no typed choice, so Home projects single-select clarify
+        # prompts as typed choices (see ``_project_clarify``).
+        self._clarify_projection = False
         self._active_turn: _ActiveTurn | None = None
         self._unresolved_turn: BridgeTurn | None = None
         self._last_terminal_event_seq: int | None = None
@@ -1083,11 +1146,15 @@ class HomeBridge:
                     grant, conversation_handle, "authorization_unavailable"
                 )
 
+        clarify_projection = _clarify_projection_offered(
+            ready_payload, interactive_choice=grant.interactive_choice
+        )
         endpoint_capabilities = _capabilities(
             ready_payload,
             commands=advertised_commands,
             audio=self._audio_socket_factory is not None,
             interactive_choice=grant.interactive_choice,
+            clarify_choice=clarify_projection,
         )
         with self._state_lock:
             if self._active_turn is not None:
@@ -1122,6 +1189,7 @@ class HomeBridge:
             self._unpersisted_session_id = unpersisted_session_id
             self._advertised_commands = frozenset(advertised_commands)
             self._endpoint_capabilities = dict(endpoint_capabilities)
+            self._clarify_projection = clarify_projection
             self._audio_socket = None
             self._audio_owner = None
             self._audio_started = False
@@ -1366,11 +1434,15 @@ class HomeBridge:
                 self._close_claim(handle, device_id, reason="authorization_revoked")
                 return self._reconnect_failure(handle, "authorization_unavailable")
 
+        clarify_projection = _clarify_projection_offered(
+            ready_payload, interactive_choice=refreshed.interactive_choice
+        )
         endpoint_capabilities = _capabilities(
             ready_payload,
             commands=advertised_commands,
             audio=self._audio_socket_factory is not None,
             interactive_choice=refreshed.interactive_choice,
+            clarify_choice=clarify_projection,
         )
         with self._state_lock:
             self._gateway = gateway
@@ -1387,6 +1459,7 @@ class HomeBridge:
                 self._unpersisted_session_id = self._resume_session_id
             self._advertised_commands = frozenset(advertised_commands)
             self._endpoint_capabilities = dict(endpoint_capabilities)
+            self._clarify_projection = clarify_projection
             self._state = "ready"
             unresolved_turn = self._unresolved_turn
         return BridgeStatus(
@@ -2042,11 +2115,33 @@ class HomeBridge:
                 or self._runtime_session_id is None
             ):
                 raise RuntimeError("home bridge is not ready")
-            params: dict[str, object] = {
-                "session_id": runtime_session_id,
-                "request_id": event.correlation_id,
-                **validated_response,
-            }
+            projected_request_id = event.payload.get("request_id")
+            projected = (
+                active.projected_clarifies.get(projected_request_id)
+                if event.type == "prompt.request"
+                and event.choice_ttl_seconds == CLARIFY_CHOICE_TTL_SECONDS
+                and isinstance(projected_request_id, str)
+                else None
+            )
+            if projected is not None:
+                # A projected choice answers its Standard clarify; ``choose`` is
+                # the only operation and the answer is Home's stored choice text.
+                answer = projected.answer_for(str(validated_response["option_id"]))
+                if answer is None:
+                    raise BridgeRequestRejected("typed choice option is unknown")
+                operation = "clarify.respond"
+                params: dict[str, object] = {
+                    "session_id": runtime_session_id,
+                    "request_id": projected.request_id,
+                    "answer": answer,
+                    "question_id": projected.qid,
+                }
+            else:
+                params = {
+                    "session_id": runtime_session_id,
+                    "request_id": event.correlation_id,
+                    **validated_response,
+                }
             if protected_prompt:
                 active.pending_prompt_type = None
                 active.pending_prompt_id = None
@@ -2089,7 +2184,12 @@ class HomeBridge:
             raise BridgeTransportError(
                 "bridge changed during structured prompt delivery"
             )
-        _require_prompt_resolution_result(result, event)
+        _require_prompt_resolution_result(
+            result, event, batch_clarify=True if projected is not None else None
+        )
+        if projected is not None and result.get("remaining"):
+            # One question was answered, so nothing can remain.
+            raise BridgeProtocolError("projected clarify answer left questions open")
         if protected_prompt:
             return result
         with self._state_lock:
@@ -2104,6 +2204,22 @@ class HomeBridge:
                 active.pending_choice_revision = None
                 active.pending_choice_authority = None
         return result
+
+    def _clarify_projection_active(self) -> bool:
+        """Whether a clarify arriving now is projected as a typed choice.
+
+        Checked at event time under the state lock: the conversation offered
+        projection when it opened, the grant is still interactive, and the
+        ``prompt.choose`` flag is still advertised. Otherwise the clarify takes
+        Home's unchanged path.
+        """
+        grant = self._grant
+        return (
+            self._clarify_projection
+            and grant is not None
+            and grant.interactive_choice
+            and self._endpoint_capabilities.get("prompt.choose") is True
+        )
 
     def _authorize_protected_prompt(self, event: BridgeEvent) -> None:
         capability = PROTECTED_PROMPT_CAPABILITIES.get(event.type)
@@ -2284,11 +2400,17 @@ class HomeBridge:
                 ) from error
 
             audio_text = ""
+            projected_clarify: _ProjectedClarify | None = None
+            projected_ttl: float | None = None
+            projected_expiry_correlation: str | None = None
             audio_owner: _ActiveTurn | None = None
             terminal_audio_action: str | None = None
             event_active: _ActiveTurn | None = None
-            lock_choice_revision = (
-                isinstance(raw, Mapping) and raw.get("type") == "prompt.request"
+            # A projected clarify becomes a typed choice, so it takes the same
+            # lock a native choice revision does.
+            lock_choice_revision = isinstance(raw, Mapping) and (
+                raw.get("type") == "prompt.request"
+                or (raw.get("type") == "clarify.request" and self._clarify_projection)
             )
             if lock_choice_revision:
                 self._prompt_response_lock.acquire()
@@ -2374,6 +2496,52 @@ class HomeBridge:
                             active.last_event_seq = seq
                         turn_id = active.turn_id
 
+                        if (
+                            event_type == "clarify.request"
+                            and self._clarify_projection_active()
+                        ):
+                            request_id = event_payload.get("request_id")
+                            if (
+                                isinstance(request_id, str)
+                                and request_id in active.projected_clarifies
+                            ):
+                                # Standard does not re-emit a clarify; never re-offer one.
+                                continue
+                            projection_correlation_id = raw.get("correlation_id")
+                            if (
+                                not isinstance(projection_correlation_id, str)
+                                or not projection_correlation_id
+                            ):
+                                projection_correlation_id = _correlation_id(
+                                    event_payload
+                                )
+                            projected_clarify = _project_clarify(
+                                event_payload,
+                                correlation_id=projection_correlation_id,
+                            )
+                            if (
+                                projected_clarify is not None
+                                and len(active.choice_revisions)
+                                < MAX_TYPED_CHOICE_REVISIONS_PER_TURN
+                            ):
+                                event_type = "prompt.request"
+                                event_payload = projected_clarify.typed_choice_payload()
+                                projected_ttl = CLARIFY_CHOICE_TTL_SECONDS
+                        elif event_type == "clarify.expire":
+                            expired_id = event_payload.get("request_id")
+                            projected_expiry = (
+                                active.projected_clarifies.get(expired_id)
+                                if isinstance(expired_id, str)
+                                else None
+                            )
+                            if projected_expiry is not None:
+                                event_type = "prompt.expire"
+                                projected_expiry_correlation = (
+                                    projected_expiry.correlation_id
+                                )
+                                # Correlation identifies the expired choice; the
+                                # Standard request ID is not public payload data.
+                                event_payload = {}
                         if event_type in _STRUCTURED_PROMPT_OPERATIONS:
                             _validate_structured_event_payload(
                                 event_type, event_payload
@@ -2438,13 +2606,20 @@ class HomeBridge:
                             active.pending_choice_authority = choice_authority
                             if choice_revision is not None:
                                 active.choice_revisions.add(choice_revision)
+                            if projected_clarify is not None:
+                                active.projected_clarifies[
+                                    projected_clarify.request_id
+                                ] = projected_clarify
                         elif event_type in _PROMPT_EXPIRY_TYPES:
-                            correlation_id = raw.get("correlation_id")
-                            if (
-                                not isinstance(correlation_id, str)
-                                or not correlation_id
-                            ):
-                                correlation_id = _correlation_id(event_payload)
+                            if projected_expiry_correlation is not None:
+                                correlation_id = projected_expiry_correlation
+                            else:
+                                correlation_id = raw.get("correlation_id")
+                                if (
+                                    not isinstance(correlation_id, str)
+                                    or not correlation_id
+                                ):
+                                    correlation_id = _correlation_id(event_payload)
                             if (
                                 correlation_id is None
                                 or active.pending_prompt_type
@@ -2536,9 +2711,16 @@ class HomeBridge:
                                                 operation
                                             )
                                             is True
+                                            and (
+                                                operation != "prompt.choose"
+                                                or not self._clarify_projection
+                                                or projected_ttl is not None
+                                            )
                                         ),
                                     }
                                 )
+                                if projected_ttl is not None:
+                                    choice_context["choice_ttl_seconds"] = projected_ttl
                     event = BridgeEvent(
                         conversation_handle=conversation_handle,
                         type=event_type,
@@ -3112,6 +3294,7 @@ class HomeBridge:
                 self._unpersisted_session_id = None
                 self._advertised_commands = frozenset()
                 self._endpoint_capabilities = {}
+                self._clarify_projection = False
                 self._active_turn = None
                 self._unresolved_turn = None
                 self._last_terminal_event_seq = None
@@ -3433,6 +3616,7 @@ def _capabilities(
     commands: list[str] | None = None,
     audio: bool = False,
     interactive_choice: bool = False,
+    clarify_choice: bool = False,
 ) -> dict[str, object]:
     capabilities = payload.get("capabilities")
     source = capabilities if isinstance(capabilities, Mapping) else payload
@@ -3456,7 +3640,98 @@ def _capabilities(
                 )
             if interactive_choice:
                 result[operation] = capability
+    if clarify_choice and interactive_choice and "prompt.choose" not in source:
+        # Home projects clarify as ``choose``-only: Standard has no operation
+        # behind ``explore``, so that flag is never offered here.
+        result["prompt.choose"] = True
     return result
+
+
+def _clarify_projection_offered(
+    payload: Mapping[str, object], *, interactive_choice: bool
+) -> bool:
+    """Whether Home projects Standard clarify prompts as typed choices here.
+
+    Only for an interactive grant, and only while Standard itself says nothing
+    about typed choice: a Standard that advertises ``prompt.choose`` (even as
+    false) owns the decision and the native path wins.
+    """
+    if not interactive_choice:
+        return False
+    capabilities = payload.get("capabilities")
+    source = capabilities if isinstance(capabilities, Mapping) else payload
+    return "prompt.choose" not in source
+
+
+def _strip_recommended(text: str) -> str:
+    """Standard's own rule: drop a trailing ``(Recommended)`` mark from a label."""
+    stripped = text.strip()
+    mark = "(Recommended)"
+    if stripped.casefold().endswith(mark.casefold()):
+        return stripped[: -len(mark)].strip()
+    return stripped
+
+
+def _project_clarify(
+    payload: Mapping[str, object], *, correlation_id: str | None = None
+) -> _ProjectedClarify | None:
+    """Describe a Standard clarify as a typed choice, or ``None`` to leave it alone.
+    Eligible only when it is one single-select question with 1-32 listed text
+    choices whose original wire strings and display labels are bounded,
+    non-empty, and unique, with a bounded explanation and identifiers. Free
+    text, ``multi_select``, several questions, and anything unusual stay on
+    Home's unchanged clarify path. Never raises: ineligible is not an error.
+    """
+    request_id = payload.get("request_id")
+    sensitive = payload.get("sensitive")
+    if (
+        not _valid_choice_identifier(request_id)
+        or ("sensitive" in payload and type(sensitive) is not bool)
+        or sensitive is True
+    ):
+        return None
+    questions = payload.get("questions")
+    if not isinstance(questions, list) or len(questions) != 1:
+        return None
+    question = questions[0]
+    if not isinstance(question, Mapping):
+        return None
+    question_sensitive = question.get("sensitive")
+    if "sensitive" in question and (
+        type(question_sensitive) is not bool or question_sensitive
+    ):
+        return None
+    qid = question.get("qid")
+    text = question.get("question")
+    choices = question.get("choices")
+    if (
+        not _valid_choice_identifier(qid)
+        or question.get("multi_select") is not False
+        or type(text) is not str
+        or not text.strip()
+        or len(text) > MAX_CHOICE_TEXT_LENGTH
+        or not isinstance(choices, list)
+        or not 1 <= len(choices) <= MAX_CHOICE_OPTIONS
+    ):
+        return None
+    labels: list[str] = []
+    for choice in choices:
+        if type(choice) is not str or len(choice) > MAX_CHOICE_TEXT_LENGTH:
+            return None
+        label = _strip_recommended(choice)
+        if not label or len(label) > MAX_CHOICE_LABEL_LENGTH:
+            return None
+        labels.append(label)
+    if len(set(labels)) != len(labels):
+        return None
+    return _ProjectedClarify(
+        request_id=request_id,
+        correlation_id=correlation_id or request_id,
+        qid=qid,
+        text=text,
+        labels=tuple(labels),
+        answers=tuple(choices),
+    )
 
 
 def _catalog_commands(payload: Mapping[str, object]) -> list[str]:
@@ -3686,7 +3961,7 @@ def _validate_typed_choice_event_payload(payload: Mapping[str, object]) -> None:
     if payload.get("prompt_kind") != "choice":
         raise BridgeProtocolError("typed choice event has an invalid prompt kind")
     text = payload.get("text")
-    if type(text) is not str or not text.strip() or len(text) > 1024:
+    if type(text) is not str or not text.strip() or len(text) > MAX_CHOICE_TEXT_LENGTH:
         raise BridgeProtocolError("typed choice event has invalid explanation text")
     if "sensitive" in payload and type(payload["sensitive"]) is not bool:
         raise BridgeProtocolError("typed choice privacy flag is not a boolean")
@@ -3713,7 +3988,11 @@ def _validate_typed_choice_event_payload(payload: Mapping[str, object]) -> None:
     ):
         raise BridgeProtocolError("typed choice operations are invalid")
     options = payload.get("options")
-    if not isinstance(options, list) or not options or len(options) > 32:
+    if (
+        not isinstance(options, list)
+        or not options
+        or len(options) > MAX_CHOICE_OPTIONS
+    ):
         raise BridgeProtocolError("typed choice options are invalid")
     option_ids: set[str] = set()
     for option in options:
@@ -3723,7 +4002,11 @@ def _validate_typed_choice_event_payload(payload: Mapping[str, object]) -> None:
         label = option.get("label")
         if not _valid_choice_identifier(option_id):
             raise BridgeProtocolError("typed choice option ID is invalid")
-        if type(label) is not str or not label.strip() or len(label) > 256:
+        if (
+            type(label) is not str
+            or not label.strip()
+            or len(label) > MAX_CHOICE_LABEL_LENGTH
+        ):
             raise BridgeProtocolError("typed choice option label is invalid")
         if option_id in option_ids:
             raise BridgeProtocolError("typed choice option IDs are duplicated")
@@ -3782,7 +4065,7 @@ def _valid_choice_identifier(value: object) -> bool:
         type(value) is str
         and bool(value)
         and value == value.strip()
-        and len(value) <= 64
+        and len(value) <= MAX_CHOICE_ID_LENGTH
         and not any(ord(character) < 32 for character in value)
     )
 
@@ -3880,7 +4163,10 @@ def _validate_structured_response(
 
 
 def _require_prompt_resolution_result(
-    result: Mapping[str, object], event: BridgeEvent
+    result: Mapping[str, object],
+    event: BridgeEvent,
+    *,
+    batch_clarify: bool | None = None,
 ) -> None:
     if _is_rejected_result(result):
         raise BridgeRequestRejected(
@@ -3895,7 +4181,9 @@ def _require_prompt_resolution_result(
     if status is not None and not isinstance(status, str):
         raise BridgeProtocolError("standard gateway prompt result has invalid status")
     if "remaining" in result:
-        if not _is_batch_clarify_event(event):
+        if not (
+            _is_batch_clarify_event(event) if batch_clarify is None else batch_clarify
+        ):
             raise BridgeProtocolError(
                 "only batch clarify results may include remaining questions"
             )

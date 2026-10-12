@@ -10,6 +10,11 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
 from hermes_home.bridge.standard import (
+    CLARIFY_CHOICE_TTL_SECONDS,
+    MAX_CHOICE_ID_LENGTH,
+    MAX_CHOICE_LABEL_LENGTH,
+    MAX_CHOICE_OPTIONS,
+    MAX_CHOICE_TEXT_LENGTH,
     MAX_TYPED_CHOICE_REVISIONS_PER_TURN,
     BridgeEvent,
 )
@@ -17,10 +22,6 @@ from hermes_home.bridge.standard import (
 CHOICE_EVENT_TYPE = "prompt.request"
 CHOICE_EXPIRY_EVENT_TYPE = "prompt.expire"
 CHOICE_TTL_SECONDS = 300.0
-MAX_CHOICE_OPTIONS = 32
-MAX_CHOICE_ID_LENGTH = 64
-MAX_CHOICE_TEXT_LENGTH = 1024
-MAX_CHOICE_LABEL_LENGTH = 256
 MAX_CHOICE_CORRELATIONS = 256
 MAX_CHOICE_OBJECTS_PER_TURN = MAX_TYPED_CHOICE_REVISIONS_PER_TURN
 
@@ -49,6 +50,7 @@ class _ChoiceObject:
     options: tuple[tuple[str, str], ...]
     expires_at: float | None = None
     state: str = "active"
+    ttl_seconds: float = CHOICE_TTL_SECONDS
 
 
 @dataclass(slots=True)
@@ -98,6 +100,7 @@ class ChoiceAuthority:
         text, source_object_id, source_freshness, source_operations, options = (
             _normalize_choice_payload(payload)
         )
+        ttl_seconds = _choice_ttl(event)
         if (
             type(event.standard_session_id) is not str
             or not event.standard_session_id
@@ -178,6 +181,7 @@ class ChoiceAuthority:
                 source_operations=source_operations,
                 supported_operations=supported_operations,
                 options=options,
+                ttl_seconds=ttl_seconds,
             )
             self._objects[source_key] = choice
             self._current[turn_key] = choice
@@ -223,7 +227,7 @@ class ChoiceAuthority:
             return 0
         now = self._now()
         if choice.expires_at is None:
-            choice.expires_at = now + CHOICE_TTL_SECONDS
+            choice.expires_at = now + choice.ttl_seconds
         elif now >= choice.expires_at:
             choice.state = "expired"
             self._current.pop((handle, turn_id), None)
@@ -410,7 +414,7 @@ class ChoiceAuthority:
         if choice.state != "active":
             return 0
         if choice.expires_at is None:
-            return int(CHOICE_TTL_SECONDS)
+            return int(choice.ttl_seconds)
         return max(0, math.ceil(choice.expires_at - now))
 
 
@@ -498,3 +502,23 @@ def _valid_identifier(value: object) -> bool:
         and len(value) <= MAX_CHOICE_ID_LENGTH
         and not any(ord(character) < 32 for character in value)
     )
+
+
+def _choice_ttl(event: BridgeEvent) -> float:
+    """The freshness window for a new choice object.
+
+    Native typed choices keep the published 300 seconds. Only Home's own bridge
+    sets ``choice_ttl_seconds`` (for a clarify it projected), and never from an
+    event payload; anything else than a finite positive value no larger than the
+    clarify window is refused.
+    """
+    ttl = event.choice_ttl_seconds
+    if ttl is None:
+        return CHOICE_TTL_SECONDS
+    if (
+        type(ttl) not in {int, float}
+        or not 0 < ttl <= CLARIFY_CHOICE_TTL_SECONDS
+        or not math.isfinite(ttl)
+    ):
+        raise ChoiceProtocolError("choice TTL is invalid")
+    return float(ttl)

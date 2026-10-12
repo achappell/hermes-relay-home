@@ -1,0 +1,979 @@
+{
+ "standard": {
+  "hermes_release": "0.21.1",
+  "source_commit": "2237be355906fbe6065ce1815711eee52b2d646e",
+  "server": "hermes serve --isolated (tui_gateway /api/ws), loopback, throwaway HERMES_HOME and HOME",
+  "model": "scripted OpenAI-compatible stub (no real model)",
+  "captured": "2026-10-11"
+ },
+ "title": "Single-select, two-choice, one-choice, free-text, multi-select and two-question clarify requests, answered with the first choice",
+ "note": "choices carry ' (Recommended)' on the first choice when there are 2 or more; at most 4 choices; no explicit 'Other' row on the wire; qid is q<index>; request_id is 8 hex; result of a batch answer is {status:ok, remaining:[...]}",
+ "frames": [
+  {
+   "dir": "in",
+   "t": 0.056,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "gateway.ready",
+     "payload": {
+      "change_events": true,
+      "heartbeat": true,
+      "replay_epoch": "6c9cca47be4a4e3ea9cd444b4cb18b5e",
+      "skin": "<omitted>"
+     }
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "out",
+   "t": 0.056,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "shapes-1",
+    "method": "session.create",
+    "params": {
+     "source": "home"
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 0.188,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "shapes-1",
+    "result": {
+     "session_id": "6bf11f88",
+     "stored_session_id": "20261011_180839_24466e",
+     "message_count": 0,
+     "messages": "<omitted>",
+     "info": "<omitted>"
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "out",
+   "t": 0.188,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "shapes-2",
+    "method": "prompt.submit",
+    "params": {
+     "session_id": "6bf11f88",
+     "text": "ask:single "
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 0.197,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "shapes-2",
+    "result": {
+     "status": "streaming"
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 4.769,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "clarify.request",
+     "session_id": "6bf11f88",
+     "payload": {
+      "questions": [
+       {
+        "qid": "q0",
+        "question": "Which color?",
+        "choices": [
+         "red (Recommended)",
+         "green",
+         "blue"
+        ],
+        "multi_select": false
+       }
+      ],
+      "request_id": "0f1b570c"
+     },
+     "seq": 9
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "out",
+   "t": 4.77,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "shapes-3",
+    "method": "clarify.respond",
+    "params": {
+     "session_id": "6bf11f88",
+     "request_id": "0f1b570c",
+     "question_id": "q0",
+     "answer": "red (Recommended)"
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 4.77,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "shapes-3",
+    "result": {
+     "status": "ok",
+     "remaining": []
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 4.771,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "tool.complete",
+     "session_id": "6bf11f88",
+     "payload": {
+      "tool_id": "call_2e80bbcb",
+      "name": "clarify",
+      "args": {
+       "questions": [
+        {
+         "question": "Which color?",
+         "choices": [
+          "red",
+          "green",
+          "blue"
+         ]
+        }
+       ]
+      },
+      "duration_s": 0.004434347152709961,
+      "result": {
+       "responses": [
+        {
+         "question": "Which color?",
+         "choices_offered": [
+          "red",
+          "green",
+          "blue"
+         ],
+         "user_response": "red"
+        }
+       ]
+      }
+     },
+     "seq": 10
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 4.785,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "message.complete",
+     "session_id": "6bf11f88",
+     "payload": {
+      "text": "STUB-RECEIVED: {\"responses\": [{\"question\": \"Which color?\", \"choices_offered\": [\"red\", \"green\", \"blue\"], \"user_response\": \"red\"}]}",
+      "usage": "<omitted>",
+      "status": "complete"
+     },
+     "seq": 16
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "out",
+   "t": 4.785,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "shapes-4",
+    "method": "prompt.submit",
+    "params": {
+     "session_id": "6bf11f88",
+     "text": "ask:two "
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 4.787,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "shapes-4",
+    "result": {
+     "status": "queued"
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 4.815,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "clarify.request",
+     "session_id": "6bf11f88",
+     "payload": {
+      "questions": [
+       {
+        "qid": "q0",
+        "question": "Proceed?",
+        "choices": [
+         "yes (Recommended)",
+         "no"
+        ],
+        "multi_select": false
+       }
+      ],
+      "request_id": "c3458515"
+     },
+     "seq": 24
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "out",
+   "t": 4.816,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "shapes-5",
+    "method": "clarify.respond",
+    "params": {
+     "session_id": "6bf11f88",
+     "request_id": "c3458515",
+     "question_id": "q0",
+     "answer": "yes (Recommended)"
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 4.816,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "shapes-5",
+    "result": {
+     "status": "ok",
+     "remaining": []
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 4.817,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "tool.complete",
+     "session_id": "6bf11f88",
+     "payload": {
+      "tool_id": "call_c47d3ba8",
+      "name": "clarify",
+      "args": {
+       "questions": [
+        {
+         "question": "Proceed?",
+         "choices": [
+          "yes",
+          "no"
+         ]
+        }
+       ]
+      },
+      "duration_s": 0.002053976058959961,
+      "result": {
+       "responses": [
+        {
+         "question": "Proceed?",
+         "choices_offered": [
+          "yes",
+          "no"
+         ],
+         "user_response": "yes"
+        }
+       ]
+      }
+     },
+     "seq": 25
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 4.827,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "message.complete",
+     "session_id": "6bf11f88",
+     "payload": {
+      "text": "STUB-RECEIVED: {\"responses\": [{\"question\": \"Proceed?\", \"choices_offered\": [\"yes\", \"no\"], \"user_response\": \"yes\"}]}",
+      "usage": "<omitted>",
+      "status": "complete"
+     },
+     "seq": 31
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "out",
+   "t": 4.827,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "shapes-6",
+    "method": "prompt.submit",
+    "params": {
+     "session_id": "6bf11f88",
+     "text": "ask:one "
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 4.834,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "shapes-6",
+    "result": {
+     "status": "streaming"
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 4.852,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "clarify.request",
+     "session_id": "6bf11f88",
+     "payload": {
+      "questions": [
+       {
+        "qid": "q0",
+        "question": "Only one?",
+        "choices": [
+         "solo"
+        ],
+        "multi_select": false
+       }
+      ],
+      "request_id": "00ddc2a7"
+     },
+     "seq": 39
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "out",
+   "t": 4.852,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "shapes-7",
+    "method": "clarify.respond",
+    "params": {
+     "session_id": "6bf11f88",
+     "request_id": "00ddc2a7",
+     "question_id": "q0",
+     "answer": "solo"
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 4.853,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "shapes-7",
+    "result": {
+     "status": "ok",
+     "remaining": []
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 4.853,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "tool.complete",
+     "session_id": "6bf11f88",
+     "payload": {
+      "tool_id": "call_dce9c99f",
+      "name": "clarify",
+      "args": {
+       "questions": [
+        {
+         "question": "Only one?",
+         "choices": [
+          "solo"
+         ]
+        }
+       ]
+      },
+      "duration_s": 0.0019991397857666016,
+      "result": {
+       "responses": [
+        {
+         "question": "Only one?",
+         "choices_offered": [
+          "solo"
+         ],
+         "user_response": "solo"
+        }
+       ]
+      }
+     },
+     "seq": 40
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 4.864,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "message.complete",
+     "session_id": "6bf11f88",
+     "payload": {
+      "text": "STUB-RECEIVED: {\"responses\": [{\"question\": \"Only one?\", \"choices_offered\": [\"solo\"], \"user_response\": \"solo\"}]}",
+      "usage": "<omitted>",
+      "status": "complete"
+     },
+     "seq": 46
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "out",
+   "t": 4.864,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "shapes-8",
+    "method": "prompt.submit",
+    "params": {
+     "session_id": "6bf11f88",
+     "text": "ask:free "
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 4.87,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "shapes-8",
+    "result": {
+     "status": "streaming"
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 4.904,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "clarify.request",
+     "session_id": "6bf11f88",
+     "payload": {
+      "questions": [
+       {
+        "qid": "q0",
+        "question": "What name?",
+        "choices": null,
+        "multi_select": false
+       }
+      ],
+      "request_id": "574baa33"
+     },
+     "seq": 54
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "out",
+   "t": 4.904,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "shapes-9",
+    "method": "clarify.respond",
+    "params": {
+     "session_id": "6bf11f88",
+     "request_id": "574baa33",
+     "question_id": "q0",
+     "answer": "Alice"
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 4.905,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "shapes-9",
+    "result": {
+     "status": "ok",
+     "remaining": []
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 4.906,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "tool.complete",
+     "session_id": "6bf11f88",
+     "payload": {
+      "tool_id": "call_bc6ea4ba",
+      "name": "clarify",
+      "args": {
+       "questions": [
+        {
+         "question": "What name?"
+        }
+       ]
+      },
+      "duration_s": 0.0019309520721435547,
+      "result": {
+       "responses": [
+        {
+         "question": "What name?",
+         "choices_offered": null,
+         "user_response": "Alice"
+        }
+       ]
+      }
+     },
+     "seq": 55
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 4.917,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "message.complete",
+     "session_id": "6bf11f88",
+     "payload": {
+      "text": "STUB-RECEIVED: {\"responses\": [{\"question\": \"What name?\", \"choices_offered\": null, \"user_response\": \"Alice\"}]}",
+      "usage": "<omitted>",
+      "status": "complete"
+     },
+     "seq": 61
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "out",
+   "t": 4.917,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "shapes-10",
+    "method": "prompt.submit",
+    "params": {
+     "session_id": "6bf11f88",
+     "text": "ask:multi "
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 4.924,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "shapes-10",
+    "result": {
+     "status": "streaming"
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 4.942,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "clarify.request",
+     "session_id": "6bf11f88",
+     "payload": {
+      "questions": [
+       {
+        "qid": "q0",
+        "question": "Pick many",
+        "choices": [
+         "a (Recommended)",
+         "b",
+         "c"
+        ],
+        "multi_select": true
+       }
+      ],
+      "request_id": "75ad7086"
+     },
+     "seq": 69
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "out",
+   "t": 4.942,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "shapes-11",
+    "method": "clarify.respond",
+    "params": {
+     "session_id": "6bf11f88",
+     "request_id": "75ad7086",
+     "question_id": "q0",
+     "answer": [
+      "a (Recommended)",
+      "b"
+     ]
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 4.943,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "shapes-11",
+    "result": {
+     "status": "ok",
+     "remaining": []
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 4.944,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "tool.complete",
+     "session_id": "6bf11f88",
+     "payload": {
+      "tool_id": "call_68625d19",
+      "name": "clarify",
+      "args": {
+       "questions": [
+        {
+         "question": "Pick many",
+         "choices": [
+          "a",
+          "b",
+          "c"
+         ],
+         "multi_select": true
+        }
+       ]
+      },
+      "duration_s": 0.0023429393768310547,
+      "result": {
+       "responses": [
+        {
+         "question": "Pick many",
+         "choices_offered": [
+          "a",
+          "b",
+          "c"
+         ],
+         "user_response": [
+          "a",
+          "b"
+         ]
+        }
+       ]
+      }
+     },
+     "seq": 70
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 4.959,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "message.complete",
+     "session_id": "6bf11f88",
+     "payload": {
+      "text": "STUB-RECEIVED: {\"responses\": [{\"question\": \"Pick many\", \"choices_offered\": [\"a\", \"b\", \"c\"], \"user_response\": [\"a\", \"b\"]}]}",
+      "usage": "<omitted>",
+      "status": "complete"
+     },
+     "seq": 76
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "out",
+   "t": 4.959,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "shapes-12",
+    "method": "prompt.submit",
+    "params": {
+     "session_id": "6bf11f88",
+     "text": "ask:batch "
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 4.966,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "shapes-12",
+    "result": {
+     "status": "streaming"
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 5.02,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "clarify.request",
+     "session_id": "6bf11f88",
+     "payload": {
+      "questions": [
+       {
+        "qid": "q0",
+        "question": "Q one",
+        "choices": [
+         "x (Recommended)",
+         "y"
+        ],
+        "multi_select": false
+       },
+       {
+        "qid": "q1",
+        "question": "Q two",
+        "choices": [
+         "p (Recommended)",
+         "q"
+        ],
+        "multi_select": false
+       }
+      ],
+      "request_id": "df29c4cb"
+     },
+     "seq": 84
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "out",
+   "t": 5.02,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "shapes-13",
+    "method": "clarify.respond",
+    "params": {
+     "session_id": "6bf11f88",
+     "request_id": "df29c4cb",
+     "question_id": "q0",
+     "answer": "x (Recommended)"
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 5.021,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "shapes-13",
+    "result": {
+     "status": "ok",
+     "remaining": [
+      "q1"
+     ]
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "out",
+   "t": 5.021,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "shapes-14",
+    "method": "clarify.respond",
+    "params": {
+     "session_id": "6bf11f88",
+     "request_id": "df29c4cb",
+     "question_id": "q1",
+     "answer": "p (Recommended)"
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 5.021,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "shapes-14",
+    "result": {
+     "status": "ok",
+     "remaining": []
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 5.022,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "tool.complete",
+     "session_id": "6bf11f88",
+     "payload": {
+      "tool_id": "call_26f11806",
+      "name": "clarify",
+      "args": {
+       "questions": [
+        {
+         "question": "Q one",
+         "choices": [
+          "x",
+          "y"
+         ]
+        },
+        {
+         "question": "Q two",
+         "choices": [
+          "p",
+          "q"
+         ]
+        }
+       ]
+      },
+      "duration_s": 0.002189159393310547,
+      "result": {
+       "responses": [
+        {
+         "question": "Q one",
+         "choices_offered": [
+          "x",
+          "y"
+         ],
+         "user_response": "x"
+        },
+        {
+         "question": "Q two",
+         "choices_offered": [
+          "p",
+          "q"
+         ],
+         "user_response": "p"
+        }
+       ]
+      }
+     },
+     "seq": 85
+    }
+   },
+   "conn": "shapes"
+  },
+  {
+   "dir": "in",
+   "t": 5.033,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "message.complete",
+     "session_id": "6bf11f88",
+     "payload": {
+      "text": "STUB-RECEIVED: {\"responses\": [{\"question\": \"Q one\", \"choices_offered\": [\"x\", \"y\"], \"user_response\": \"x\"}, {\"question\": \"Q two\", \"choices_offered\": [\"p\", \"q\"], \"user_response\": \"p\"}]}",
+      "usage": "<omitted>",
+      "status": "complete"
+     },
+     "seq": 91
+    }
+   },
+   "conn": "shapes"
+  }
+ ]
+}

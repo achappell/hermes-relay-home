@@ -1,0 +1,1959 @@
+{
+ "standard": {
+  "hermes_release": "0.21.1",
+  "source_commit": "2237be355906fbe6065ce1815711eee52b2d646e",
+  "server": "hermes serve --isolated (tui_gateway /api/ws), loopback, throwaway HERMES_HOME and HOME",
+  "model": "scripted OpenAI-compatible stub (no real model)",
+  "captured": "2026-10-11"
+ },
+ "title": "clarify.respond answer variants: wire string, stripped label, index, out-of-list, empty, case, list, missing/unknown question_id, duplicate, late",
+ "note": "Standard does not validate answer against choices; stored verbatim; '(Recommended)' is stripped by the tool; a missing question_id on a batch request loses the answer",
+ "frames": [
+  {
+   "dir": "in",
+   "t": 0.043,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "gateway.ready",
+     "payload": {
+      "change_events": true,
+      "heartbeat": true,
+      "replay_epoch": "6c9cca47be4a4e3ea9cd444b4cb18b5e",
+      "skin": "<omitted>"
+     }
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "out",
+   "t": 0.043,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-1",
+    "method": "session.create",
+    "params": {
+     "source": "home"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.071,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-1",
+    "result": {
+     "session_id": "dc1387f5",
+     "stored_session_id": "20261011_180855_4cb237",
+     "message_count": 0,
+     "messages": "<omitted>",
+     "info": "<omitted>"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "out",
+   "t": 0.071,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-2",
+    "method": "prompt.submit",
+    "params": {
+     "session_id": "dc1387f5",
+     "text": "ask:single wire_string"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.075,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-2",
+    "result": {
+     "status": "streaming"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.186,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "clarify.request",
+     "session_id": "dc1387f5",
+     "payload": {
+      "questions": [
+       {
+        "qid": "q0",
+        "question": "Which color?",
+        "choices": [
+         "red (Recommended)",
+         "green",
+         "blue"
+        ],
+        "multi_select": false
+       }
+      ],
+      "request_id": "23f4c3b5"
+     },
+     "seq": 9
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "out",
+   "t": 0.186,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-3",
+    "method": "clarify.respond",
+    "params": {
+     "session_id": "dc1387f5",
+     "request_id": "23f4c3b5",
+     "question_id": "q0",
+     "answer": "red (Recommended)"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.187,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-3",
+    "result": {
+     "status": "ok",
+     "remaining": []
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.2,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "tool.complete",
+     "session_id": "dc1387f5",
+     "payload": {
+      "tool_id": "call_d0555b4d",
+      "name": "clarify",
+      "args": {
+       "questions": [
+        {
+         "question": "Which color?",
+         "choices": [
+          "red",
+          "green",
+          "blue"
+         ]
+        }
+       ]
+      },
+      "duration_s": 0.014590024948120117,
+      "result": {
+       "responses": [
+        {
+         "question": "Which color?",
+         "choices_offered": [
+          "red",
+          "green",
+          "blue"
+         ],
+         "user_response": "red"
+        }
+       ]
+      }
+     },
+     "seq": 10
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.212,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "message.complete",
+     "session_id": "dc1387f5",
+     "payload": {
+      "text": "STUB-RECEIVED: {\"responses\": [{\"question\": \"Which color?\", \"choices_offered\": [\"red\", \"green\", \"blue\"], \"user_response\": \"red\"}]}",
+      "usage": "<omitted>",
+      "status": "complete"
+     },
+     "seq": 16
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "out",
+   "t": 0.212,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-4",
+    "method": "prompt.submit",
+    "params": {
+     "session_id": "dc1387f5",
+     "text": "ask:single stripped_label"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.221,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-4",
+    "result": {
+     "status": "streaming"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.247,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "clarify.request",
+     "session_id": "dc1387f5",
+     "payload": {
+      "questions": [
+       {
+        "qid": "q0",
+        "question": "Which color?",
+        "choices": [
+         "red (Recommended)",
+         "green",
+         "blue"
+        ],
+        "multi_select": false
+       }
+      ],
+      "request_id": "9fb4d3e3"
+     },
+     "seq": 24
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "out",
+   "t": 0.247,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-5",
+    "method": "clarify.respond",
+    "params": {
+     "session_id": "dc1387f5",
+     "request_id": "9fb4d3e3",
+     "question_id": "q0",
+     "answer": "red"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.248,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-5",
+    "result": {
+     "status": "ok",
+     "remaining": []
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.249,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "tool.complete",
+     "session_id": "dc1387f5",
+     "payload": {
+      "tool_id": "call_c4ee9291",
+      "name": "clarify",
+      "args": {
+       "questions": [
+        {
+         "question": "Which color?",
+         "choices": [
+          "red",
+          "green",
+          "blue"
+         ]
+        }
+       ]
+      },
+      "duration_s": 0.002237081527709961,
+      "result": {
+       "responses": [
+        {
+         "question": "Which color?",
+         "choices_offered": [
+          "red",
+          "green",
+          "blue"
+         ],
+         "user_response": "red"
+        }
+       ]
+      }
+     },
+     "seq": 25
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.261,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "message.complete",
+     "session_id": "dc1387f5",
+     "payload": {
+      "text": "STUB-RECEIVED: {\"responses\": [{\"question\": \"Which color?\", \"choices_offered\": [\"red\", \"green\", \"blue\"], \"user_response\": \"red\"}]}",
+      "usage": "<omitted>",
+      "status": "complete"
+     },
+     "seq": 31
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "out",
+   "t": 0.261,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-6",
+    "method": "prompt.submit",
+    "params": {
+     "session_id": "dc1387f5",
+     "text": "ask:single other_choice"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.271,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-6",
+    "result": {
+     "status": "streaming"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.297,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "clarify.request",
+     "session_id": "dc1387f5",
+     "payload": {
+      "questions": [
+       {
+        "qid": "q0",
+        "question": "Which color?",
+        "choices": [
+         "red (Recommended)",
+         "green",
+         "blue"
+        ],
+        "multi_select": false
+       }
+      ],
+      "request_id": "61b46b96"
+     },
+     "seq": 39
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "out",
+   "t": 0.297,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-7",
+    "method": "clarify.respond",
+    "params": {
+     "session_id": "dc1387f5",
+     "request_id": "61b46b96",
+     "question_id": "q0",
+     "answer": "green"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.298,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-7",
+    "result": {
+     "status": "ok",
+     "remaining": []
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.299,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "tool.complete",
+     "session_id": "dc1387f5",
+     "payload": {
+      "tool_id": "call_e8889000",
+      "name": "clarify",
+      "args": {
+       "questions": [
+        {
+         "question": "Which color?",
+         "choices": [
+          "red",
+          "green",
+          "blue"
+         ]
+        }
+       ]
+      },
+      "duration_s": 0.0021479129791259766,
+      "result": {
+       "responses": [
+        {
+         "question": "Which color?",
+         "choices_offered": [
+          "red",
+          "green",
+          "blue"
+         ],
+         "user_response": "green"
+        }
+       ]
+      }
+     },
+     "seq": 40
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.31,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "message.complete",
+     "session_id": "dc1387f5",
+     "payload": {
+      "text": "STUB-RECEIVED: {\"responses\": [{\"question\": \"Which color?\", \"choices_offered\": [\"red\", \"green\", \"blue\"], \"user_response\": \"green\"}]}",
+      "usage": "<omitted>",
+      "status": "complete"
+     },
+     "seq": 46
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "out",
+   "t": 0.31,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-8",
+    "method": "prompt.submit",
+    "params": {
+     "session_id": "dc1387f5",
+     "text": "ask:single index_1based"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.319,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-8",
+    "result": {
+     "status": "streaming"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.356,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "clarify.request",
+     "session_id": "dc1387f5",
+     "payload": {
+      "questions": [
+       {
+        "qid": "q0",
+        "question": "Which color?",
+        "choices": [
+         "red (Recommended)",
+         "green",
+         "blue"
+        ],
+        "multi_select": false
+       }
+      ],
+      "request_id": "060b2904"
+     },
+     "seq": 54
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "out",
+   "t": 0.356,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-9",
+    "method": "clarify.respond",
+    "params": {
+     "session_id": "dc1387f5",
+     "request_id": "060b2904",
+     "question_id": "q0",
+     "answer": "1"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.357,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-9",
+    "result": {
+     "status": "ok",
+     "remaining": []
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.359,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "tool.complete",
+     "session_id": "dc1387f5",
+     "payload": {
+      "tool_id": "call_11736460",
+      "name": "clarify",
+      "args": {
+       "questions": [
+        {
+         "question": "Which color?",
+         "choices": [
+          "red",
+          "green",
+          "blue"
+         ]
+        }
+       ]
+      },
+      "duration_s": 0.005609989166259766,
+      "result": {
+       "responses": [
+        {
+         "question": "Which color?",
+         "choices_offered": [
+          "red",
+          "green",
+          "blue"
+         ],
+         "user_response": "1"
+        }
+       ]
+      }
+     },
+     "seq": 55
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.381,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "message.complete",
+     "session_id": "dc1387f5",
+     "payload": {
+      "text": "STUB-RECEIVED: {\"responses\": [{\"question\": \"Which color?\", \"choices_offered\": [\"red\", \"green\", \"blue\"], \"user_response\": \"1\"}]}",
+      "usage": "<omitted>",
+      "status": "complete"
+     },
+     "seq": 61
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "out",
+   "t": 0.381,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-10",
+    "method": "prompt.submit",
+    "params": {
+     "session_id": "dc1387f5",
+     "text": "ask:single index_0based"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.394,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-10",
+    "result": {
+     "status": "streaming"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.435,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "clarify.request",
+     "session_id": "dc1387f5",
+     "payload": {
+      "questions": [
+       {
+        "qid": "q0",
+        "question": "Which color?",
+        "choices": [
+         "red (Recommended)",
+         "green",
+         "blue"
+        ],
+        "multi_select": false
+       }
+      ],
+      "request_id": "992f5b8b"
+     },
+     "seq": 69
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "out",
+   "t": 0.435,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-11",
+    "method": "clarify.respond",
+    "params": {
+     "session_id": "dc1387f5",
+     "request_id": "992f5b8b",
+     "question_id": "q0",
+     "answer": "0"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.436,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-11",
+    "result": {
+     "status": "ok",
+     "remaining": []
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.437,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "tool.complete",
+     "session_id": "dc1387f5",
+     "payload": {
+      "tool_id": "call_2ad1aa23",
+      "name": "clarify",
+      "args": {
+       "questions": [
+        {
+         "question": "Which color?",
+         "choices": [
+          "red",
+          "green",
+          "blue"
+         ]
+        }
+       ]
+      },
+      "duration_s": 0.003988981246948242,
+      "result": {
+       "responses": [
+        {
+         "question": "Which color?",
+         "choices_offered": [
+          "red",
+          "green",
+          "blue"
+         ],
+         "user_response": "0"
+        }
+       ]
+      }
+     },
+     "seq": 70
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.453,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "message.complete",
+     "session_id": "dc1387f5",
+     "payload": {
+      "text": "STUB-RECEIVED: {\"responses\": [{\"question\": \"Which color?\", \"choices_offered\": [\"red\", \"green\", \"blue\"], \"user_response\": \"0\"}]}",
+      "usage": "<omitted>",
+      "status": "complete"
+     },
+     "seq": 76
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "out",
+   "t": 0.453,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-12",
+    "method": "prompt.submit",
+    "params": {
+     "session_id": "dc1387f5",
+     "text": "ask:single out_of_list"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.462,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-12",
+    "result": {
+     "status": "streaming"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.51,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "clarify.request",
+     "session_id": "dc1387f5",
+     "payload": {
+      "questions": [
+       {
+        "qid": "q0",
+        "question": "Which color?",
+        "choices": [
+         "red (Recommended)",
+         "green",
+         "blue"
+        ],
+        "multi_select": false
+       }
+      ],
+      "request_id": "bdf6a414"
+     },
+     "seq": 84
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "out",
+   "t": 0.51,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-13",
+    "method": "clarify.respond",
+    "params": {
+     "session_id": "dc1387f5",
+     "request_id": "bdf6a414",
+     "question_id": "q0",
+     "answer": "purple"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.51,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-13",
+    "result": {
+     "status": "ok",
+     "remaining": []
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.511,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "tool.complete",
+     "session_id": "dc1387f5",
+     "payload": {
+      "tool_id": "call_a80293c3",
+      "name": "clarify",
+      "args": {
+       "questions": [
+        {
+         "question": "Which color?",
+         "choices": [
+          "red",
+          "green",
+          "blue"
+         ]
+        }
+       ]
+      },
+      "duration_s": 0.0029218196868896484,
+      "result": {
+       "responses": [
+        {
+         "question": "Which color?",
+         "choices_offered": [
+          "red",
+          "green",
+          "blue"
+         ],
+         "user_response": "purple"
+        }
+       ]
+      }
+     },
+     "seq": 85
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.525,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "message.complete",
+     "session_id": "dc1387f5",
+     "payload": {
+      "text": "STUB-RECEIVED: {\"responses\": [{\"question\": \"Which color?\", \"choices_offered\": [\"red\", \"green\", \"blue\"], \"user_response\": \"purple\"}]}",
+      "usage": "<omitted>",
+      "status": "complete"
+     },
+     "seq": 91
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "out",
+   "t": 0.525,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-14",
+    "method": "prompt.submit",
+    "params": {
+     "session_id": "dc1387f5",
+     "text": "ask:single empty_string"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.532,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-14",
+    "result": {
+     "status": "streaming"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.562,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "clarify.request",
+     "session_id": "dc1387f5",
+     "payload": {
+      "questions": [
+       {
+        "qid": "q0",
+        "question": "Which color?",
+        "choices": [
+         "red (Recommended)",
+         "green",
+         "blue"
+        ],
+        "multi_select": false
+       }
+      ],
+      "request_id": "1da2ee73"
+     },
+     "seq": 99
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "out",
+   "t": 0.562,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-15",
+    "method": "clarify.respond",
+    "params": {
+     "session_id": "dc1387f5",
+     "request_id": "1da2ee73",
+     "question_id": "q0",
+     "answer": ""
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.562,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-15",
+    "result": {
+     "status": "ok",
+     "remaining": []
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.563,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "tool.complete",
+     "session_id": "dc1387f5",
+     "payload": {
+      "tool_id": "call_819cc27f",
+      "name": "clarify",
+      "args": {
+       "questions": [
+        {
+         "question": "Which color?",
+         "choices": [
+          "red",
+          "green",
+          "blue"
+         ]
+        }
+       ]
+      },
+      "duration_s": 0.0021600723266601562,
+      "result": {
+       "responses": [
+        {
+         "question": "Which color?",
+         "choices_offered": [
+          "red",
+          "green",
+          "blue"
+         ],
+         "user_response": ""
+        }
+       ]
+      }
+     },
+     "seq": 100
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.576,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "message.complete",
+     "session_id": "dc1387f5",
+     "payload": {
+      "text": "STUB-RECEIVED: {\"responses\": [{\"question\": \"Which color?\", \"choices_offered\": [\"red\", \"green\", \"blue\"], \"user_response\": \"\"}]}",
+      "usage": "<omitted>",
+      "status": "complete"
+     },
+     "seq": 106
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "out",
+   "t": 0.576,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-16",
+    "method": "prompt.submit",
+    "params": {
+     "session_id": "dc1387f5",
+     "text": "ask:single case_changed"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.584,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-16",
+    "result": {
+     "status": "streaming"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.611,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "clarify.request",
+     "session_id": "dc1387f5",
+     "payload": {
+      "questions": [
+       {
+        "qid": "q0",
+        "question": "Which color?",
+        "choices": [
+         "red (Recommended)",
+         "green",
+         "blue"
+        ],
+        "multi_select": false
+       }
+      ],
+      "request_id": "8f31f588"
+     },
+     "seq": 114
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "out",
+   "t": 0.611,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-17",
+    "method": "clarify.respond",
+    "params": {
+     "session_id": "dc1387f5",
+     "request_id": "8f31f588",
+     "question_id": "q0",
+     "answer": "GREEN"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.611,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-17",
+    "result": {
+     "status": "ok",
+     "remaining": []
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.612,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "tool.complete",
+     "session_id": "dc1387f5",
+     "payload": {
+      "tool_id": "call_c95f70c5",
+      "name": "clarify",
+      "args": {
+       "questions": [
+        {
+         "question": "Which color?",
+         "choices": [
+          "red",
+          "green",
+          "blue"
+         ]
+        }
+       ]
+      },
+      "duration_s": 0.0019867420196533203,
+      "result": {
+       "responses": [
+        {
+         "question": "Which color?",
+         "choices_offered": [
+          "red",
+          "green",
+          "blue"
+         ],
+         "user_response": "GREEN"
+        }
+       ]
+      }
+     },
+     "seq": 115
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.626,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "message.complete",
+     "session_id": "dc1387f5",
+     "payload": {
+      "text": "STUB-RECEIVED: {\"responses\": [{\"question\": \"Which color?\", \"choices_offered\": [\"red\", \"green\", \"blue\"], \"user_response\": \"GREEN\"}]}",
+      "usage": "<omitted>",
+      "status": "complete"
+     },
+     "seq": 121
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "out",
+   "t": 0.626,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-18",
+    "method": "prompt.submit",
+    "params": {
+     "session_id": "dc1387f5",
+     "text": "ask:single list_value"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.645,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-18",
+    "result": {
+     "status": "streaming"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.673,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "clarify.request",
+     "session_id": "dc1387f5",
+     "payload": {
+      "questions": [
+       {
+        "qid": "q0",
+        "question": "Which color?",
+        "choices": [
+         "red (Recommended)",
+         "green",
+         "blue"
+        ],
+        "multi_select": false
+       }
+      ],
+      "request_id": "897e11c5"
+     },
+     "seq": 129
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "out",
+   "t": 0.673,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-19",
+    "method": "clarify.respond",
+    "params": {
+     "session_id": "dc1387f5",
+     "request_id": "897e11c5",
+     "question_id": "q0",
+     "answer": [
+      "green"
+     ]
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.673,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-19",
+    "result": {
+     "status": "ok",
+     "remaining": []
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.674,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "tool.complete",
+     "session_id": "dc1387f5",
+     "payload": {
+      "tool_id": "call_0ad75532",
+      "name": "clarify",
+      "args": {
+       "questions": [
+        {
+         "question": "Which color?",
+         "choices": [
+          "red",
+          "green",
+          "blue"
+         ]
+        }
+       ]
+      },
+      "duration_s": 0.002596139907836914,
+      "result": {
+       "responses": [
+        {
+         "question": "Which color?",
+         "choices_offered": [
+          "red",
+          "green",
+          "blue"
+         ],
+         "user_response": "['green']"
+        }
+       ]
+      }
+     },
+     "seq": 130
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.688,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "message.complete",
+     "session_id": "dc1387f5",
+     "payload": {
+      "text": "STUB-RECEIVED: {\"responses\": [{\"question\": \"Which color?\", \"choices_offered\": [\"red\", \"green\", \"blue\"], \"user_response\": \"['green']\"}]}",
+      "usage": "<omitted>",
+      "status": "complete"
+     },
+     "seq": 136
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "out",
+   "t": 0.688,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-20",
+    "method": "prompt.submit",
+    "params": {
+     "session_id": "dc1387f5",
+     "text": "ask:single no_qid"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.696,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-20",
+    "result": {
+     "status": "streaming"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.724,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "clarify.request",
+     "session_id": "dc1387f5",
+     "payload": {
+      "questions": [
+       {
+        "qid": "q0",
+        "question": "Which color?",
+        "choices": [
+         "red (Recommended)",
+         "green",
+         "blue"
+        ],
+        "multi_select": false
+       }
+      ],
+      "request_id": "9c2df943"
+     },
+     "seq": 144
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "out",
+   "t": 0.724,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-21",
+    "method": "clarify.respond",
+    "params": {
+     "session_id": "dc1387f5",
+     "request_id": "9c2df943",
+     "answer": "red"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.725,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-21",
+    "result": {
+     "status": "ok"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.725,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "tool.complete",
+     "session_id": "dc1387f5",
+     "payload": {
+      "tool_id": "call_d676e89a",
+      "name": "clarify",
+      "args": {
+       "questions": [
+        {
+         "question": "Which color?",
+         "choices": [
+          "red",
+          "green",
+          "blue"
+         ]
+        }
+       ]
+      },
+      "duration_s": 0.0021300315856933594,
+      "result": {
+       "responses": [
+        {
+         "question": "Which color?",
+         "choices_offered": [
+          "red",
+          "green",
+          "blue"
+         ],
+         "user_response": ""
+        }
+       ]
+      }
+     },
+     "seq": 145
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.743,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "message.complete",
+     "session_id": "dc1387f5",
+     "payload": {
+      "text": "STUB-RECEIVED: {\"responses\": [{\"question\": \"Which color?\", \"choices_offered\": [\"red\", \"green\", \"blue\"], \"user_response\": \"\"}]}",
+      "usage": "<omitted>",
+      "status": "complete"
+     },
+     "seq": 151
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "out",
+   "t": 0.743,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-22",
+    "method": "prompt.submit",
+    "params": {
+     "session_id": "dc1387f5",
+     "text": "ask:single bad_qid"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.752,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-22",
+    "result": {
+     "status": "streaming"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.801,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "clarify.request",
+     "session_id": "dc1387f5",
+     "payload": {
+      "questions": [
+       {
+        "qid": "q0",
+        "question": "Which color?",
+        "choices": [
+         "red (Recommended)",
+         "green",
+         "blue"
+        ],
+        "multi_select": false
+       }
+      ],
+      "request_id": "d7e79daa"
+     },
+     "seq": 159
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "out",
+   "t": 0.801,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-23",
+    "method": "clarify.respond",
+    "params": {
+     "session_id": "dc1387f5",
+     "request_id": "d7e79daa",
+     "question_id": "q9",
+     "answer": "red"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.801,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-23",
+    "error": {
+     "code": 4002,
+     "message": "unknown question_id 'q9'"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "out",
+   "t": 0.801,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-24",
+    "method": "clarify.respond",
+    "params": {
+     "session_id": "dc1387f5",
+     "request_id": "d7e79daa",
+     "question_id": "q0",
+     "answer": "red"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.802,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-24",
+    "result": {
+     "status": "ok",
+     "remaining": []
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "out",
+   "t": 0.802,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-25",
+    "method": "clarify.respond",
+    "params": {
+     "session_id": "dc1387f5",
+     "request_id": "d7e79daa",
+     "question_id": "q0",
+     "answer": "green"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.802,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-25",
+    "result": {
+     "status": "expired"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.803,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "tool.complete",
+     "session_id": "dc1387f5",
+     "payload": {
+      "tool_id": "call_c7663adc",
+      "name": "clarify",
+      "args": {
+       "questions": [
+        {
+         "question": "Which color?",
+         "choices": [
+          "red",
+          "green",
+          "blue"
+         ]
+        }
+       ]
+      },
+      "duration_s": 0.0027990341186523438,
+      "result": {
+       "responses": [
+        {
+         "question": "Which color?",
+         "choices_offered": [
+          "red",
+          "green",
+          "blue"
+         ],
+         "user_response": "red"
+        }
+       ]
+      }
+     },
+     "seq": 160
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.817,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "message.complete",
+     "session_id": "dc1387f5",
+     "payload": {
+      "text": "STUB-RECEIVED: {\"responses\": [{\"question\": \"Which color?\", \"choices_offered\": [\"red\", \"green\", \"blue\"], \"user_response\": \"red\"}]}",
+      "usage": "<omitted>",
+      "status": "complete"
+     },
+     "seq": 166
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "out",
+   "t": 0.817,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-26",
+    "method": "clarify.respond",
+    "params": {
+     "session_id": "dc1387f5",
+     "request_id": "d7e79daa",
+     "question_id": "q0",
+     "answer": "blue"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.819,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-26",
+    "result": {
+     "status": "expired"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "out",
+   "t": 0.819,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-27",
+    "method": "clarify.respond",
+    "params": {
+     "session_id": "dc1387f5",
+     "request_id": "deadbeef",
+     "question_id": "q0",
+     "answer": "blue"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.825,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-27",
+    "result": {
+     "status": "expired"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "out",
+   "t": 0.825,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-28",
+    "method": "prompt.submit",
+    "params": {
+     "session_id": "dc1387f5",
+     "text": "ask:single pending_then_submit"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.827,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-28",
+    "result": {
+     "status": "streaming"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.857,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "clarify.request",
+     "session_id": "dc1387f5",
+     "payload": {
+      "questions": [
+       {
+        "qid": "q0",
+        "question": "Which color?",
+        "choices": [
+         "red (Recommended)",
+         "green",
+         "blue"
+        ],
+        "multi_select": false
+       }
+      ],
+      "request_id": "61cf53d7"
+     },
+     "seq": 174
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "out",
+   "t": 0.857,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-29",
+    "method": "prompt.submit",
+    "params": {
+     "session_id": "dc1387f5",
+     "text": "ask:two second"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 0.858,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-29",
+    "result": {
+     "status": "redirected"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "out",
+   "t": 5.86,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-30",
+    "method": "session.interrupt",
+    "params": {
+     "session_id": "dc1387f5"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 5.866,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "answers-30",
+    "result": {
+     "status": "interrupted"
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 5.868,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "tool.complete",
+     "session_id": "dc1387f5",
+     "payload": {
+      "tool_id": "call_9b453a20",
+      "name": "clarify",
+      "args": {
+       "questions": [
+        {
+         "question": "Which color?",
+         "choices": [
+          "red",
+          "green",
+          "blue"
+         ]
+        }
+       ]
+      },
+      "duration_s": 5.010867118835449,
+      "result": {
+       "responses": [
+        {
+         "question": "Which color?",
+         "choices_offered": [
+          "red",
+          "green",
+          "blue"
+         ],
+         "user_response": ""
+        }
+       ]
+      }
+     },
+     "seq": 176
+    }
+   },
+   "conn": "answers"
+  },
+  {
+   "dir": "in",
+   "t": 5.879,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "message.complete",
+     "session_id": "dc1387f5",
+     "payload": {
+      "text": null,
+      "usage": "<omitted>",
+      "status": "interrupted"
+     },
+     "seq": 177
+    }
+   },
+   "conn": "answers"
+  }
+ ]
+}

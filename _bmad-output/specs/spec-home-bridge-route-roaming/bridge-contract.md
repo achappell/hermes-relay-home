@@ -254,6 +254,10 @@ The structured prompt event types and response keys are fixed at this boundary:
 | `sudo.request` | `sudo.respond` | `password` |
 | `prompt.request` with `prompt_kind: "choice"` | `prompt.choose` / `prompt.explore` | `operation`, `option_id`, `object_id`, `freshness` |
 
+A `prompt.request` with `prompt_kind: "choice"` is either emitted by Standard or
+projected by Home from a Standard `clarify.request` (see Clarify projection).
+The projected form accepts only operation `choose` and maps to `clarify.respond`.
+
 For existing prompt types, sensitivity, options, values, expiry, turn
 ownership, and correlation IDs remain visible to the endpoint adapter. A
 prompt response is not ordinary model input and must not be converted into a
@@ -294,21 +298,54 @@ without committing the option. Only option IDs and labels reach the endpoint. Ra
 option values and unknown fields are dropped.
 
 Home expires a choice 300 seconds after first delivery using its monotonic
-clock. Exploration does not extend that deadline. A new object revision
-replaces the old one; each correlation authorizes one response. Stale,
-expired, replaced, revoked, duplicate, unknown, and unsupported attempts return
-`status: "unavailable"` with a matching `reason` and cause no new turn.
+clock, except a choice that Home projects from a Standard `clarify.request`
+(see Clarify projection), which expires 3600 seconds after first delivery to
+match Standard's default `agent.clarify_timeout`. The payload's `timeout_s` is
+the remaining seconds of that choice's own window. Exploration does not extend
+that deadline. A new object revision replaces the old one; each correlation
+authorizes one response. Stale, expired, replaced, revoked, duplicate, unknown,
+and unsupported attempts return `status: "unavailable"` with a matching
+`reason` and cause no new turn.
 
-The `prompt.choose` and `prompt.explore` capability flags are exposed only
-when Standard advertises the matching operation and the bound Home Device has
+The `prompt.choose` capability flag is exposed when the bound Home Device may
+answer typed choices and either Standard advertises `prompt.choose` or Home
+projects Standard `clarify.request` prompts as typed choices (see Clarify
+projection). A Device may answer typed choices when it has
 `capabilities.interactive_choice: true`, or, for a paired client claim, has a
 `client_devices` entry with `capabilities.interactive_choice: true` whose claim
-was made under the Device's current configuration projection. Both capabilities
-default to false, keeping passive Room Displays and audio-only Pucks read-only.
-The pinned Standard contract does not yet advertise typed choices, and the TUI
-Home adapter does not yet return the complete typed response, so this local
-Home slice remains unavailable in live production until those dependencies
-land.
+was made under the Device's current configuration projection. The
+`prompt.explore` flag is exposed only when Standard advertises it and the
+Device may answer typed choices. Home never advertises an operation that has no
+Standard operation behind it. Both Device capabilities default to false,
+keeping passive Room Displays and audio-only Pucks read-only. Pinned Standard
+advertises no typed choice, so on the pin only the projected, `choose`-only
+form exists, and only for an opted-in Device. Live proof against a real Home and
+a real Standard is recorded separately from this contract.
+
+### Clarify projection
+
+When the Device may answer typed choices and Standard does not advertise typed
+choices, Home projects a `clarify.request` that has exactly one question,
+`multi_select` false, and 1-32 listed text choices as a typed choice. The
+question text is the explanation, each choice is an option with a Home-minted ID
+(`opt-1`, `opt-2`, and so on), and `operations` is `["choose"]`. The option
+label is the choice text with a trailing `(Recommended)` mark removed; Home
+answers with the original choice text exactly as Standard sent it, never with a
+client-supplied value. A `choose` maps to one `clarify.respond` carrying that
+text and the `question_id`. Home sends the answer exactly once; stale, expired,
+replaced, revoked, duplicate, unknown, and unsupported attempts, including
+`explore`, return the typed unavailable result and do not reach Standard. A
+rejected or uncertain answer is never resent and never becomes `prompt.submit`.
+A projected choice offers only its listed options; it has no free-text answer.
+Standard's own `clarify.expire` is forwarded as the choice's expiry, and a
+choice that Standard reports as already expired is rejected as stale. If
+Standard's clarify timeout is longer than 3600 seconds or unlimited, the choice
+expires in Home first and the question can then be ended only by interrupting
+the turn. Any other `clarify.request`, including free text, multiple choice,
+several questions, a single question with duplicate or empty labels after the
+mark is removed, or an oversized one, is forwarded unchanged. Projected choices
+are Hermes questions: Home cannot classify them harmless, so they never carry a
+consequence-confirm path, and `approval.request` is never projected.
 
 ### Events
 

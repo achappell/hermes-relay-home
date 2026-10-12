@@ -7415,9 +7415,7 @@ def test_audio_closed_after_a_stop_is_a_normal_end_and_releases_only_its_own_tur
     )
 
 
-def test_interactive_client_grant_alone_advertises_no_choice_flags_on_pinned_standard():
-    """A client grant that is interactive only flips the grant flag. Pinned Standard
-    advertises no typed choice, so the client still sees today's clarify and no flags."""
+def test_noninteractive_client_grant_keeps_pinned_standard_clarify_legacy():
     gateway_socket = _live_turn_socket(
         {"type": "message.start"},
         {
@@ -7442,7 +7440,7 @@ def test_interactive_client_grant_alone_advertises_no_choice_flags_on_pinned_sta
             device_id=device_id,
             profile_id="family",
             configuration_revision=9,
-            interactive_choice=True,
+            interactive_choice=False,
         ),
     )
 
