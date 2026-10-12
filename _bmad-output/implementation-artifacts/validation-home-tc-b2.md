@@ -27,8 +27,8 @@ DONE**.
 | Whitespace | `git diff --check` and `git diff --cached --check` | Passed; no output |
 
 The seven full-suite warnings are WebSocket API deprecations; the suite passed.
-GitHub CI has not run before PR creation; record its status after opening the draft
-PR.
+At initial PR #106 read, GitHub's `statusCheckRollup` was empty; no CI checks
+were reported.
 
 ## Review
 
