@@ -301,8 +301,10 @@ expired, replaced, revoked, duplicate, unknown, and unsupported attempts return
 
 The `prompt.choose` and `prompt.explore` capability flags are exposed only
 when Standard advertises the matching operation and the bound Home Device has
-`capabilities.interactive_choice: true`. That optional Device capability
-defaults to false, keeping passive Room Displays and audio-only Pucks read-only.
+`capabilities.interactive_choice: true`, or, for a paired client claim, has a
+`client_devices` entry with `capabilities.interactive_choice: true` whose claim
+was made under the Device's current configuration projection. Both capabilities
+default to false, keeping passive Room Displays and audio-only Pucks read-only.
 The pinned Standard contract does not yet advertise typed choices, and the TUI
 Home adapter does not yet return the complete typed response, so this local
 Home slice remains unavailable in live production until those dependencies

@@ -6,6 +6,9 @@ from collections.abc import Mapping
 from unicodedata import normalize
 
 CONFIGURATION_KEYS = frozenset({"rooms", "profiles", "wake_mappings", "devices"})
+# ``client_devices`` is optional. A missing key and an empty list mean the same
+# denied-by-default state, so the key is omitted when empty.
+OPTIONAL_CONFIGURATION_KEYS = frozenset({"client_devices"})
 SNAPSHOT_KEYS = CONFIGURATION_KEYS | {"revision"}
 
 
@@ -24,39 +27,56 @@ class ConfigurationMigrationRequired(RuntimeError):
 def validate_candidate(candidate: Mapping[str, object]) -> dict[str, object]:
     """Validate and copy a revision-free configuration candidate."""
     _require_mapping(candidate, "configuration")
-    _require_keys(candidate, CONFIGURATION_KEYS, "configuration")
+    _require_keys(
+        candidate,
+        CONFIGURATION_KEYS,
+        "configuration",
+        optional=OPTIONAL_CONFIGURATION_KEYS,
+    )
 
     rooms = _validate_named_entities(candidate["rooms"], "rooms")
     profiles = _validate_profiles(candidate["profiles"])
     wake_mappings = _validate_wake_mappings(candidate["wake_mappings"], profiles)
     devices = _validate_devices(candidate["devices"], rooms)
+    client_devices = _validate_client_devices(
+        candidate.get("client_devices", []), devices
+    )
 
-    return {
+    result: dict[str, object] = {
         "rooms": rooms,
         "profiles": profiles,
         "wake_mappings": wake_mappings,
         "devices": devices,
     }
+    if client_devices:
+        result["client_devices"] = client_devices
+    return result
 
 
 def validate_snapshot(snapshot: Mapping[str, object]) -> dict[str, object]:
     """Validate and copy a persisted, revisioned configuration snapshot."""
     _require_mapping(snapshot, "snapshot")
-    _require_keys(snapshot, SNAPSHOT_KEYS, "snapshot")
+    _require_keys(
+        snapshot,
+        SNAPSHOT_KEYS,
+        "snapshot",
+        optional=OPTIONAL_CONFIGURATION_KEYS,
+    )
     revision = snapshot["revision"]
     if type(revision) is not int or revision < 0:
         raise ConfigurationValidationError(
             "snapshot.revision must be a non-negative integer"
         )
 
-    candidate = validate_candidate(
-        {
-            "rooms": snapshot["rooms"],
-            "profiles": snapshot["profiles"],
-            "wake_mappings": snapshot["wake_mappings"],
-            "devices": snapshot["devices"],
-        }
-    )
+    candidate_fields = {
+        "rooms": snapshot["rooms"],
+        "profiles": snapshot["profiles"],
+        "wake_mappings": snapshot["wake_mappings"],
+        "devices": snapshot["devices"],
+    }
+    if "client_devices" in snapshot:
+        candidate_fields["client_devices"] = snapshot["client_devices"]
+    candidate = validate_candidate(candidate_fields)
     return {"revision": revision, **candidate}
 
 
@@ -271,6 +291,55 @@ def _validate_devices(
     return devices
 
 
+def _validate_client_devices(
+    value: object,
+    devices: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Validate the paired-client allowance list.
+
+    Entries name paired personal clients (credential scope ``client_claim``)
+    that an administrator allows to answer typed choices. ``interactive_choice``
+    is the only capability; it is required and boolean. An ID never appears in
+    both ``devices`` and ``client_devices``: Room Devices and paired clients are
+    separate registries. An explicit ``false`` is kept as a recorded denial.
+    """
+    if type(value) is not list:
+        raise ConfigurationValidationError("client_devices must be an array")
+
+    room_device_ids = {device["id"] for device in devices}
+    seen_ids: set[str] = set()
+    entries: list[dict[str, object]] = []
+    for index, entry in enumerate(value):
+        path = f"client_devices[{index}]"
+        _require_mapping(entry, path)
+        _require_keys(entry, {"id", "capabilities"}, path)
+        device_id = _require_id(entry["id"], f"{path}.id")
+        capabilities = entry["capabilities"]
+        _require_mapping(capabilities, f"{path}.capabilities")
+        _require_keys(capabilities, {"interactive_choice"}, f"{path}.capabilities")
+        interactive_choice = capabilities["interactive_choice"]
+        if type(interactive_choice) is not bool:
+            raise ConfigurationValidationError(
+                f"{path}.capabilities.interactive_choice must be a boolean"
+            )
+        if device_id in seen_ids:
+            raise ConfigurationValidationError(
+                f"duplicate id {device_id!r} in client_devices"
+            )
+        if device_id in room_device_ids:
+            raise ConfigurationValidationError(
+                f"{path}.id {device_id!r} is also a Room Device in devices"
+            )
+        seen_ids.add(device_id)
+        entries.append(
+            {
+                "id": device_id,
+                "capabilities": {"interactive_choice": interactive_choice},
+            }
+        )
+    return entries
+
+
 def _require_mapping(value: object, path: str) -> None:
     if not isinstance(value, Mapping):
         raise ConfigurationValidationError(f"{path} must be an object")
@@ -280,13 +349,15 @@ def _require_keys(
     value: Mapping[str, object],
     expected: set[str] | frozenset[str],
     path: str,
+    *,
+    optional: set[str] | frozenset[str] = frozenset(),
 ) -> None:
     actual = set(value)
     if any(type(key) is not str for key in actual):
         raise ConfigurationValidationError(f"{path} has invalid fields")
-    if actual != expected:
+    if not expected <= actual <= expected | optional:
         missing = sorted(expected - actual)
-        extra = sorted(actual - expected)
+        extra = sorted(actual - expected - optional)
         details = []
         if missing:
             details.append(f"missing {', '.join(missing)}")

@@ -1144,10 +1144,7 @@ class CredentialService:
             )
             projections = state.setdefault("client_configuration_revisions", {})
             previous = projections.get(device_id)
-            fingerprint = [
-                revision,
-                [[grant.grant_id, grant.status] for grant in grants],
-            ]
+            fingerprint = _projection_fingerprint(revision, grants)
             if previous is not None and previous["fingerprint"] == fingerprint:
                 return previous["revision"], grants
             current = (
@@ -1159,6 +1156,38 @@ class CredentialService:
             return current, grants
 
         return self._store.mutate(project)
+
+    def client_configuration_revision(
+        self, device_id: str, revision: int
+    ) -> int | None:
+        """Return the device's current projected revision without writing.
+
+        ``client_configuration`` records one projection per device and bumps it
+        whenever the snapshot revision or the device's grants change. A client
+        claim stores that projected revision. This read-only peek returns the
+        stored projection only while it still describes the current snapshot
+        revision and grants, and ``None`` while a publish or a grant change
+        (including a pending grant expiring) has not been projected, or when no
+        projection exists, so callers fail closed instead of treating drift as
+        a match.
+        """
+        device_id = _identifier(device_id, "device_id")
+        state = self._store.read_state()
+        projections = state.get("client_configuration_revisions")
+        if not isinstance(projections, Mapping):
+            return None
+        previous = projections.get(device_id)
+        if not isinstance(previous, Mapping):
+            return None
+        grants = tuple(
+            grant
+            for grant in _current_grants(state, self._now())
+            if grant.device_id == device_id
+        )
+        stored = previous.get("revision")
+        if previous.get("fingerprint") != _projection_fingerprint(revision, grants):
+            return None
+        return stored if type(stored) is int else None
 
     def client_grants(self, device_id: str) -> tuple[ClientGrant, ...]:
         """Return a device's current active and pending-owner grants."""
@@ -1553,6 +1582,16 @@ def _current_grants(state: Mapping[str, object], now: float) -> tuple[ClientGran
         ):
             current.append(_grant_from_record(record))
     return tuple(current)
+
+
+def _projection_fingerprint(
+    revision: int, grants: tuple[ClientGrant, ...]
+) -> list[object]:
+    """What a Device's configuration projection describes: the snapshot revision
+    and the Device's current grants. The single definition both
+    ``client_configuration`` (write) and ``client_configuration_revision``
+    (read-only peek) compare."""
+    return [revision, [[grant.grant_id, grant.status] for grant in grants]]
 
 
 def _grant_from_record(record: Mapping[str, object]) -> ClientGrant:

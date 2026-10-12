@@ -106,3 +106,57 @@ def test_schema_capability_omission_remains_a_valid_legacy_snapshot() -> None:
 
     assert "interactive_choice" not in candidate["devices"][0]["capabilities"]
     assert _validator().is_valid(candidate)
+
+
+def _with_client_devices(*entries: object) -> dict[str, object]:
+    candidate = _configuration()
+    candidate["client_devices"] = list(entries)
+    return candidate
+
+
+def _client_entry(device_id: str = "browser-1", value: object = True) -> dict:
+    return {"id": device_id, "capabilities": {"interactive_choice": value}}
+
+
+def test_schema_client_devices_are_optional() -> None:
+    assert "client_devices" not in _configuration()
+    assert _validator().is_valid(_configuration())
+    assert _validator().is_valid(_with_client_devices())
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    assert "client_devices" not in schema["required"]
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_schema_accepts_boolean_client_device_choice_capability(value: bool) -> None:
+    assert _validator().is_valid(_with_client_devices(_client_entry(value=value)))
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"id": "browser-1"},
+        {"id": "browser-1", "capabilities": {}},
+        {"id": "browser-1", "capabilities": {"interactive_choice": "yes"}},
+        {"id": "browser-1", "capabilities": {"interactive_choice": None}},
+        {
+            "id": "browser-1",
+            "capabilities": {"interactive_choice": True, "sensitive_entry": True},
+        },
+        {
+            "id": "browser-1",
+            "capabilities": {"interactive_choice": True},
+            "name": "Browser",
+        },
+        {"id": "", "capabilities": {"interactive_choice": True}},
+        {"id": "x" * 129, "capabilities": {"interactive_choice": True}},
+    ],
+)
+def test_schema_rejects_malformed_client_devices(entry: dict) -> None:
+    assert not _validator().is_valid(_with_client_devices(entry))
+
+
+def test_schema_rejects_a_non_array_client_devices() -> None:
+    candidate = _configuration()
+    candidate["client_devices"] = {"browser-1": True}
+
+    assert not _validator().is_valid(candidate)
