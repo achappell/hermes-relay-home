@@ -802,3 +802,335 @@ def test_audio_socket_reports_a_peer_close_as_a_connection_error() -> None:
             audio.close()
         server.shutdown()
         thread.join(timeout=2)
+
+
+def _client_store(tmp_path, configuration, *, resolver=None, revision=9):
+    """A store holding one client claim stored at projected ``revision``."""
+    store = ConversationGrantStore(
+        tmp_path / "home.sqlite3",
+        configuration=lambda: configuration,
+        handle_factory=lambda: "client-handle",
+        client_revision_resolver=resolver,
+    )
+    handle, _ref = store.create_client_claim(
+        claim_id="client-claim-1",
+        device_id="browser-1",
+        grant_id="grant-1",
+        profile_id="amanda",
+        configuration_revision=revision,
+        credential_generation=1,
+    )
+    return store, handle
+
+
+def _allowing(configuration, *, value=True):
+    configuration["client_devices"] = [
+        {"id": "browser-1", "capabilities": {"interactive_choice": value}}
+    ]
+    return configuration
+
+
+def test_client_claim_is_not_interactive_without_a_client_devices_entry(
+    tmp_path,
+) -> None:
+    calls = []
+    store, handle = _client_store(
+        tmp_path,
+        _configuration(),
+        resolver=lambda device_id, revision: calls.append(revision) or 9,
+    )
+
+    grant = store.resolve(handle, "browser-1")
+
+    assert grant is not None
+    assert grant.interactive_choice is False
+    assert grant.configuration_revision == 9
+    assert calls == [], "the default-off path must not read the credential service"
+    store.close()
+
+
+def test_client_claim_carries_the_capability_when_listed_and_projection_matches(
+    tmp_path,
+) -> None:
+    seen = []
+
+    def resolver(device_id, revision):
+        seen.append((device_id, revision))
+        return 9
+
+    store, handle = _client_store(
+        tmp_path, _allowing(_configuration()), resolver=resolver
+    )
+
+    grant = store.resolve(handle, "browser-1")
+
+    assert grant is not None and grant.interactive_choice is True
+    assert grant.protected_capabilities == frozenset()
+    assert seen == [("browser-1", 3)]
+    store.close()
+
+
+def test_client_claim_ignores_the_global_revision_when_the_projection_matches(
+    tmp_path,
+) -> None:
+    configuration = _allowing(_configuration())
+    store, handle = _client_store(
+        tmp_path, configuration, resolver=lambda device_id, revision: 9, revision=9
+    )
+
+    grant = store.resolve(handle, "browser-1")
+
+    assert configuration["revision"] == 3 and grant.configuration_revision == 9
+    assert grant.interactive_choice is True
+    store.close()
+
+
+@pytest.mark.parametrize("projected", [None, 8, 10, "9", True])
+def test_client_claim_is_unadvertised_when_the_projection_does_not_match(
+    tmp_path, projected
+) -> None:
+    store, handle = _client_store(
+        tmp_path,
+        _allowing(_configuration()),
+        resolver=lambda device_id, revision: projected,
+    )
+
+    grant = store.resolve(handle, "browser-1")
+
+    assert grant is not None, "a mismatch must never close the claim"
+    assert grant.interactive_choice is False
+    store.close()
+
+
+def test_client_claim_with_an_explicit_false_entry_is_not_interactive(tmp_path) -> None:
+    store, handle = _client_store(
+        tmp_path,
+        _allowing(_configuration(), value=False),
+        resolver=lambda device_id, revision: 9,
+    )
+
+    assert store.resolve(handle, "browser-1").interactive_choice is False
+    store.close()
+
+
+def test_client_claim_without_a_resolver_is_not_interactive(tmp_path) -> None:
+    store, handle = _client_store(tmp_path, _allowing(_configuration()))
+
+    grant = store.resolve(handle, "browser-1")
+
+    assert grant is not None and grant.interactive_choice is False
+    store.close()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        OSError("db"),
+        RuntimeError("store"),
+        TypeError("t"),
+        ValueError("v"),
+        KeyError("k"),
+    ],
+)
+def test_client_claim_fails_closed_without_closing_when_the_lookup_fails(
+    tmp_path, error
+) -> None:
+    def resolver(device_id, revision):
+        raise error
+
+    store, handle = _client_store(
+        tmp_path, _allowing(_configuration()), resolver=resolver
+    )
+
+    grant = store.resolve(handle, "browser-1")
+
+    assert grant is not None and grant.interactive_choice is False
+    assert store.resolve(handle, "browser-1") is not None
+    store.close()
+
+
+def test_client_claim_resolver_can_be_attached_after_construction(tmp_path) -> None:
+    store, handle = _client_store(tmp_path, _allowing(_configuration()))
+    assert store.resolve(handle, "browser-1").interactive_choice is False
+
+    store.set_client_revision_resolver(lambda device_id, revision: 9)
+
+    assert store.resolve(handle, "browser-1").interactive_choice is True
+    store.close()
+
+
+def test_client_claim_skips_malformed_client_device_entries_individually(
+    tmp_path,
+) -> None:
+    malformed = [{"id": "browser-1"}, "browser-1", None, {"capabilities": {}}]
+    configuration = _configuration()
+    configuration["client_devices"] = malformed
+    store, handle = _client_store(
+        tmp_path, configuration, resolver=lambda device_id, revision: 9
+    )
+    assert store.resolve(handle, "browser-1").interactive_choice is False
+
+    # A valid entry after malformed ones still counts; none of them close the claim.
+    configuration["client_devices"] = [
+        *malformed,
+        {"id": "browser-1", "capabilities": {"interactive_choice": True}},
+    ]
+
+    grant = store.resolve(handle, "browser-1")
+
+    assert grant is not None and grant.interactive_choice is True
+    store.close()
+
+
+def test_client_claim_ignores_a_room_device_registry_entry(tmp_path) -> None:
+    configuration = _configuration()
+    configuration["devices"] = [
+        {
+            "id": "browser-1",
+            "name": "Shadow",
+            "room_id": "kitchen",
+            "priority": 1,
+            "capabilities": {"wake_claim": True, "interactive_choice": True},
+        }
+    ]
+    store, handle = _client_store(
+        tmp_path, configuration, resolver=lambda device_id, revision: 3, revision=3
+    )
+
+    assert store.resolve(handle, "browser-1").interactive_choice is False
+    store.close()
+
+
+def test_room_claim_ignores_client_devices_and_the_projection_resolver(
+    tmp_path,
+) -> None:
+    configuration = _configuration()
+    configuration["client_devices"] = [
+        {"id": "pixel-6a", "capabilities": {"interactive_choice": True}}
+    ]
+    calls = []
+    store = ConversationGrantStore(
+        tmp_path / "home.sqlite3",
+        configuration=lambda: configuration,
+        handle_factory=lambda: "room-handle",
+        client_revision_resolver=lambda d, r: calls.append(r) or 3,
+    )
+    handle = store.create_from_decision(
+        _decision("room-claim"), credential_generation=2
+    )
+
+    grant = store.resolve(handle, "pixel-6a")
+
+    assert grant is not None and grant.interactive_choice is False
+    assert calls == []
+    store.close()
+
+
+def test_room_claim_keeps_the_existing_global_revision_rule(tmp_path) -> None:
+    configuration = _configuration()
+    configuration["devices"] = [
+        {
+            "id": "pixel-6a",
+            "name": "Interactive Puck",
+            "room_id": "kitchen",
+            "priority": 1,
+            "capabilities": {"wake_claim": True, "interactive_choice": True},
+        }
+    ]
+    store = ConversationGrantStore(
+        tmp_path / "home.sqlite3",
+        configuration=lambda: configuration,
+        handle_factory=lambda: "room-handle",
+        client_revision_resolver=lambda device_id, revision: 99,
+    )
+    handle = store.create_from_decision(
+        _decision("room-claim"), credential_generation=2
+    )
+
+    assert store.resolve(handle, "pixel-6a").interactive_choice is True
+    configuration["revision"] = 4
+    assert store.resolve(handle, "pixel-6a").interactive_choice is False
+    store.close()
+
+
+def test_client_devices_never_grant_protected_capabilities(tmp_path) -> None:
+    configuration = _allowing(_configuration())
+    scopes = {
+        ("browser-1", 1): CredentialScope.from_values(
+            rooms=[], capabilities=["client_claim", "sensitive_entry"]
+        )
+    }
+    store = ConversationGrantStore(
+        tmp_path / "home.sqlite3",
+        configuration=lambda: configuration,
+        credential_scope_resolver=lambda device_id, generation: scopes.get(
+            (device_id, generation)
+        ),
+        client_revision_resolver=lambda device_id, revision: 9,
+        handle_factory=lambda: "client-handle",
+    )
+    handle, _ref = store.create_client_claim(
+        claim_id="client-claim-1",
+        device_id="browser-1",
+        grant_id="grant-1",
+        profile_id="amanda",
+        configuration_revision=9,
+        credential_generation=1,
+    )
+
+    grant = store.resolve(handle, "browser-1")
+
+    assert grant is not None and grant.interactive_choice is True
+    assert grant.protected_capabilities == frozenset()
+    store.close()
+
+
+def test_client_claim_protected_capabilities_still_follow_the_device_registry(
+    tmp_path,
+) -> None:
+    """Client claims change only ``interactive_choice``. The existing
+    protected-capability derivation (registry entry intersected with the
+    credential scope) is untouched, so a client that already relied on it keeps it."""
+    configuration = _configuration()
+    configuration["devices"] = [
+        {
+            "id": "tui-1",
+            "name": "Registered client",
+            "room_id": "kitchen",
+            "priority": 1,
+            "capabilities": {
+                "wake_claim": False,
+                "sensitive_entry": True,
+                "interactive_choice": True,
+            },
+        }
+    ]
+    scopes = {
+        ("tui-1", 1): CredentialScope.from_values(
+            rooms=[], capabilities=["client_claim", "sensitive_entry"]
+        )
+    }
+    store = ConversationGrantStore(
+        tmp_path / "home.sqlite3",
+        configuration=lambda: configuration,
+        credential_scope_resolver=lambda device_id, generation: scopes.get(
+            (device_id, generation)
+        ),
+        client_revision_resolver=lambda device_id, revision: 3,
+        handle_factory=lambda: "client-handle",
+    )
+    handle, _ref = store.create_client_claim(
+        claim_id="client-claim-1",
+        device_id="tui-1",
+        grant_id="grant-1",
+        profile_id="amanda",
+        configuration_revision=3,
+        credential_generation=1,
+    )
+
+    grant = store.resolve(handle, "tui-1")
+
+    assert grant is not None
+    assert grant.protected_capabilities == frozenset({"sensitive_entry"})
+    assert grant.interactive_choice is False, "only client_devices can opt a client in"
+    store.close()

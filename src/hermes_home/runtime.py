@@ -427,6 +427,9 @@ def create_runtime(
                         service.active_client_grant(device_id, grant_id) is not None
                     )
                 )
+                conversation_store.set_client_revision_resolver(
+                    service.client_configuration_revision
+                )
         if health_probe_provider is None and settings.standard_gateway_url is not None:
             if settings.standard_token is None:
                 raise RuntimeConfigurationError(

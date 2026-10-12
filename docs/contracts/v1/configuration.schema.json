@@ -22,6 +22,11 @@
     "devices": {
       "type": "array",
       "items": {"$ref": "#/$defs/device"}
+    },
+    "client_devices": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/client_device"},
+      "description": "Paired personal-client Devices (credential scope client_claim) that an administrator allows to answer typed choices. Omission denies. An ID must not also appear in devices."
     }
   },
   "$defs": {
@@ -86,6 +91,25 @@
               "type": "boolean",
               "default": false,
               "description": "Explicitly permits this Device to confirm a current consequence-bearing approval. Omission denies approval actions."
+            }
+          }
+        }
+      }
+    },
+    "client_device": {
+      "type": "object",
+      "required": ["id", "capabilities"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "capabilities": {
+          "type": "object",
+          "required": ["interactive_choice"],
+          "additionalProperties": false,
+          "properties": {
+            "interactive_choice": {
+              "type": "boolean",
+              "description": "Explicitly permits this paired client to answer typed choice prompts. Omission or false denies."
             }
           }
         }

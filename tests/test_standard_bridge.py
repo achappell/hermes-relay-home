@@ -7413,3 +7413,49 @@ def test_audio_closed_after_a_stop_is_a_normal_end_and_releases_only_its_own_tur
     assert not any(
         frame["method"] == "session.interrupt" for frame in gateway_socket.sent
     )
+
+
+def test_interactive_client_grant_alone_advertises_no_choice_flags_on_pinned_standard():
+    """A client grant that is interactive only flips the grant flag. Pinned Standard
+    advertises no typed choice, so the client still sees today's clarify and no flags."""
+    gateway_socket = _live_turn_socket(
+        {"type": "message.start"},
+        {
+            "type": "clarify.request",
+            "payload": {
+                "questions": [
+                    {
+                        "qid": "q0",
+                        "question": "Which color?",
+                        "choices": ["red (Recommended)", "green"],
+                        "multi_select": False,
+                    }
+                ],
+                "request_id": "0f1b570c",
+            },
+        },
+    )
+    bridge = _make_bridge(
+        FakeSocketFactory(gateway_socket),
+        resolver=lambda handle, device_id: ConversationGrant(
+            handle=handle,
+            device_id=device_id,
+            profile_id="family",
+            configuration_revision=9,
+            interactive_choice=True,
+        ),
+    )
+
+    status = bridge.open(
+        headers={"Authorization": "Device device-secret"},
+        conversation_handle="opaque-conversation-1",
+    )
+    bridge.submit_prompt("ask me")
+    bridge.next_event()
+    prompt = bridge.next_event()
+
+    assert "prompt.choose" not in status.capabilities
+    assert "prompt.explore" not in status.capabilities
+    assert prompt.type == "clarify.request"
+    assert prompt.payload["questions"][0]["choices"] == ["red (Recommended)", "green"]
+    bridge.close()

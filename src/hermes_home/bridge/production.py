@@ -79,6 +79,7 @@ class ConversationGrantStore:
         client_reconnect_grace_seconds: float = DEFAULT_CLIENT_RECONNECT_GRACE_SECONDS,
         session_ref_factory: Callable[[], str] | None = None,
         client_grant_checker: Callable[[str, str], bool] | None = None,
+        client_revision_resolver: Callable[[str, int], int | None] | None = None,
         claim_ref_factory: Callable[[], str] | None = None,
         wall_clock: Callable[[], float] = time.time,
     ) -> None:
@@ -93,6 +94,7 @@ class ConversationGrantStore:
             lambda: "sref-" + secrets.token_urlsafe(18)
         )
         self._configuration = configuration
+        self._client_revision_resolver = client_revision_resolver
         self._client_grant_checker = client_grant_checker
         self._claim_ref_factory = claim_ref_factory or (
             lambda: "cref-" + secrets.token_urlsafe(18)
@@ -536,6 +538,41 @@ class ConversationGrantStore:
         """Attach the grant check once the credential service exists."""
         self._client_grant_checker = checker
 
+    def set_client_revision_resolver(
+        self, resolver: Callable[[str, int], int | None]
+    ) -> None:
+        """Attach the paired-client projection lookup once credentials exist."""
+        self._client_revision_resolver = resolver
+
+    def _client_interactive_choice(
+        self, snapshot: Mapping[str, object], device_id: str, claim_revision: object
+    ) -> bool:
+        """Whether a paired client claim may answer typed choices.
+
+        True only for a Device an administrator listed in ``client_devices``
+        whose claim was made under the Device's current configuration
+        projection. A client claim stores its Device's projected revision, not
+        the snapshot revision, so the check compares against that projection.
+        Anything missing or unreadable denies and never closes the claim.
+        """
+        resolver = self._client_revision_resolver
+        if resolver is None or type(claim_revision) is not int:
+            return False
+        try:
+            allowed = any(
+                isinstance(entry, Mapping)
+                and entry.get("id") == device_id
+                and isinstance(entry.get("capabilities"), Mapping)
+                and entry["capabilities"].get("interactive_choice") is True
+                for entry in snapshot.get("client_devices", ())
+            )
+            if not allowed:
+                return False
+            projected = resolver(device_id, snapshot["revision"])
+        except KeyError, OSError, RuntimeError, TypeError, ValueError:
+            return False
+        return type(projected) is int and projected == claim_revision
+
     def resolve(self, handle: str, device_id: str) -> ConversationGrant | None:
         with self._lock:
             if (handle, device_id) in self._failed_upstream_claims or (
@@ -611,11 +648,17 @@ class ConversationGrantStore:
                             )
                         )
                         capability_revision = snapshot.get("revision")
-                interactive_choice = (
-                    snapshot.get("revision") == row[9]
-                    and device is not None
-                    and device["capabilities"].get("interactive_choice", False) is True
-                )
+                if row[10] == "client":
+                    interactive_choice = self._client_interactive_choice(
+                        snapshot, device_id, row[9]
+                    )
+                else:
+                    interactive_choice = (
+                        snapshot.get("revision") == row[9]
+                        and device is not None
+                        and device["capabilities"].get("interactive_choice", False)
+                        is True
+                    )
                 mappings = {
                     mapping["id"]: mapping for mapping in snapshot["wake_mappings"]
                 }

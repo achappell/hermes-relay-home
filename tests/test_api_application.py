@@ -986,3 +986,106 @@ def test_simultaneous_wake_requests_both_receive_their_claim_specific_decision(
         }
     finally:
         store.close()
+
+
+CLIENT_DEVICES = [{"id": "browser-1", "capabilities": {"interactive_choice": True}}]
+
+
+def test_admin_publishes_and_reads_back_client_devices(tmp_path) -> None:
+    application, store = _application(tmp_path)
+
+    try:
+        published = _publish_configuration(
+            application, {**CONFIGURATION, "client_devices": CLIENT_DEVICES}, 0
+        )
+        assert published.status == 200
+        assert published.body["snapshot"]["client_devices"] == CLIENT_DEVICES
+
+        read = application.handle(
+            "GET",
+            "/api/v1/configuration",
+            {"Authorization": "Bearer admin-secret"},
+            b"",
+        )
+        assert read.status == 200
+        assert read.body["snapshot"] == {
+            "revision": 1,
+            **CONFIGURATION,
+            "client_devices": CLIENT_DEVICES,
+        }
+        # A copy of the read snapshot is a valid next publish (GET -> PUT).
+        again = {
+            key: value
+            for key, value in read.body["snapshot"].items()
+            if key != "revision"
+        }
+        assert _publish_configuration(application, again, 1).status == 200
+    finally:
+        store.close()
+
+
+def test_publish_without_client_devices_clears_the_allowance(tmp_path) -> None:
+    application, store = _application(tmp_path)
+
+    try:
+        _publish_configuration(
+            application, {**CONFIGURATION, "client_devices": CLIENT_DEVICES}, 0
+        )
+        cleared = _publish_configuration(application, CONFIGURATION, 1)
+
+        assert cleared.status == 200
+        assert "client_devices" not in cleared.body["snapshot"]
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "client_devices",
+    [
+        [{"id": "puck-kitchen", "capabilities": {"interactive_choice": True}}],
+        [{"id": "browser-1", "capabilities": {"interactive_choice": "yes"}}],
+        [{"id": "browser-1", "capabilities": {"sensitive_entry": True}}],
+        {"browser-1": True},
+    ],
+)
+def test_invalid_client_devices_are_rejected_without_changing_the_revision(
+    tmp_path, client_devices
+) -> None:
+    application, store = _application(tmp_path)
+
+    try:
+        rejected = _publish_configuration(
+            application, {**CONFIGURATION, "client_devices": client_devices}, 0
+        )
+
+        assert rejected.status == 400
+        assert rejected.body == {"schema": 1, "error": {"code": "invalid_request"}}
+        assert store.read()["revision"] == 0
+    finally:
+        store.close()
+
+
+def test_client_devices_publish_requires_the_admin_credential(tmp_path) -> None:
+    application, store = _application(tmp_path)
+
+    try:
+        response = application.handle(
+            "PUT",
+            "/api/v1/configuration",
+            {
+                "Authorization": "Device device-secret",
+                "Content-Type": "application/json",
+            },
+            json.dumps(
+                {
+                    "schema": 1,
+                    "expected_revision": 0,
+                    "snapshot": {**CONFIGURATION, "client_devices": CLIENT_DEVICES},
+                }
+            ).encode(),
+        )
+
+        assert response.status == 401
+        assert store.read()["revision"] == 0
+    finally:
+        store.close()

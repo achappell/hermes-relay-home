@@ -3,6 +3,7 @@ import pytest
 from hermes_home.domain.configuration import (
     ConfigurationValidationError,
     validate_candidate,
+    validate_snapshot,
 )
 
 
@@ -272,3 +273,109 @@ def test_profile_shared_flag_must_be_a_boolean() -> None:
                 {"id": "spark", "name": "Spark", "available": True, "shared": "yes"}
             )
         )
+
+
+def _client_candidate(*entries: object) -> dict[str, object]:
+    return {
+        "rooms": [{"id": "kitchen", "name": "Kitchen"}],
+        "profiles": [],
+        "wake_mappings": [],
+        "devices": [_device("puck-kitchen", "kitchen", 1)],
+        "client_devices": list(entries),
+    }
+
+
+def _client_entry(device_id: str, value: object = True) -> dict[str, object]:
+    return {"id": device_id, "capabilities": {"interactive_choice": value}}
+
+
+def test_client_devices_are_optional_and_omitted_when_empty() -> None:
+    base = _client_candidate()
+    del base["client_devices"]
+
+    assert "client_devices" not in validate_candidate(base)
+    assert "client_devices" not in validate_candidate(_client_candidate())
+    snapshot = validate_snapshot({"revision": 4, **base})
+    assert "client_devices" not in snapshot
+    assert validate_snapshot(snapshot) == snapshot
+
+
+def test_client_devices_normalize_and_round_trip_through_a_snapshot() -> None:
+    candidate = _client_candidate(_client_entry("browser-1"))
+
+    normalized = validate_candidate(candidate)
+    snapshot = validate_snapshot({"revision": 7, **normalized})
+
+    assert normalized["client_devices"] == [_client_entry("browser-1")]
+    assert snapshot == {"revision": 7, **normalized}
+    assert validate_snapshot(snapshot) == snapshot
+
+
+def test_client_devices_keep_an_explicit_false_as_a_recorded_denial() -> None:
+    normalized = validate_candidate(
+        _client_candidate(_client_entry("browser-1", False))
+    )
+
+    assert normalized["client_devices"] == [_client_entry("browser-1", False)]
+
+
+def test_client_devices_may_name_a_device_that_never_paired() -> None:
+    assert validate_candidate(_client_candidate(_client_entry("not-paired-yet")))
+
+
+def test_client_devices_reject_an_id_that_is_also_a_room_device() -> None:
+    with pytest.raises(ConfigurationValidationError, match="Room Device"):
+        validate_candidate(_client_candidate(_client_entry("puck-kitchen")))
+
+
+def test_client_devices_reject_duplicate_ids() -> None:
+    with pytest.raises(ConfigurationValidationError, match="duplicate id"):
+        validate_candidate(
+            _client_candidate(_client_entry("browser-1"), _client_entry("browser-1"))
+        )
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"id": "browser-1"},
+        {"id": "browser-1", "capabilities": {}},
+        {"id": "browser-1", "capabilities": {"interactive_choice": "yes"}},
+        {"id": "browser-1", "capabilities": {"interactive_choice": 1}},
+        {"id": "browser-1", "capabilities": {"interactive_choice": None}},
+        {
+            "id": "browser-1",
+            "capabilities": {"interactive_choice": True, "sensitive_entry": True},
+        },
+        {
+            "id": "browser-1",
+            "capabilities": {"interactive_choice": True, "wake_claim": True},
+        },
+        {"id": "browser-1", "capabilities": {"interactive_choice": True}, "name": "x"},
+        {"id": "", "capabilities": {"interactive_choice": True}},
+        {"id": "x" * 129, "capabilities": {"interactive_choice": True}},
+        {"id": 7, "capabilities": {"interactive_choice": True}},
+        {"id": "browser-1", "capabilities": ["interactive_choice"]},
+        "browser-1",
+    ],
+)
+def test_client_devices_reject_malformed_entries(entry: object) -> None:
+    with pytest.raises(ConfigurationValidationError):
+        validate_candidate(_client_candidate(entry))
+
+
+@pytest.mark.parametrize("value", [None, {}, "browser-1", 7])
+def test_client_devices_must_be_an_array(value: object) -> None:
+    candidate = _client_candidate()
+    candidate["client_devices"] = value
+
+    with pytest.raises(ConfigurationValidationError, match="client_devices"):
+        validate_candidate(candidate)
+
+
+def test_unknown_top_level_fields_are_still_rejected() -> None:
+    candidate = _client_candidate()
+    candidate["client_device"] = []
+
+    with pytest.raises(ConfigurationValidationError, match="unknown client_device"):
+        validate_candidate(candidate)

@@ -476,3 +476,99 @@ def test_macos_is_a_personal_client_type() -> None:
     )
 
     assert material.client_grants[0].status == "active"
+
+
+def _projection_service():
+    clock = Clock()
+    return _service(clock), clock
+
+
+def test_projection_peek_is_none_before_any_projection() -> None:
+    service, _ = _projection_service()
+    material = _pair(service, endpoint_id="browser", profiles=["amanda"])
+
+    assert service.client_configuration_revision(material.device_id, 5) is None
+
+
+def test_projection_peek_matches_the_recorded_projection_and_never_writes() -> None:
+    service, _ = _projection_service()
+    material = _pair(service, endpoint_id="browser", profiles=["amanda"])
+    projected, _ = service.client_configuration(material.device_id, 5)
+    state_before = service._store.read_state()
+
+    assert service.client_configuration_revision(material.device_id, 5) == projected
+    assert service.client_configuration_revision(material.device_id, 5) == projected
+
+    assert service._store.read_state() == state_before
+
+
+def test_projection_peek_is_none_after_a_publish_until_the_next_projection() -> None:
+    service, _ = _projection_service()
+    material = _pair(service, endpoint_id="browser", profiles=["amanda"])
+    service.client_configuration(material.device_id, 5)
+
+    assert service.client_configuration_revision(material.device_id, 6) is None
+    projected, _ = service.client_configuration(material.device_id, 6)
+    assert service.client_configuration_revision(material.device_id, 6) == projected
+
+
+def test_projection_peek_follows_a_grant_change_and_tracks_drift() -> None:
+    service, _ = _projection_service()
+    material = _pair(service, endpoint_id="browser", profiles=["amanda"])
+    first, _ = service.client_configuration(material.device_id, 5)
+    service.add_client_grant(
+        material.device_id,
+        "spark",
+        idempotency_key="k1",
+        configured_profiles=PROFILES,
+        profile_labels={"amanda": "A", "spark": "S", "jensen": "J"},
+        authorize_bootstrap=True,
+    )
+
+    assert service.client_configuration_revision(material.device_id, 5) is None
+    drifted, _ = service.client_configuration(material.device_id, 5)
+    assert drifted > 5 and drifted != first
+    assert service.client_configuration_revision(material.device_id, 5) == drifted
+
+
+def test_projection_peek_is_per_device() -> None:
+    service, _ = _projection_service()
+    one = _pair(service, endpoint_id="browser-one", profiles=["amanda"])
+    two = _pair(service, endpoint_id="browser-two", profiles=["jensen"])
+    projected, _ = service.client_configuration(one.device_id, 5)
+
+    assert service.client_configuration_revision(one.device_id, 5) == projected
+    assert service.client_configuration_revision(two.device_id, 5) is None
+
+
+def test_projection_peek_is_none_after_the_grants_are_revoked() -> None:
+    service, _ = _projection_service()
+    material = _pair(service, endpoint_id="browser", profiles=["amanda"])
+    service.client_configuration(material.device_id, 5)
+
+    service.revoke(material.device_id)
+
+    assert service.client_configuration_revision(material.device_id, 5) is None
+
+
+def test_projection_peek_rejects_an_invalid_device_id() -> None:
+    service, _ = _projection_service()
+
+    with pytest.raises(CredentialValidationError):
+        service.client_configuration_revision("", 5)
+
+
+def test_projection_peek_drops_when_a_pending_owner_grant_expires() -> None:
+    service, clock = _projection_service()
+    _pair(service, endpoint_id="jensen-phone", profiles=["jensen"])
+    requester = _pair(service, endpoint_id="laptop", profiles=["jensen"])
+    projected, grants = service.client_configuration(requester.device_id, 5)
+    assert [grant.status for grant in grants] == ["pending_owner"]
+    assert service.client_configuration_revision(requester.device_id, 5) == projected
+
+    clock.now += PENDING_OWNER_GRANT_TTL_SECONDS
+
+    assert service.client_configuration_revision(requester.device_id, 5) is None
+    reprojected, grants = service.client_configuration(requester.device_id, 5)
+    assert grants == () and reprojected > projected
+    assert service.client_configuration_revision(requester.device_id, 5) == reprojected

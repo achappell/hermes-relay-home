@@ -66,6 +66,26 @@ Set it to `true` only for a Device with an active user interface that can
 present and confirm choices. Passive Room Displays and audio-only Pucks remain
 read-only for typed choices unless their role changes deliberately.
 
+The optional top-level `client_devices` array lists paired personal-client
+Devices, meaning Devices paired with the `client_claim` capability such as the
+browser appliance, that an administrator allows to answer typed choices. Each
+entry is
+`{"id": "<Device ID issued at pairing>", "capabilities": {"interactive_choice": true}}`.
+`interactive_choice` is required in an entry and is its only permitted
+capability; `false`, omitting the entry, or omitting `client_devices` denies
+typed choice actions. Home does not check an ID against paired Devices when
+publishing, so an entry for a Device that is not paired has no effect. An ID
+must not appear in both `devices` and `client_devices`, and for a paired
+client's claim `devices` never confers `interactive_choice`. An entry gives the
+Device no Room, no wake or arbitration role, and no credential scope, and it
+never grants `sensitive_entry` or `consequence_confirm`. An empty array is not
+stored: Home returns a snapshot without `client_devices`. A conversation claim
+stops advertising typed choice, without closing, while its entry is absent or
+`false`, or while the Device's configuration projection (the snapshot revision
+and the Device's grants, including a pending grant that expires) differs from
+the one the claim was made under. A claim made after the Device refetches its
+configuration advertises typed choice again.
+
 The optional Device capabilities `sensitive_entry` and
 `consequence_confirm` also default to `false`. A protected prompt is authorized
 only when the current Device configuration and the current credential scope
@@ -413,6 +433,10 @@ Profile grants and discover later grants without re-pairing. Its scope is exactl
 `consequence_confirm`, `health_view`, `wake_claim`, or `touch_claim`. Home rejects
 broader browser requests and approvals. This contract adds no self-health,
 monitoring, browser sign-in, deployment, or downstream credential-file implementation.
+
+A browser appliance's scope is unaffected by `client_devices`: the allowance is
+Home configuration, not a credential capability, and Home still rejects broader
+browser requests and approvals.
 
 **Staying paired.** Credentials last 90 days. A client renews itself with
 `POST /api/v1/devices/{device_id}/credentials/renew` during the last 14 days,

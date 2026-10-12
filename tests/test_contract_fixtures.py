@@ -45,3 +45,23 @@ class ContractFixtureTests(unittest.TestCase):
             },
         }
         assert not {"profile_id", "session_id", "wake_mapping_id"} & claim.keys()
+
+
+class ClientDevicesContractTests(unittest.TestCase):
+    def test_published_fixture_has_no_client_devices_and_still_round_trips(
+        self,
+    ) -> None:
+        configuration = load("configuration.json")
+
+        self.assertNotIn("client_devices", configuration)
+        self.assertEqual(validate_snapshot(configuration), configuration)
+
+    def test_fixture_with_client_devices_round_trips_unchanged(self) -> None:
+        configuration = {
+            **load("configuration.json"),
+            "client_devices": [
+                {"id": "browser-1", "capabilities": {"interactive_choice": True}}
+            ],
+        }
+
+        self.assertEqual(validate_snapshot(configuration), configuration)

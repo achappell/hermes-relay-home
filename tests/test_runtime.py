@@ -294,6 +294,11 @@ def test_create_runtime_auto_wires_the_standard_backed_pilot_factory(
         assert runtime.conversation_store._client_claims_per_device == 3
         assert runtime.conversation_store._client_reconnect_grace == 45.0
         assert runtime.conversation_store._client_grant_checker is not None
+        # Paired-client typed-choice eligibility reads the Device's configuration
+        # projection from the live credential service.
+        resolver = runtime.conversation_store._client_revision_resolver
+        assert resolver == application._credential_service.client_configuration_revision
+        assert resolver("never-paired", 1) is None
     finally:
         runtime.close()
 

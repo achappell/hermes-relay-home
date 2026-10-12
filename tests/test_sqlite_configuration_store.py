@@ -234,3 +234,58 @@ def test_concurrent_publishers_cannot_both_commit_the_same_revision(tmp_path) ->
     finally:
         first.close()
         second.close()
+
+
+def test_client_devices_persist_across_reopen_and_default_to_absent(tmp_path) -> None:
+    database = tmp_path / "home.sqlite3"
+    store = SQLiteConfigurationStore(database)
+    plain = store.replace(expected_revision=0, candidate=VALID_CANDIDATE)
+    assert "client_devices" not in plain
+    opted_in = store.replace(
+        expected_revision=plain["revision"],
+        candidate={
+            **VALID_CANDIDATE,
+            "client_devices": [
+                {"id": "browser-1", "capabilities": {"interactive_choice": True}}
+            ],
+        },
+    )
+    store.close()
+
+    reopened = SQLiteConfigurationStore(database)
+    try:
+        assert reopened.read() == opted_in
+        assert opted_in["client_devices"] == [
+            {"id": "browser-1", "capabilities": {"interactive_choice": True}}
+        ]
+        cleared = reopened.replace(
+            expected_revision=opted_in["revision"], candidate=VALID_CANDIDATE
+        )
+        assert "client_devices" not in cleared
+        assert reopened.read() == cleared
+    finally:
+        reopened.close()
+
+
+def test_invalid_client_devices_publish_leaves_the_active_revision(tmp_path) -> None:
+    store = SQLiteConfigurationStore(tmp_path / "home.sqlite3")
+    committed = store.replace(expected_revision=0, candidate=VALID_CANDIDATE)
+
+    try:
+        with pytest.raises(ConfigurationValidationError):
+            store.replace(
+                expected_revision=committed["revision"],
+                candidate={
+                    **VALID_CANDIDATE,
+                    "client_devices": [
+                        {
+                            "id": "puck-kitchen",
+                            "capabilities": {"interactive_choice": True},
+                        }
+                    ],
+                },
+            )
+
+        assert store.read() == committed
+    finally:
+        store.close()
