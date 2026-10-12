@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0 (2026-10-12)
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+## What's Changed
+### Other Changes
+* feat(home): paired-client typed-choice opt-in via client_devices (HOME-TC-B1 placeholder ID) by @achappell in https://github.com/achappell/hermes-relay-home/pull/105
+* HOME-TC-B2 (placeholder): project clarify choices by @achappell in https://github.com/achappell/hermes-relay-home/pull/106
+
+
+**Full Changelog**: https://github.com/achappell/hermes-relay-home/compare/v0.2.0...v0.3.0
+
 ## 0.2.0 (2026-10-09)
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
