@@ -1,0 +1,231 @@
+{
+ "standard": {
+  "hermes_release": "0.21.1",
+  "source_commit": "2237be355906fbe6065ce1815711eee52b2d646e",
+  "server": "hermes serve --isolated (tui_gateway /api/ws), loopback, throwaway HERMES_HOME and HOME",
+  "model": "scripted OpenAI-compatible stub (no real model)",
+  "captured": "2026-10-11"
+ },
+ "title": "session.interrupt while a clarify is pending",
+ "note": "interrupt result {status:interrupted}; no clarify.expire; tool.complete with empty user_response; message.complete status interrupted; a late respond returns {status:expired}",
+ "frames": [
+  {
+   "dir": "in",
+   "t": 0.027,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "gateway.ready",
+     "payload": {
+      "change_events": true,
+      "heartbeat": true,
+      "replay_epoch": "6c9cca47be4a4e3ea9cd444b4cb18b5e",
+      "skin": "<omitted>"
+     }
+    }
+   },
+   "conn": "interrupt"
+  },
+  {
+   "dir": "out",
+   "t": 0.027,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "interrupt-1",
+    "method": "session.create",
+    "params": {
+     "source": "home"
+    }
+   },
+   "conn": "interrupt"
+  },
+  {
+   "dir": "in",
+   "t": 0.051,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "interrupt-1",
+    "result": {
+     "session_id": "ee615d0a",
+     "stored_session_id": "20261011_180928_ea7040",
+     "message_count": 0,
+     "messages": "<omitted>",
+     "info": "<omitted>"
+    }
+   },
+   "conn": "interrupt"
+  },
+  {
+   "dir": "out",
+   "t": 0.051,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "interrupt-2",
+    "method": "prompt.submit",
+    "params": {
+     "session_id": "ee615d0a",
+     "text": "ask:single interrupt"
+    }
+   },
+   "conn": "interrupt"
+  },
+  {
+   "dir": "in",
+   "t": 0.054,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "interrupt-2",
+    "result": {
+     "status": "streaming"
+    }
+   },
+   "conn": "interrupt"
+  },
+  {
+   "dir": "in",
+   "t": 0.15,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "clarify.request",
+     "session_id": "ee615d0a",
+     "payload": {
+      "questions": [
+       {
+        "qid": "q0",
+        "question": "Which color?",
+        "choices": [
+         "red (Recommended)",
+         "green",
+         "blue"
+        ],
+        "multi_select": false
+       }
+      ],
+      "request_id": "da438937"
+     },
+     "seq": 9
+    }
+   },
+   "conn": "interrupt"
+  },
+  {
+   "dir": "out",
+   "t": 0.15,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "interrupt-3",
+    "method": "session.interrupt",
+    "params": {
+     "session_id": "ee615d0a"
+    }
+   },
+   "conn": "interrupt"
+  },
+  {
+   "dir": "in",
+   "t": 0.151,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "interrupt-3",
+    "result": {
+     "status": "interrupted"
+    }
+   },
+   "conn": "interrupt"
+  },
+  {
+   "dir": "in",
+   "t": 0.152,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "tool.complete",
+     "session_id": "ee615d0a",
+     "payload": {
+      "tool_id": "call_dc294dba",
+      "name": "clarify",
+      "args": {
+       "questions": [
+        {
+         "question": "Which color?",
+         "choices": [
+          "red",
+          "green",
+          "blue"
+         ]
+        }
+       ]
+      },
+      "duration_s": 0.002190113067626953,
+      "result": {
+       "responses": [
+        {
+         "question": "Which color?",
+         "choices_offered": [
+          "red",
+          "green",
+          "blue"
+         ],
+         "user_response": ""
+        }
+       ]
+      }
+     },
+     "seq": 10
+    }
+   },
+   "conn": "interrupt"
+  },
+  {
+   "dir": "in",
+   "t": 0.155,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "message.complete",
+     "session_id": "ee615d0a",
+     "payload": {
+      "text": null,
+      "usage": "<omitted>",
+      "status": "interrupted"
+     },
+     "seq": 11
+    }
+   },
+   "conn": "interrupt"
+  },
+  {
+   "dir": "out",
+   "t": 2.653,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "interrupt-4",
+    "method": "clarify.respond",
+    "params": {
+     "session_id": "ee615d0a",
+     "request_id": "da438937",
+     "question_id": "q0",
+     "answer": "red"
+    }
+   },
+   "conn": "interrupt"
+  },
+  {
+   "dir": "in",
+   "t": 2.655,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "interrupt-4",
+    "result": {
+     "status": "expired"
+    }
+   },
+   "conn": "interrupt"
+  }
+ ]
+}

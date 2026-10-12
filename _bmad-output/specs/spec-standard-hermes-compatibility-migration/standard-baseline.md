@@ -78,5 +78,26 @@ kept under glass; it must not decide whether the Standard path is accepted.
   text turn against the pinned stock release and received response PCM from
   the separate audio sidecar. It recorded the absence of a speech-timing
   extension and kept the custom gateway untouched.
+- A loopback capture on `2026-10-11` ran the pinned commit (`hermes serve
+  --isolated`, throwaway state, scripted stub model, no credentials) and
+  recorded its clarify wire behavior as fixtures in
+  `tests/fixtures/standard/clarify-*.json`:
+  - `clarify.request` is always a batch
+    `{"questions":[{"qid","question","choices","multi_select"}],"request_id"}`
+    with `choices: null` for free text. There are at most four choices, and
+    with two or more the first carries a trailing `(Recommended)` on the wire.
+    The event has no turn ID.
+  - `clarify.respond` stores `answer` verbatim and does not validate it against
+    `choices`; the clarify tool removes a trailing `(Recommended)` before the
+    agent sees the answer. A batch answer without `question_id` is lost, an
+    unknown `question_id` is error `4002`, and a resolved or unknown
+    `request_id` answers `{"status":"expired"}` as an ordinary result.
+  - The clarify waits `agent.clarify_timeout` (default 3600 seconds) and then
+    emits `clarify.expire {request_id}`. `session.interrupt` emits no
+    `clarify.expire`.
+  - After a client socket drops, `session.resume` returns `pending_clarify`
+    with the same `request_id` and the clarify is not re-emitted as an event.
+  - `gateway.ready` carries no `capabilities`, so pinned Standard advertises no
+    `prompt.choose` or `prompt.explore`.
 - Home bridge and the remaining surface adapters are not claimed complete by
   this checkpoint. Their owning stories must prove the rows in the matrix.

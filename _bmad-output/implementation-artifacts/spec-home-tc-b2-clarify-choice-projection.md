@@ -1,0 +1,223 @@
+---
+title: 'HOME-TC-B2 (placeholder ID; owner assigns) — Project a single-select Standard clarify as a typed choice'
+type: 'feature'
+created: '2026-10-11'
+status: 'done'
+review_state: 'review-ready'
+baseline_commit: '0b14f3de72af98d8a6bfd5f428e0367493fa456a'
+route: 'dispatch'
+review_loop_iteration: 0
+source_story: 'HOME-TC-B2 (placeholder; no story ID, issue, or tracker row exists yet)'
+context:
+  - '{project-root}/AGENTS.md'
+  - '{project-root}/_bmad-output/implementation-artifacts/spec-home-tc-b1-client-device-interactive-choice.md'
+  - '{project-root}/_bmad-output/implementation-artifacts/spec-home-nw-07-freshness-bound-typed-choice-authority.md'
+  - '{project-root}/_bmad-output/specs/spec-home-bridge-route-roaming/bridge-contract.md'
+  - '{project-root}/_bmad-output/specs/spec-standard-hermes-compatibility-migration/standard-baseline.md'
+  - '{project-root}/_bmad-output/implementation-artifacts/home-tc-b3-live-proof-and-sequencing.md'
+---
+
+> **Placeholder IDs.** `HOME-TC-B1`, `HOME-TC-B2`, and the B3 live proof are working names; the owner assigns real IDs and tracker rows. This spec depends on B1 (it consumes `ConversationGrant.interactive_choice` for client claims). **Approved for implementation (2026-10-11):** the owner authorized B2 implementation and draft PRs after director spec review; the provisional answers to non-blocking suffix question R and fixed-TTL question T remain subject to owner correction.
+
+<frozen-after-approval reason="human-owned intent — do not modify unless human renegotiates">
+
+## Intent
+
+**Problem:** Pinned Standard Hermes `0.21.1` (`2237be3`) emits approval, clarify, secret, and sudo prompts only. It has no `prompt.request` event and no `prompt.choose` / `prompt.explore` operations, so Home never has a typed choice to forward and never has a capability to advertise. Typed choices therefore cannot be proven against a real Home and a pinned Standard (readiness note Q2).
+
+**Approach:** Home adapts a supported Standard interface without changing Hermes. Inside `StandardHermesBridge`, a `clarify.request` that has exactly one single-select question with listed text choices, on a conversation whose grant is interactive, is rewritten before the existing typed-choice pipeline sees it as a native `prompt.request` (`prompt_kind: "choice"`, operations `["choose"]`). The client's `choose` is mapped back to one `clarify.respond {request_id, answer, question_id}`. `ChoiceAuthority`, `_choice_respond`, and the public payload shape are reused; the only change to `ChoiceAuthority` is a per-object TTL so a projected choice lasts 3600 s while every native choice keeps 300 s. Every other clarify, and every other prompt type, keeps today's path.
+
+**Owner decisions recorded (2026-10-11):** D1 = P1 as above; `explore` is NOT advertised; everything else keeps today's clarify path unchanged. D3 = A (`choose`-only is accepted; FR-45 / Story 2.6 wording is amended outside this repo to "Explore is advertised only when Standard supports it"). D4 = A (clarify-derived choices are allowed on the household browser only, harmless-only, with no consequence-confirm path; approvals unchanged). D5 = A (browser appliance first; mechanism per Device ID). Q7 = accept `choose`-only options (no free-text "Other" row) for the first proof. Q8 = 3600 s answerability window for projected clarify choices, matching Standard's default `agent.clarify_timeout`; other typed choices keep 300 s. Engineering decisions (reversible at review): duplicate labels make a clarify ineligible; native Standard `prompt.choose` advertisement turns projection off; `prompt.explore` is omitted rather than `false`; only the batch clarify shape is eligible.
+
+## Boundaries & Constraints
+
+**Always:**
+- Project only when all hold at event time: the grant is interactive (B1 for client claims), `prompt.choose` is in the bridge's advertised capabilities, Standard's `gateway.ready` does not itself advertise `prompt.choose`, and the clarify passes the eligibility rules below. Otherwise forward the raw `clarify.request` exactly as today.
+- Emit one representation only: a projected clarify is never also forwarded as `clarify.request`.
+- Take the answer from Home's stored mapping (option ID -> the original choice string). Never from client-supplied text.
+- Mint option IDs (`opt-1`..`opt-N`), freshness, and public object IDs inside Home. Standard's `request_id` and `qid` never leave the bridge as typed-choice identity (`ChoiceAuthority` mints the public object/freshness).
+- Consume each choice once, before delivery (existing `authorize`). A rejected, stale, expired, uncertain, or duplicate action is never resent and never becomes `prompt.submit` or a new turn.
+- Record only content-free diagnostics (existing `_record_choice_diagnostic`). Never log or put into diagnostics a question, choice text, `request_id`, or `qid`.
+- Give a projected clarify choice a 3600 s window (`CLARIFY_CHOICE_TTL_SECONDS`, counted from first delivery, never extended by exploration) and give every other typed choice the unchanged 300 s. Take the TTL only from the bridge-side `choice_ttl_seconds`, never from an event payload; reject a value that is not finite, positive, and at most the clarify constant.
+- Show each option's label with a trailing ` (Recommended)` removed (Standard's own rule), keep the exact wire string in the option map, and answer with that string. A clarify whose labels are empty or collide after removal stays on the legacy path.
+- Offer only the listed options: a projected choice has no free-text "Other" row.
+
+**Never:**
+- Advertise `prompt.explore` from projection, or call Standard for an `explore`.
+- Project `approval.request`, `secret.request`, `sudo.request`, a native `prompt.request`, or any clarify with free text, `multi_select`, more than one question, or a non-text choice.
+- Add a consequence-confirm or sensitive path for projected choices, or classify a clarify as harmless.
+- Modify Hermes, add a Standard operation, or route a choice through `prompt.submit`.
+- Change `choice_authority.py` limits or semantics, the endpoint `prompt.respond` shape, or any client-visible field name. The one permitted change is a per-object TTL that defaults to `CHOICE_TTL_SECONDS` (300 s), so every native typed choice behaves exactly as before.
+- Touch the TUI, iOS, Android, Pixel, hardware, or any running service.
+
+## I/O & Edge-Case Matrix
+
+Terms: *projected* = rewritten to `prompt.request`; *legacy* = forwarded as `clarify.request`, byte-identical to `1f70524`.
+
+| Scenario | Input / State | Expected Output / Behavior | Error Handling |
+|----------|--------------|---------------------------|----------------|
+| HAPPY | Opted-in client claim; eligible clarify | One `prompt.request` with `options[{id:"opt-n",label}]`, `choice.operations: ["choose"]`; no `clarify.request` forwarded. `choose` once -> one `clarify.respond {session_id, request_id, answer, question_id}` -> endpoint result `{status:"accepted", operation:"choose"}` | N/A |
+| DEFAULT_OFF | Not opted in, or `prompt.choose` not advertised | Legacy; no `prompt.choose` in handshake | N/A |
+| INELIGIBLE_SHAPE | `choices: null`, empty, non-string, `multi_select: true`, 0 or 2+ questions, flat `{question,choices}`, text over 1024, label over 256, over 32 choices, labels that are empty or duplicated after suffix removal, invalid `request_id` or `qid` | Legacy | None |
+| EXPLORE | Client sends `explore` | `{status:"unavailable", reason:"unsupported"}` from `ChoiceAuthority`; no Standard call; object stays current until replaced or expired | N/A |
+| STALE | Wrong `object_id`/`freshness`, or option not listed | `unavailable` (`stale` / `unknown`); no Standard call | N/A |
+| DUPLICATE | Second `choose` after accept, or two concurrent | Exactly one `clarify.respond`; the other `unavailable/duplicate` | N/A |
+| REPLACED | A second eligible clarify (new `request_id`) while the first is pending | First -> `replaced`; second current | Existing revision cap (128/turn) applies |
+| EXPIRED_HOME | 3600 s after first delivery for a projected choice (300 s for any other typed choice, unchanged). Standard's default `agent.clarify_timeout` is also 3600 s, so the upstream clarify normally expires at about the same time | `unavailable/expired`; no Standard call; if Standard's timeout is longer or unlimited, the turn stays blocked upstream until interrupt or Standard's timeout | N/A |
+| EXPIRED_UPSTREAM | Standard `clarify.expire {request_id}` (only on Standard's own timeout; emitted before `tool.complete`/`message.complete`) | Rewritten to `prompt.expire` (same correlation); object `expired` | Non-matching `request_id` ignored |
+| REEMITTED | Same `request_id` seen again in the turn | Dropped; never re-offered (defensive: real Standard does not re-emit, including after `session.resume`) | No protocol error |
+| RECONNECT | Client reconnects or parked endpoint adopted. Standard's resume result carries `pending_clarify` but does not re-emit the event, and Home does not read it | Pending choices revoked (existing `revoke_all`) even though 3600 s have not elapsed; response -> `unavailable/revoked`; no resend; the clarify stays pending upstream (agent blocked) until interrupt or timeout; parked delivery starts its full 3600 s window at first send | N/A |
+| TTL_SCOPE | A native `prompt.request` whose payload carries `timeout_s`, `ttl`, or `choice.ttl` | Always 300 s; a projected choice's TTL comes only from the bridge-side `choice_ttl_seconds`, never from a payload | N/A |
+| TTL_SKEW | Home's window outlasts Standard's (late first delivery) and the user chooses after Standard expired | Standard answers `{"status":"expired"}` -> `BridgeRequestRejected` -> `unavailable/stale`; nothing wrong is sent | Captured |
+| LABEL_SUFFIX | First choice `"red (Recommended)"` | Label `red`; the option map keeps `"red (Recommended)"`; `choose` sends `"red (Recommended)"` | Labels that become empty or collide after stripping make the clarify ineligible (legacy) |
+| CAPABILITY_LOST | Opt-in removed or revision changed after projection | Response refused (`unsupported`); one-shot; Standard not called; clarify stays pending upstream until Standard times out or the user interrupts | Existing `BridgeCapabilityUnavailable` path |
+| UPSTREAM_REJECT | `clarify.respond` rejected (`GatewayRPCError`, `accepted:false`) | `unavailable/stale`; turn's choices revoked; no retry | N/A |
+| UNCERTAIN | Timeout or transport loss during `clarify.respond` | Endpoint marked unavailable, no retry | Existing `_raise_bridge_error` |
+| UNEXPECTED_REMAINING | Result has non-empty `remaining` | Protocol error; transport loss; no retry | One question was sent, so remaining must be empty |
+| TURN_TERMINAL | `message.complete` while pending | Revoked | N/A |
+| INTERRUPT | `session.interrupt` while pending | Standard emits no `clarify.expire`; choice is revoked at the terminal `message.complete` (status `interrupted`); a late `choose` is `unavailable/revoked` or `stale`, and if it reached Standard it would get `{"status":"expired"}` -> rejected as stale | Captured |
+| UPSTREAM_EXPIRED_STATUS | `clarify.respond` result `{"status":"expired"}` (request already resolved or expired upstream) | `BridgeRequestRejected` -> `unavailable/stale`; choices for the turn revoked | Captured |
+| OTHER_PROMPTS | approval, secret, sudo, native `prompt.request` | Unchanged | N/A |
+
+</frozen-after-approval>
+
+## Open Questions
+
+Items 1-6 are settled: 1 and 5 by the 2026-10-11 capture, 7 and 8 by Amanda, 2, 3, 4, and 6 as engineering decisions recorded in the frozen block (reversible at review). Remaining open: R and T, both non-blocking with provisional answers.
+
+- **1. Answer value: label, ID, or index. RESOLVED by capture (2026-10-11).** The answer is the choice **text** exactly as Standard sent it in `choices` (including a trailing ` (Recommended)` on the first choice, which Standard strips before the agent sees it; the stripped form is equivalent). IDs and indexes are not mapped by Standard: `"1"` reaches the agent as `"1"`. Out-of-list text is accepted unvalidated, so Home's `opt-n` -> string map is the only validation. Display label: see R. Evidence: `clarify-answer-values.json`, Design Notes.
+- **2. Duplicate labels. DECIDED (engineering):** ineligible, legacy path. Standard's tool does not de-duplicate choices, and after suffix removal two labels can collide.
+- **3. Standard natively advertises `prompt.choose`. DECIDED (engineering):** projection is off and the native path wins; pinned `gateway.ready` carries no `capabilities`, so projection is on for the pin.
+- **4. `prompt.explore` key. DECIDED (engineering):** omit it (omission denies), matching the TUI `main` appliance, which offers `prompt.explore` only when it is in the session capabilities.
+- **5. Choice TTL versus Standard's clarify timeout. RESOLVED by capture (see 8).** Standard waits 3600 s by default and emits `clarify.expire` only at its own timeout.
+- **6. Flat `{question, choices}` shape. DECIDED (engineering):** not eligible; real Standard always sends a batch.
+- **7. No free-text "Other" on a typed choice. DECIDED by Amanda (2026-10-11): accept `choose`-only options for the first proof.** Recorded in the frozen block. The legacy path (non-interactive grant) keeps whatever the TUI offers.
+- **8. Answerability window 300 s versus Standard's 3600 s. DECIDED by Amanda (2026-10-11): 3600 s for projected clarify choices.** Recorded in the frozen block; mechanism and risks are in Design Notes ("Long-lived pending object"). Other typed choices keep 300 s.
+- **R. `(Recommended)` suffix handling (non-blocking; owner may change).** Provisional: strip for display only; Home's option map keeps the exact wire string and the answer is that string (see Design Notes). Alternatives: (B) keep the wire string as the label, so the user sees "red (Recommended)" and the hint survives, at the cost of a cosmetic suffix on one button; (C) strip and add a `recommended` field to the option shape, which is a contract change for every client. Consequence of the provisional answer: the recommendation hint is lost on the typed path.
+- **T. Source of the 3600 s value (non-blocking).** Provisional: a documented constant in `standard.py`, not derived from Standard, because Home cannot read Standard's `agent.clarify_timeout` without a new Standard call. Gap: if the media-server profile overrides that setting above 3600 or to `<= 0`, Home's window ends first. Mitigation: before the opt-in, the owner or ops checks the profile's `agent.clarify_timeout` / `clarify.timeout`. Alternative: a Home setting (`HERMES_HOME_CLARIFY_CHOICE_TTL_SECONDS`, wired through `runtime.py`), which adds a settings path and tests; deferred unless the check finds a non-default value.
+
+## Code Map
+
+Anchors verified against `1f70524`.
+
+- `src/hermes_home/bridge/standard.py`
+  - L32-42 `_STRUCTURED_PROMPT_OPERATIONS`; L75-81 `_PROMPT_EXPIRY_TYPES` (`clarify.expire` is keyed to `clarify.request`, so it would be dropped for a projected prompt).
+  - L2377-2440 `_next_event` structured-prompt branch: the rewrite point is just before `_validate_structured_event_payload` (L2377-2380), so pending/revision/cap logic (L2391-2440) treats the projection as a native typed choice. `pending_mismatch` / `is_choice_revision` (L2408-2434) give REPLACED for free. `clarify.expire` handling L2441-2458. Pending is cleared at L2051-2054, 2102-2105, 2430-2433, 2455-2458, 2483-2486: any new projection record must be cleared at each.
+  - L2511-2541 `choice_context`: `choice_capabilities` derive from `grant.interactive_choice` and the advertised map, so advertising `prompt.choose` is sufficient.
+  - L290-315 `_ActiveTurn`: add the per-turn projection record (`request_id`, `qid`, ordered choice strings) and a bounded `projected_request_ids` set.
+  - L1986-2106 `_respond_prompt`: after the capability and `grant.interactive_choice` checks (L2005-2027) and `_validate_typed_choice_response` (L3733-3777), branch for a projected correlation: send `clarify.respond` instead of `prompt.choose` (L2045-2056). Validate the result with clarify-batch rules, not `prompt.request` rules: `_require_prompt_resolution_result` (L3882-3928) raises on `remaining` unless `_is_batch_clarify_event` (L3790-3793), which is false for the synthetic event. Needs a unit test.
+  - L3430-3459 `_capabilities`: add a `clarify_choice` input; when true and Standard did not advertise it, set `prompt.choose: True` and leave `prompt.explore` out. Called at L1086 (open) and L1369 (reconnect).
+  - L3653-3680 `_validate_structured_event_payload`: unchanged for legacy batch clarify; L3683-3730 validates the synthetic payload.
+  - `BridgeEvent.to_endpoint` (L254-258) refuses `prompt.request`; the endpoint always projects it through `ChoiceAuthority`. Keep.
+  - L18 `MAX_TYPED_CHOICE_REVISIONS_PER_TURN`: add `CLARIFY_CHOICE_TTL_SECONDS = 3600.0` beside it. L238-252 `BridgeEvent`: add `choice_ttl_seconds`. L2518-2541 `choice_context`: set it only for a projected event.
+  - Label rule: add a `strip_recommended` helper mirroring Standard's `tools/clarify_tool.py` (trim; case-insensitive trailing ` (Recommended)`; trim); eligibility also requires the stripped label to be non-empty, at most 256 characters, and unique among the stripped labels.
+- `src/hermes_home/bridge/choice_authority.py`: `project` L87-207 (object creation L153-183 reads the new TTL), `authorize` L233-312 and `complete`/`expire_correlation`/`revoke_*` L314-359 unchanged (they compare `expires_at`), `mark_delivered` L209-231 (L225-226 uses the per-object TTL), `_remaining_seconds` L408-414 (L413 uses the per-object TTL), `_ChoiceObject` L38-51 (new `ttl_seconds`), limits L19-25. Imports the new constant from `standard.py` (L12-25 already imports from there; the reverse import would cycle).
+- `src/hermes_home/bridge/endpoint.py`: `_choice_respond` L1396-1508 (unchanged), `_event_payload` L1958-2059 (`prompt.request` -> `ChoiceAuthority.project`), `_prompt_respond` L1320-1349 routes `prompt.request` to `_choice_respond`, `_safe_capabilities` L3022-3056 passes `prompt.choose` through, reconnect clears pending and revokes choices L1683-1694, parked delivery L2696-2713, `_prepare_choice_delivery` L2498-2543 writes `timeout_s` from `mark_delivered` (no change needed for the 3600 s TTL), `_maybe_release_turn` -> `revoke_turn` L2437-2438 (cleanup of the long-lived object).
+- `src/hermes_home/bridge/production.py` L586-618: B1 supplies the grant flag.
+- `_bmad-output/specs/spec-home-bridge-route-roaming/bridge-contract.md` L252-308 (response-key table, typed-choice section, capability paragraph).
+- `_bmad-output/specs/spec-standard-hermes-compatibility-migration/standard-baseline.md` L38 (Prompts row): add the capture evidence row.
+
+## Tasks & Acceptance
+
+**Execution:**
+- [x] (Prerequisite, not code) Standard capture done 2026-10-11; fixtures are in `tests/fixtures/standard/`. Answer value, expiry behavior, and the owner's Q7/Q8 decisions are recorded in the frozen block
+- [x] `src/hermes_home/bridge/standard.py`, `src/hermes_home/bridge/choice_authority.py` -- add `CLARIFY_CHOICE_TTL_SECONDS` and `BridgeEvent.choice_ttl_seconds`, set only for projected events; add `_ChoiceObject.ttl_seconds` used by `mark_delivered` and `_remaining_seconds`; reject an out-of-range TTL -- Q8
+- [x] `src/hermes_home/bridge/standard.py` -- eligibility function; early rewrite to `prompt.request`; per-turn projection record, dedupe set, and clears; `clarify.expire` -> `prompt.expire`; `_respond_prompt` branch to `clarify.respond` with clarify-batch result validation; `_capabilities` `clarify_choice` at open and reconnect -- D1/D3/D4
+- [x] `bridge-contract.md`, `standard-baseline.md` -- apply the amendments below
+- [x] Tests (below) -- matrix coverage; noninteractive clarify remains the default-off proof. Replaced the stale B1 assertion that interactive grants advertise no choice flags with an equivalent noninteractive legacy-path check, since B2 advertises `prompt.choose` only for eligible interactive grants
+
+**Contract amendments (exact text):**
+
+1. `bridge-contract.md` after the `prompt.request` row of the response-key table (L255-259) add a note: `A prompt.request with prompt_kind "choice" is either emitted by Standard or projected by Home from a Standard clarify.request (see Clarify projection). The projected form accepts only operation "choose", and maps to clarify.respond.`
+2. `bridge-contract.md` replace the paragraph at L302-309 with: `The prompt.choose capability flag is exposed when the bound Home Device may answer typed choices (see Device eligibility) and either Standard advertises prompt.choose, or Home projects Standard clarify.request prompts as typed choices. The prompt.explore flag is exposed only when Standard advertises it. Home never advertises an operation that has no Standard operation behind it. Passive Room Displays and audio-only Pucks, which have no eligibility, stay read-only.` (Device eligibility = the B1 text.)
+3. `bridge-contract.md` new subsection `### Clarify projection` after the typed-choice section: `When the Device is eligible and Standard does not advertise typed choices, Home projects a clarify.request that has exactly one question, multi_select false, and 1-32 non-empty text choices as a typed choice. The question text is the explanation, each choice is an option with a Home-minted ID, and operations is ["choose"]. A choose maps to one clarify.respond carrying the original choice text and the question_id. Home sends the answer exactly once; stale, expired, replaced, revoked, duplicate, unknown, and unsupported attempts, including explore, return the typed unavailable result and do not reach Standard. A projected choice has no free-text answer option. Any other clarify.request is forwarded unchanged. Projected choices are Hermes questions: Home cannot classify them harmless, so they never carry a consequence-confirm path, and approval.request is never projected.`
+4. HOME-NW-07's `Always` clause ("advertise only when the upstream supports the matching operation") is satisfied for `prompt.explore` and amended for `prompt.choose` by item 2. NW-07 is `done`; record the amendment here and in the B2 validation record, not by editing NW-07.
+5. `bridge-contract.md`, the typed-choice expiry paragraph (the one beginning `Home expires a choice 300 seconds after first delivery`, in the typed-choice section): replace its first sentence with: `Home expires a choice 300 seconds after first delivery using its monotonic clock, except a choice that Home projects from a Standard clarify.request (see Clarify projection), which expires 3600 seconds after first delivery to match Standard's default agent.clarify_timeout. The payload's timeout_s is the remaining seconds of that choice's own window.` Keep the remaining sentences (exploration does not extend the deadline; a new revision replaces the old one; each correlation authorizes one response). Add to `### Clarify projection`: `Standard ends its own wait with clarify.expire, which Home forwards as the choice's expiry; if Standard's timeout is longer than 3600 seconds or unlimited, the choice expires in Home first and the question is then answerable only by interrupting the turn.`
+6. Same subsection, label rule: `Each option's label is the choice text with a trailing "(Recommended)" removed; Home answers with the original choice text exactly as Standard sent it.`
+7. HOME-NW-07's `Always` clause "Home expires each object 300 seconds after first delivery" is likewise amended for projected clarify choices by item 5; record it in the B2 validation record, not in the done NW-07 spec.
+
+**Acceptance Criteria:**
+- Given an opted-in client claim and an eligible clarify, when the user chooses once, then Standard receives exactly one `clarify.respond` with the stored answer and `question_id`, the client sees no `clarify.request` for it, and a second choose is `duplicate`.
+- Given default off, or any ineligible shape, when a clarify arrives, then the endpoint receives the same bytes as at `1f70524` and the handshake carries no `prompt.choose`.
+- Given an `explore`, stale, replaced, expired, reconnected, or capability-lost attempt, when sent, then the typed unavailable result is returned and no Standard request is made.
+- Given an uncertain delivery, when it occurs, then nothing is resent and no `prompt.submit` or new turn exists.
+- Given a re-emitted `request_id`, when it arrives, then it is not re-offered.
+- Given diagnostics and logs for a whole run, when scanned, then they contain no question, choice, `request_id`, or `qid` text.
+- Given a projected choice first delivered at time $t$, when `choose` arrives at $t + 3599$ s, then it is accepted once; when it arrives after $t + 3600$ s, then it is `unavailable/expired`, `clarify.respond` is not sent, and the client's `timeout_s` was 3600 at delivery.
+- Given a native typed choice beside a projected one, when 300 s have passed, then the native one is expired and the projected one is still answerable.
+- Given a pending projected choice, when the client reconnects, the claim closes, or the turn ends, then the choice is revoked at once and its memory is released with the turn.
+
+## Design Notes
+
+**Why rewrite inside the bridge, not the endpoint.** The endpoint already treats `prompt.request` as Home-authorized typed-choice input, the bridge owns the active turn, runtime session, and pending-prompt state, and `_respond_prompt` is the only place that talks to Standard. Rewriting early reuses revision/replace/cap/expiry logic and keeps `choice_authority.py` to one small change (the per-object TTL).
+
+**Interaction with TUI B2b/B2c.** TUI `main` already renders single-select clarify through the legacy path (#241, #243, newer than the readiness note). P1 therefore adds no user capability; its purpose is to exercise the typed-choice contract end to end so 2-WK-5/6 can close (Q2). A client that ignores typed choices still gets a working legacy clarify whenever the grant is not interactive.
+
+**A subtle sequencing trap.** Projecting when `interactive_choice` is False would swallow the clarify (the choice would carry no operations). The projection gate therefore checks the grant at event time and falls back to legacy.
+
+**Long-lived pending object (Q8 = A, 3600 s).** Decision 2026-10-11: a projected clarify choice lives 3600 s from first delivery, matching Standard's default `agent.clarify_timeout`, so the typed path is no less answerable than the legacy clarify. How it stays scoped:
+- The TTL travels as a bridge-side field, never from a payload. `standard.py` defines `CLARIFY_CHOICE_TTL_SECONDS = 3600.0` beside `MAX_TYPED_CHOICE_REVISIONS_PER_TURN` (L18) because `choice_authority.py` already imports from `standard.py` (L12-25), so the dependency stays one-way. `BridgeEvent` (L238-252) gains `choice_ttl_seconds: float | None = None` (repr off, compare off, like `choice_capabilities`). `_next_event` sets it in `choice_context` (L2518-2541) **only** for a projected event; the native `prompt.request` path never sets it, so native typed choices keep 300 s.
+- `choice_authority.py`: `_ChoiceObject` (L38-51) gains `ttl_seconds: float` defaulting to `CHOICE_TTL_SECONDS`. `project` (object creation, L153-183) reads `event.choice_ttl_seconds`: `None` -> `CHOICE_TTL_SECONDS`; otherwise it must be a finite positive number no greater than `CLARIFY_CHOICE_TTL_SECONDS`, else `ChoiceProtocolError("choice TTL is invalid")`. `mark_delivered` (L225-226) uses `now + choice.ttl_seconds`; `_remaining_seconds` (L413) uses `int(choice.ttl_seconds)` for an undelivered object. `authorize`, `complete`, `expire_correlation`, `revoke_turn`, and `revoke_all` are unchanged: they compare against `choice.expires_at`.
+- `endpoint.py` needs no change: `_prepare_choice_delivery` (L2498-2543) already writes `timeout_s` from `mark_delivered`, so the client sees `timeout_s: 3600` and a per-choice countdown. Verified in TUI `origin/main`: typed choices are excluded from the overlay's auto-dismiss (`prompt.choice === undefined`), `home_session.py` reads `timeout_s` with `int(...)`, and the web protocol accepts any positive safe integer, so 3600 breaks no client assumption.
+- Source of the number: Home cannot read Standard's config, and adding a Standard call to learn it is out of scope. 3600 is a documented constant, not derived. Standard's own `clarify.expire` (handled, mapped to `prompt.expire`) shortens the window whenever Standard times out first. See Open Question T for the operator-config gap.
+- Memory and cleanup: no timer or thread is added; expiry is evaluated lazily in `authorize` and `mark_delivered`. A pending projected choice is one `_ChoiceObject` plus one correlation, bounded by the existing per-turn object cap (128) and the 256-correlation cap, and at most one pending clarify exists per turn because Standard blocks the agent on it (capture: a `prompt.submit` during a pending clarify returned `{"status":"redirected"}` and produced no second clarify). The object is released by `revoke_turn` at turn release (`endpoint.py` L2437-2438), by `revoke_all` on reconnect, close, or authorization loss, and by endpoint teardown. An expired-but-unreleased object holds only that memory until the turn ends.
+- New risks from the 1 h lifetime, none blocking:
+  1. *Home restart*: every claim closes (`service_restart`, `production.py` L138) and endpoint state is gone, so the choice is unanswerable while the agent stays blocked upstream up to Standard's timeout. Same as legacy; the user interrupts or starts a fresh conversation.
+  2. *Skew*: Home's window starts at first delivery, Standard's at emit. A parked or delayed delivery lets Home outlast Standard by the delay (bounded by the parking and reconnect grace). A late `choose` then hits Standard's `{"status":"expired"}`, which Home already maps to `unavailable/stale`; no wrong answer can be sent.
+  3. *Standard configured longer or unlimited*: if the media-server profile sets `agent.clarify_timeout` (or legacy `clarify.timeout`) above 3600 or to `<= 0`, Home ends answerability at 3600 s while the agent stays blocked. Mitigation: check the profile value before opt-in; the user can interrupt.
+  4. *Stale dialog on a shared iPad*: a question can be answered up to an hour after it was asked. This matches the legacy clarify and the agent really is still waiting; no new mitigation.
+  5. *Reconnect*: revocation on reconnect is unchanged. Standard's `session.resume` result carries `pending_clarify`, which Home does not read, so the question is not re-offered and the agent waits for interrupt or timeout (same as legacy). A re-offer-on-resume would be a separate story.
+  6. *Room Devices*: the projection gate is the grant flag, so a Room Device with `capabilities.interactive_choice: true` would also receive projected choices, and a Room claim has an idle timer the client claim does not. D5 targets the browser first; before deploy, confirm no `devices[]` entry sets `interactive_choice` (expected none), or the gate must also require a client claim.
+
+**`(Recommended)` suffix (Open Question R, provisional).** Standard decorates the first of 2 or more choices with ` (Recommended)` on the wire and strips it again before the agent sees the answer. Provisional: Home keeps the exact wire string in its option map and sends that string as the answer, and shows a **display label with the suffix removed** using Standard's own rule (`strip_recommended`: trim, case-insensitive trailing ` (Recommended)`, trim). The label loses the recommendation hint, because the typed-choice option shape has only `id` and `label` and adding a field is a contract change.
+
+**Capture evidence (2026-10-11, Standard Hermes `0.21.1` / `2237be3`).** `hermes serve --isolated` on `127.0.0.1` with a throwaway `HERMES_HOME`/`HOME`, driven by a scripted OpenAI-compatible stub model that emits a `clarify` tool call (no real model, no credentials). Source read first, then confirmed by execution. Frames: `tests/fixtures/standard/clarify-wire-shapes.json`, `clarify-answer-values.json`, `clarify-expire.json`, `clarify-resume-pending.json`, `clarify-interrupt-pending.json`, `clarify-socket-drop-no-resume.json` (gateway skin, session info/messages, and token usage trimmed; no secrets). Findings:
+- **Wire shape.** `clarify.request` payload is `{"questions":[{"qid":"q0","question":"Which color?","choices":["red (Recommended)","green","blue"],"multi_select":false}],"request_id":"0f1b570c"}`, always a batch. `qid` is `q<index>`; `request_id` is 8 hex. At most 4 choices (`MAX_CHOICES`). When there are 2 or more choices the **first carries the suffix ` (Recommended)` on the wire**; a lone choice does not. There is no `Other` row on the wire (clients append their own). The event has `seq` but no `turn_id`. `gateway.ready` payload is `{change_events, heartbeat, replay_epoch, skin}` with no `capabilities`, so Standard advertises no `prompt.choose`/`prompt.explore`.
+- **Answer value.** `clarify.respond` stores `answer` verbatim; the gateway never validates it against `choices`. The tool strips a trailing `(Recommended)` before the agent sees it. Observed agent-received `user_response`: wire string `"red (Recommended)"` -> `"red"`; `"red"` -> `"red"`; `"green"` -> `"green"`; index `"1"` -> `"1"`; `"0"` -> `"0"`; out-of-list `"purple"` -> `"purple"`; `""` -> `""`; `"GREEN"` -> `"GREEN"` (no case folding); `["green"]` -> the string `"['green']"`. All return `{"status":"ok","remaining":[]}`. So the answer must be the choice **text**, never an ID or index; Home's stored option map is the only guard against out-of-list values.
+- **Batch rules.** Omitting `question_id` returns `{"status":"ok"}` but the agent receives an empty `user_response` (answer lost). An unknown `question_id` returns a JSON-RPC error `{"code":4002,"message":"unknown question_id 'q9'"}`. After the request resolves, or for an unknown `request_id`, `clarify.respond` returns `{"status":"expired"}` as an ordinary result (not an error).
+- **Expiry.** Default timeout is `agent.clarify_timeout = 3600` s (`<= 0` means unlimited; 300 s only if config cannot be read). With the timeout set to 8 s: `clarify.expire {"request_id":...}` arrived at exactly 8.0 s, before `tool.complete` and `message.complete`; the tool result carried `timed_out: true` with an empty `user_response`; a late respond returned `{"status":"expired"}`.
+- **Resume.** After the client socket dropped and a new socket called `session.resume` with the stored session ID: the session was still live (`running: true`, same `session_id`), `clarify.request` was **not** re-emitted as an event, and the resume result carried `pending_clarify` with the identical payload and `request_id`. Answering that `request_id` on the new socket succeeded and the turn finished. A new socket also answered without any `session.resume` 6 s after the drop.
+- **Interrupt.** `session.interrupt` while pending returned `{"status":"interrupted"}`; **no `clarify.expire` is emitted**; `tool.complete` (empty `user_response`) and `message.complete` with `status: "interrupted"` followed; a late respond returned `{"status":"expired"}`.
+- **Not confirmed by execution.** The 20 s detached-session reap grace and 600 s activity-stale rule are from source only (`tui_gateway/server.py`, `session_reaper.py`); the socket-drop run waited 6 s. Real-model behavior (for example a model emitting dict-shaped choices, which `_flatten_choice` flattens) is from source only. Nothing here exercised Home; that is B3.
+
+## Verification
+
+**Commands:**
+- `uv run pytest tests/test_standard_bridge.py tests/test_bridge_endpoint.py tests/test_bridge_server.py tests/test_diagnostics.py tests/test_production_bridge.py -q` -- expected: all pass
+- `uv run ruff check src tests` and `uv run ruff format --check src tests` -- expected: clean
+
+**Tests to add or extend (names are proposals):**
+- `tests/test_standard_bridge.py`: `test_eligible_single_select_clarify_is_projected_as_typed_choice`; `..._choose_maps_to_clarify_respond_with_question_id`; one parameterized `test_ineligible_clarify_shapes_stay_legacy`; `test_projection_is_off_without_interactive_grant_or_advertised_choose`; `test_native_prompt_choose_advertisement_disables_projection`; `test_clarify_expire_expires_the_projected_choice`; `test_reemitted_request_id_is_never_reoffered` (defensive: not observed from real Standard); `test_projection_clears_with_every_pending_prompt_reset`; `test_projected_resolution_tolerates_empty_remaining_and_rejects_nonempty`; `test_capabilities_advertise_choose_only_at_open_and_reconnect`; `test_projected_answer_is_the_exact_wire_choice_string_including_recommended_suffix`; `test_interrupt_while_pending_revokes_without_clarify_expire`; `test_late_respond_status_expired_is_a_known_rejection`. Load the real frames from `tests/fixtures/standard/clarify-*.json` (committed 2026-10-11, see Design Notes) instead of hand-written payloads for the shape, answer, expiry, resume, and interrupt tests. Existing clarify tests (L4425-4455, L5872-5902) stay unmodified.
+- `tests/test_bridge_endpoint.py`: projected choice through the real `ChoiceAuthority`: `choose` once, `explore` unsupported, stale freshness, duplicate (sequential and concurrent), replaced, Home expiry, upstream expiry, reconnect revoke, capability loss, upstream reject, uncertain timeout never retried.
+- `tests/test_bridge_endpoint.py` (long-TTL set; all use the injectable `choice_clock`, so no real waiting): `test_projected_choice_expires_at_3600_not_300` (at +300.1 s and +3599 s `choose` is accepted by `authorize`; at +3600.1 s it is `unavailable/expired` and `clarify.respond` is never sent); `test_projected_choice_first_delivery_reports_timeout_s_3600_and_counts_down`; `test_native_typed_choice_keeps_300_s_beside_a_projected_choice` (two turns on one endpoint: native expires at 300 s, projected survives it); `test_projected_ttl_cannot_be_set_by_event_payload` (a native `prompt.request` carrying `timeout_s`, `ttl`, or `choice.ttl` still gets 300 s); `test_projected_ttl_must_be_finite_positive_and_at_most_the_clarify_constant` (`ChoiceProtocolError` otherwise); `test_parked_projected_choice_gets_full_3600_window_at_first_send` (mirrors the existing parked 300 s test at L1273); `test_late_respond_after_projected_ttl_is_expired_and_never_reaches_standard`; `test_projected_choice_replaced_by_newer_object_stays_replaced_inside_the_long_ttl`; `test_expired_projected_object_is_released_at_turn_terminal` (no timer or thread is needed: expiry is lazy, and `revoke_turn` drops it); `test_projected_choice_survives_no_calls_for_an_hour_without_growth` (`_objects`/`_correlations` sizes unchanged while idle); `test_reconnect_revokes_a_pending_projected_choice_long_before_its_ttl`; `test_claim_close_and_revocation_revoke_a_pending_projected_choice`; `test_service_restart_leaves_no_projected_choice` (new endpoint has empty authority).
+- `tests/test_standard_bridge.py` (projection-side): `test_projected_event_carries_the_clarify_ttl_and_a_native_event_does_not`; `test_choice_after_standard_expired_status_is_rejected_as_stale` (replays the `clarify-expire.json` late-respond frame); `test_label_strips_recommended_suffix_but_the_answer_is_the_exact_wire_string`; `test_label_strip_matches_standard_rules` (case-insensitive trailing ` (Recommended)` only; a middle occurrence is untouched); `test_labels_that_collide_or_empty_after_stripping_are_ineligible`.
+- `tests/test_bridge_server.py`: one live-websocket pass of choose, then duplicate.
+- `tests/test_diagnostics.py`: content-free outcomes for a projected choice.
+- `tests/test_production_bridge.py`: end-to-end claim -> grant -> advertised flag (needs B1).
+
+**Manual checks:** none for B2. Live proof is B3 (sequencing note).
+
+## Review Triage Log
+
+Fourteen findings from five review layers were adjudicated individually. Four
+were patched; ten were rejected with evidence; none were deferred.
+
+### Patch
+
+- [x] F01 (standards review, low) — Shared the 32-option, 64-ID, 1024-text, and 256-label limits in `standard.py`; both clarify eligibility and `ChoiceAuthority` now use those constants.
+- [x] F08 (blind review, medium) — Bound each original wire choice string to 1024 characters before storing it, while retaining the exact accepted string for `clarify.respond`; added an oversized-whitespace regression case.
+- [x] F11 (blind review, medium) — The endpoint test socket now holds session-bound event frames until `prompt.submit` has been sent.
+- [x] F13 (blind review, low) — Added `validation-home-tc-b2.md` with the NW-07 amendments, verification evidence, and deployment boundary.
+
+### Rejected
+
+- F02 (blind review, medium) — The required gate is the interactive grant. B2 is default-off, the owner explicitly requires a pre-opt-in check that no Room grant is accidentally true, and no production configuration was touched; adding a client-claim-only gate would change the approved grant contract.
+- F03 (edge review, medium) — An empty batch is rejected by the existing `_validate_structured_event_payload` path, unchanged by B2. A regression test records that legacy protocol error rather than changing the default-off behavior.
+- F04 (edge review, medium) — Same Room-grant concern as F02; the user-specified predeploy check, not a new grant predicate, is the approved safeguard.
+- F05 (blind review, high) — No content-based harmlessness predicate is available or authorized; the approved behavior forbids classifying clarify content as harmless and adds no consequence-confirm path.
+- F06 (blind review, medium) — The Standard correlation remains the public prompt correlation required by the bridge contract; Home still mints the typed-choice object and freshness IDs. Projected expiry payloads are reduced to `{}` so the raw request ID is not duplicated as payload data.
+- F07 (blind review, medium) — The frozen matrix explicitly requires dropping any re-emitted `request_id` within the turn; distinguishing a different request with the same ID would contradict that rule.
+- F09 (blind review, medium) — B2 supplies only fixed 3600-second projected and 300-second native TTL metadata; no fractional TTL is reachable from the event payload.
+- F10 (blind review, medium) — `prompt.choose` is a grant-level handshake capability decided before event shape is known; ineligible clarify events remain on the unchanged legacy path.
+- F12 (blind review, low) — The code map is a baseline analysis anchored to `1f70524`, not a current lifecycle contract; implementation tests cover bounded per-turn projection history.
+- F14 (verification review, medium) — Although the proposed narrow command omits the new modules, the delivery ran the full Home suite and five consecutive B2 regression-suite runs; both new modules are included in the validation record.

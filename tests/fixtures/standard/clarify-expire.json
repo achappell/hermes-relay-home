@@ -1,0 +1,224 @@
+{
+ "standard": {
+  "hermes_release": "0.21.1",
+  "source_commit": "2237be355906fbe6065ce1815711eee52b2d646e",
+  "server": "hermes serve --isolated (tui_gateway /api/ws), loopback, throwaway HERMES_HOME and HOME",
+  "model": "scripted OpenAI-compatible stub (no real model)",
+  "captured": "2026-10-11"
+ },
+ "title": "Unanswered clarify with agent.clarify_timeout=8",
+ "note": "clarify.expire {request_id} is emitted at the timeout, before tool.complete and message.complete; the tool result carries timed_out:true; a late respond returns {status:expired}. Default timeout without config is 3600 s",
+ "frames": [
+  {
+   "dir": "in",
+   "t": 0.034,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "gateway.ready",
+     "payload": {
+      "change_events": true,
+      "heartbeat": true,
+      "replay_epoch": "6c9cca47be4a4e3ea9cd444b4cb18b5e",
+      "skin": "<omitted>"
+     }
+    }
+   },
+   "conn": "expire"
+  },
+  {
+   "dir": "out",
+   "t": 0.034,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "expire-1",
+    "method": "session.create",
+    "params": {
+     "source": "home"
+    }
+   },
+   "conn": "expire"
+  },
+  {
+   "dir": "in",
+   "t": 0.057,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "expire-1",
+    "result": {
+     "session_id": "fc812aca",
+     "stored_session_id": "20261011_180909_129407",
+     "message_count": 0,
+     "messages": "<omitted>",
+     "info": "<omitted>"
+    }
+   },
+   "conn": "expire"
+  },
+  {
+   "dir": "out",
+   "t": 0.057,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "expire-2",
+    "method": "prompt.submit",
+    "params": {
+     "session_id": "fc812aca",
+     "text": "ask:single expire"
+    }
+   },
+   "conn": "expire"
+  },
+  {
+   "dir": "in",
+   "t": 0.067,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "expire-2",
+    "result": {
+     "status": "streaming"
+    }
+   },
+   "conn": "expire"
+  },
+  {
+   "dir": "in",
+   "t": 0.149,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "clarify.request",
+     "session_id": "fc812aca",
+     "payload": {
+      "questions": [
+       {
+        "qid": "q0",
+        "question": "Which color?",
+        "choices": [
+         "red (Recommended)",
+         "green",
+         "blue"
+        ],
+        "multi_select": false
+       }
+      ],
+      "request_id": "13288dd1"
+     },
+     "seq": 9
+    }
+   },
+   "conn": "expire"
+  },
+  {
+   "dir": "in",
+   "t": 8.155,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "clarify.expire",
+     "session_id": "fc812aca",
+     "payload": {
+      "request_id": "13288dd1"
+     },
+     "seq": 11
+    }
+   },
+   "conn": "expire"
+  },
+  {
+   "dir": "in",
+   "t": 8.157,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "tool.complete",
+     "session_id": "fc812aca",
+     "payload": {
+      "tool_id": "call_28e57490",
+      "name": "clarify",
+      "args": {
+       "questions": [
+        {
+         "question": "Which color?",
+         "choices": [
+          "red",
+          "green",
+          "blue"
+         ]
+        }
+       ]
+      },
+      "duration_s": 8.008185863494873,
+      "result": {
+       "responses": [
+        {
+         "question": "Which color?",
+         "choices_offered": [
+          "red",
+          "green",
+          "blue"
+         ],
+         "user_response": ""
+        }
+       ],
+       "timed_out": true
+      }
+     },
+     "seq": 12
+    }
+   },
+   "conn": "expire"
+  },
+  {
+   "dir": "in",
+   "t": 8.177,
+   "frame": {
+    "jsonrpc": "2.0",
+    "method": "event",
+    "params": {
+     "type": "message.complete",
+     "session_id": "fc812aca",
+     "payload": {
+      "text": "STUB-RECEIVED: {\"responses\": [{\"question\": \"Which color?\", \"choices_offered\": [\"red\", \"green\", \"blue\"], \"user_response\": \"\"}], \"timed_out\": true}",
+      "usage": "<omitted>",
+      "status": "complete"
+     },
+     "seq": 18
+    }
+   },
+   "conn": "expire"
+  },
+  {
+   "dir": "out",
+   "t": 8.177,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "expire-3",
+    "method": "clarify.respond",
+    "params": {
+     "session_id": "fc812aca",
+     "request_id": "13288dd1",
+     "question_id": "q0",
+     "answer": "red"
+    }
+   },
+   "conn": "expire"
+  },
+  {
+   "dir": "in",
+   "t": 8.18,
+   "frame": {
+    "jsonrpc": "2.0",
+    "id": "expire-3",
+    "result": {
+     "status": "expired"
+    }
+   },
+   "conn": "expire"
+  }
+ ]
+}
