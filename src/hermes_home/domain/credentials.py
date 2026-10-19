@@ -412,6 +412,8 @@ class CredentialService:
         )
         if endpoint_type == "browser":
             _validate_browser_scope(requested_scope)
+        if endpoint_type == "puck" and secure_storage == SECURE_STORAGE_PRIVATE_FILE:
+            _validate_private_puck_scope(requested_scope, approved=False)
         profile_mappings = _profile_mappings(requested_profile_mappings)
         request_id = _identifier(self._id_factory(), "request_id")
         confirmation_code = self._confirmation_factory()
@@ -584,6 +586,11 @@ class CredentialService:
             scope.assert_subset_of(requested)
             if record["type"] == "browser":
                 _validate_browser_scope(scope)
+            if (
+                record["type"] == "puck"
+                and record["secure_storage"] == SECURE_STORAGE_PRIVATE_FILE
+            ):
+                _validate_private_puck_scope(scope, approved=True)
             if not set(scope.rooms).issubset(available_rooms):
                 raise CredentialValidationError(
                     "approved scope references an unavailable room"
@@ -1438,6 +1445,8 @@ class CredentialService:
 
 
 def _validate_storage(endpoint_type: str, secure_storage: str) -> None:
+    if endpoint_type == "puck" and secure_storage == SECURE_STORAGE_PRIVATE_FILE:
+        return
     expected = (
         SECURE_STORAGE_PRIVATE_FILE
         if endpoint_type == "browser"
@@ -1445,6 +1454,19 @@ def _validate_storage(endpoint_type: str, secure_storage: str) -> None:
     )
     if secure_storage != expected:
         raise CredentialValidationError(f"secure storage must be {expected}")
+
+
+def _validate_private_puck_scope(scope: CredentialScope, *, approved: bool) -> None:
+    """Private storage permits only the existing room wake-device authority."""
+    if (
+        len(scope.rooms) != 1
+        or scope.capabilities != ("wake_claim",)
+        or scope.touch_binding is not None
+        or (approved and not scope.wake_mappings)
+    ):
+        raise CredentialValidationError(
+            "private-file puck requires one room, wake_claim and approved mappings"
+        )
 
 
 def _validate_browser_scope(scope: CredentialScope) -> None:

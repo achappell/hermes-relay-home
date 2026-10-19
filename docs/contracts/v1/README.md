@@ -161,6 +161,78 @@ revision and only its authorized active mappings, with no Profile IDs. Devices
 fetch on pairing/startup/reconnect, poll every 30 seconds while active, and
 refresh after `stale_configuration` or `stale_mapping`.
 
+### Service-hosted Puck enrollment
+
+A Puck bridge running as a service uses the existing endpoint `type: "puck"`,
+not its module name `puck_bridge`. It may declare
+`secure_storage: "service_private_file"` when it has persistent private
+service-side storage. For this storage mode Home accepts exactly one
+`requested_rooms` entry and exactly `requested_capabilities: ["wake_claim"]`.
+Approval must retain that one requested, configured Room and grant nonempty
+active Wake Mapping IDs whose Profiles are currently available. No
+`client_claim`, Touch binding, protected-input or monitoring capability is
+permitted. The mapping choice above remains explicit and fail-closed; the
+`all_current_profiles` choice snapshots only currently available IDs and fails
+if none exist. Other `puck` enrollments using `platform_secure_store` retain
+their existing NW-02 behavior.
+
+Use this operator sequence, without modifying Home's database:
+
+1. Configure the intended Room and Wake Mappings through the existing
+   revision-checked configuration API. Do not guess a Profile or mapping.
+2. As the Home administrator, create a five-minute offer through
+   `POST /api/v1/enrollment/offers`. Transfer its proof privately to the
+   service. Submit the existing enrollment request with the stable endpoint
+   identity, `type: "puck"`, Room, wake-only capabilities and private-file
+   declaration. Persist and reuse the same non-secret `endpoint_id` across
+   restart and re-enrollment. Keep the returned confirmation code for identity
+   verification.
+3. Inspect `GET /api/v1/enrollment/requests`, verify the endpoint identity,
+   label, requested scope and confirmation code, and approve using the exact
+   Room/mapping grant shown above. These admin-token operations are local:
+   use the Home host's trusted local API (or an authenticated tunnel to its
+   loopback listener), never a published proxy route. Proxied admin requests
+   return `403 admin_local_only`. The `/pair` page remains personal-client-only
+   and directs room devices to this admin API; a Device credential cannot
+   approve enrollment.
+4. Consume with the original offer proof and the identical
+   `secure_storage: "service_private_file"` declaration. The one-time response
+   supplies a distinct Home `device_id`, credential and exact approved scope.
+   Write it directly to the consumer's private credential store; do not print
+   it, reuse the browser credential, or substitute a Standard token.
+5. Publish a Device record with that generated `device_id`, a display `name`,
+   approved `room_id`, unused positive Room `priority` and
+   `capabilities: {"wake_claim": true}`, using the latest configuration
+   revision. On `409 revision_conflict`, refetch the snapshot/revision, merge
+   only this Device record while preserving unrelated state, and retry the
+   revision-checked publish. Retain the issued credential privately.
+   Enrollment does not create a configured Device; claims from an
+   unconfigured ID remain denied. Discover authorized active mappings through
+   the existing device-configuration route.
+
+Private-file attestation is a declaration, not remote filesystem verification
+or cryptographic attestation. The consumer/deployment must enforce a private
+service state directory and credential file readable only by the service
+account and administrators (on Linux, owner-only directory and mode `0600`
+file), including before startup. Never store credentials in browser storage,
+unit files, argv, ordinary logs or the repository. Home checks storage at both
+request and consumption and cannot change the stored endpoint type. Only
+`browser` and this narrow private-file `puck` mode accept the private-file
+declaration; other types still require platform secure storage.
+
+The ops consumer uses `/var/lib/hermes-puck-bridge/bridge.env`, owned by
+`hermes-puck`, mode `0600`, within its mode-`0700` state directory and subject
+to its existing pre-start ownership/mode checks. This Home API change does not
+install that file or implement consumer renewal.
+
+Renewal, rotation, revocation and re-enrollment use the existing NW-02 routes
+and generation rules. Home lifecycle support does not establish that a
+consumer automatically renews or installs credentials; that belongs to the
+Puck application/deployment. Pairing grants no wake-evidence exemption:
+calibrated proximity, wake arbitration and claim lifecycle remain unchanged.
+
+### Other endpoint capability grants
+
 A Touch-capable approval may also include one Home-selected Room/Profile pair:
 
 ```json
@@ -422,7 +494,8 @@ attests `secure_storage: service_private_file`: a persistent private server-side
 file readable only by the service account and administrators, never browser
 storage, logs, or the repository. Both enrollment request and consumption enforce
 the endpoint-specific attestation; consumption cannot change the stored type or
-attestation. Every non-browser kind still requires the platform secure store.
+attestation. Non-browser kinds other than the narrowly scoped private-file
+`puck` mode above still require the platform secure store.
 A Device credential is always 32 random bytes encoded as 43 unpadded base64url
 characters; clients may validate that shape. Profile IDs never reach a client;
 `grant_id` and `label` do.

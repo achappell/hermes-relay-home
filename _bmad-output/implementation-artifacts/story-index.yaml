@@ -111,6 +111,7 @@ stories:
     title: Pair a service-hosted room device with truthful service-private credential storage
     kind: local
     spec: _bmad-output/implementation-artifacts/spec-home-nw-17-room-device-admission.md
+    validation: _bmad-output/implementation-artifacts/validation-home-nw-17-room-device-admission.md
     unblocks: hermes-relay-tui P-HOME-01 rollout and 3-P-2 for the Puck bridge on ops
     tracker_key: home-nw-17-room-device-admission
     product_epic: 3
@@ -120,7 +121,7 @@ stories:
       - home:HOME-NW-02
       - home:HOME-NW-05
       - home:HOME-NW-17
-    evidence_note: "Draft 2026-10-18. Pairing/storage gap only; no admission, arbitration or touch-claim change. Not approved, implemented or deployed."
+    evidence_note: "Owner approved 2026-10-19; local Home implementation complete and independently reviewed. Existing puck/private-file one-Room/wake-only scope with authenticated local admin approval. Final focused183/full1356 passed (26 skipped, 7 existing warnings), Ruff checks and independent production-runtime HTTP smoke passed. Parent approved publication to PR109; not deployed. Live provenance/recovery/Room intent remain parent-gated; consumer application/automatic renewal separate."
   - id: HOME-NW-05
     title: Add household Profile mappings and conversation claims
     kind: next-wave
