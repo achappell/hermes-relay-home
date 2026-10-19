@@ -369,7 +369,8 @@ strips the `--set-path` prefix:
 ```powershell
 foreach ($path in '/pair', '/api/v1/enrollment/requests', '/api/v1/client-claims',
                   '/api/v1/client-sessions', '/api/v1/profile-grants', '/api/v1/devices',
-                  '/api/v1/client-diagnostics') {
+                  '/api/v1/client-diagnostics',
+                  '/api/v1/paired-room-claims') {
   tailscale serve --bg --https=443 --set-path=$path "http://127.0.0.1:8780$path"
 }
 ```
@@ -380,6 +381,15 @@ approval. Home refuses every admin-token route on a proxied request
 approve; the admin API stays usable on loopback.
 `/api/v1/devices` carries device configuration and self-renewal, which require
 the device's own credential. The bridge route stays as configured above.
+
+`/api/v1/paired-room-claims` carries only Device-authenticated paired-room
+admission and its owned `/close` operation. Publication does not approve a
+Device: Home still enforces the explicit current policy, scope and singleton
+eligibility. Before adding this prefix, privately back up the actual Serve
+configuration. Add only this handler if it is not already covered, retain
+every existing handler, and keep Funnel off; never publish admin routes or a
+generic `/api`. Record the before/after configuration diff and verify that an
+unauthenticated request to this route returns `401` through TLS.
 
 Open `https://<home tailnet name>/pair`, sign in with the admin token, and
 choose **Create pairing code**. Profiles marked `shared` in configuration can
