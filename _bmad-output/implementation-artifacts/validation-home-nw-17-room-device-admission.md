@@ -143,14 +143,29 @@ normal fast-forward publication to existing PR109, not a duplicate PR.
 The story tracker remains `review` until integration; spec `done` describes
 local implementation completion only.
 
-**Live deployment remains on hold:** current installed-build provenance,
-compatible recovery readiness and production Room intent are being verified
-by the existing hardware/host custodian and require separate parent signoff.
+**Live Puck enrollment is not complete.** The custodian successfully used raw
+SSH/PowerShell against CaticornQueen and found the Home SYSTEM scheduled task
+running. Transport access is not the blocker. The installed package points to
+the 2026-10-08 wheel with deployment revision
+`3a0eec0b9739524e2a8c54fd5a3308b3c3abb90b`, but four source files differ from
+that install manifest and the signed provenance names another baseline.
+Identification of that drift is still being completed; no exact current-code
+provenance is claimed.
+
+The existing October-8 rollback kit restores the old package rather than the
+current drifted runtime and refuses a state containing later browser
+credentials. A safe reviewed cutover therefore requires fresh current-package
+preservation and an online SQLite backup, plus task/settings/secret-hash
+capture and a current-state-compatible recovery plan. These are distinct from
+the already completed local code review and require parent deployment signoff.
+Merging PR109 is not a mechanical prerequisite and no merge is authorized.
+
 An authenticated read-only Home API snapshot found revision 97, sole Room
 `kitchen`, sole active mapping `hey-missy` targeting `amanda`, and no Puck
-Device. These are observed configuration facts, not deployment or household
-intent approval. A failed tool-specific SSH transport is not evidence that
-the actual Windows host is unreachable.
+Device. Neither those existing values, firmware wake defaults nor runbook
+examples establish approved physical-Puck assignment. The exact remaining
+household decision is **which Room and which wake mapping(s) this Puck may
+use**; do not infer Kitchen from the existing iPhone gate.
 
 No live Home deployment/enrollment or ops credential installation was
 performed. No browser pairing/state, Standard token, running Puck bridge,
@@ -164,3 +179,7 @@ Home's credential lifecycle alone does not implement bridge-side automatic
 renewal, credential application (3-P-2), re-enrollment UI (3-P-6), calibrated
 proximity, or first-connect claim recovery. Those boundaries remain explicit;
 this change does not fabricate their acceptance.
+
+The P4 calibrated provider is a separate runtime-admission blocker, not a
+prerequisite for Home credential enrollment itself. No calibrated evidence,
+claim-recovery behavior or consumer-renewal implementation is added here.

@@ -77,6 +77,7 @@ Independent contract recon confirmed `puck` naming, admin route, generated ident
 - Independent live read-only reconnaissance found revision 97, sole Room `kitchen`, sole active mapping `hey-missy` targeting `amanda`, and no configured Puck. This is configuration evidence, not current deployed-build or safe-recovery evidence; parent-owned host provenance/recovery checks are still in progress.
 - Review patches changed tests only: 34 room-enrollment cases passed after adding configured denial, mapping-expansion snapshot/empty, platform multi-Room compatibility, complete issued-secret redaction and SQLite reopen coverage. No production abstraction or admission changes were needed.
 - Final independent verification after patches: 183 focused tests passed; full suite 1,356 passed, 26 skipped, 7 existing warnings; Ruff check and format-check passed. A second independent production-runtime HTTP enrollment/configuration/revocation smoke exited 0. Parent signed off publication; this completes the local Home implementation, not live deployment or Puck consumer rollout.
+- Custodian raw SSH/PowerShell read-only access succeeded. Live package provenance is mixed (four source files differ from its install manifest), so deployment needs fresh current-preserving package/online-SQLite backup and compatible recovery. Existing Kitchen/hey-missy values are not physical-Puck intent: owner Room/mapping assignment is still required before live enrollment. P4 remains a runtime gate, not a credential-enrollment prerequisite; no merge is authorized.
 
 ## Spec Change Log
 
