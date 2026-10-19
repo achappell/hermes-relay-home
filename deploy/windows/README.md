@@ -171,6 +171,60 @@ Package-only cutovers (stop the task, `uv pip install --force-reinstall` the
 wheel, start the task) do not run the installer and so touch neither the bind,
 the firewall rule, nor the Prometheus job.
 
+### Package-only cutover and current-state recovery
+
+For an existing paired installation, do not rerun `install.ps1` merely to
+replace Home code: omitted installer options can alter machine settings.
+Use the reviewed wheel at its canonical filename in a separate staging
+directory and preserve dependency versions with
+`uv pip install --python <HomePython> --force-reinstall --no-deps <Wheel>`.
+
+Before stopping Home, preserve a coherent recovery wheel/package for the
+**current** installed revision, including top-level
+`hermes_home_diagnostics.py` and distribution metadata, with file hashes.
+Take an online SQLite `Connection.backup` copy with `integrity_check=ok`,
+not a plain copy of a running database. Keep that database copy, task XML,
+runner, machine settings, secret-file hashes and any historical provenance
+file in a protected SYSTEM/Administrators-only backup directory. Record
+hashes, never secret values. Validate the new wheel hash/name and installation
+dry-run before interruption.
+
+Stop only `Hermes Home`, then wait for its Python process and **both** ports
+8780/8766 to release. After replacement, verify installed files against the
+wheel's `RECORD` before updating the full deployment-revision environment
+value and restarting the task. Failed install/hash checks leave Home stopped
+for compatible recovery; do not start a partially installed package.
+Readiness requires both listeners and an authenticated configuration read,
+plus the existing HTTPS `/pair` route and browser checks. There is no
+`/api/v1/health` endpoint.
+
+Recovery replaces the package with the preserved current-revision wheel,
+again with `--force-reinstall --no-deps`, verifies its `RECORD`, restores that
+revision value and restarts only Home. Take another online DB backup first,
+but **retain the live database and credentials**: do not rewind successful
+enrollments, grants or configuration by restoring a pre-cutover database.
+Keep bindings, ACLs, firewall, Prometheus, Tailscale, secrets and other machine
+settings unchanged. Prove the recovery build reads the post-change database
+shape using a private disposable copy before cutover. In particular, the
+3a0eec0 recovery build cannot read a new nonempty `client_devices` field; the
+room-device pairing operation does not introduce one.
+
+The 2026-10-19 room-device cutover used a privately preserved, independently
+reviewed swap/rollback script and a real current-state-copy rehearsal; exact
+script/wheel hashes, receipt paths and observed outcomes are recorded in
+the [room-device validation artifact](../../_bmad-output/implementation-artifacts/validation-home-nw-17-room-device-admission.md).
+The historical signed `provenance/deployment.json` file is not consumed by
+this runtime: preserve it unchanged rather than forging or hand-editing its
+signature. Runtime diagnostics use loaded-source hashes and installed package
+metadata, with explicit unverified provenance.
+
+The exact reviewed helper is [`home-package-swap.ps1`](home-package-swap.ps1).
+Its parameters require an exact wheel hash, full source revision and a fresh
+private backup directory. Review future wheel/schema/dependency compatibility
+before use; this is not an unattended updater. The recorded live cutover
+executed this helper; production rollback was not executed, only old-code
+compatibility on a private post-enrollment database copy.
+
 ## Standard-backed bridge
 
 The Home route uses one dedicated Standard gateway target. Home creates each

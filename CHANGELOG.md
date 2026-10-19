@@ -6,6 +6,8 @@
   storage, administrator-approved one-Room/wake-only scope and explicit active
   Wake Mapping grants. Existing credential lifecycle and wake admission rules
   are unchanged.
+- Preserve the reviewed Windows package-only swap/recovery helper, retaining
+  live credentials/database with explicit wheel integrity and startup checks.
 
 ## 0.2.0 (2026-10-09)
 

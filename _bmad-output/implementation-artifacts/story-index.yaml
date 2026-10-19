@@ -121,7 +121,7 @@ stories:
       - home:HOME-NW-02
       - home:HOME-NW-05
       - home:HOME-NW-17
-    evidence_note: "Owner approved 2026-10-19; local Home implementation complete and independently reviewed. Existing puck/private-file one-Room/wake-only scope with authenticated local admin approval. Final focused183/full1356 passed (26 skipped, 7 existing warnings), Ruff checks and independent production-runtime HTTP smoke passed. Parent approved publication to PR109; not deployed. Live provenance/recovery/Room intent remain parent-gated; consumer application/automatic renewal separate."
+    evidence_note: "Owner approved 2026-10-19; implemented, independently reviewed and deployed exact4c3f621. Final focused183/full1356 passed (26 skipped, 7 existing warnings), Ruff and independent production-runtime HTTP smoke passed. Living Room added revision98; own Puck credential/Device published revision99, exact wake-only selectedhey-missy scope, TLS discovery/401 and private0700/0600 storage verified. Browser unchanged. PR109 integration pending; provider/handle/consumer renewal and voice/hardware acceptance remain separate."
   - id: HOME-NW-05
     title: Add household Profile mappings and conversation claims
     kind: next-wave
