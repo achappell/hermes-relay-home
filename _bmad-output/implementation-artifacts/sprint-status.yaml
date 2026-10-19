@@ -20,7 +20,7 @@ development_status:
   home-nw-13-custom-wake-phrases: backlog
   home-nw-16-touch-admission-tap-claim: done
   home-nw-17-browser-admission: review
-  home-nw-17-room-device-admission: review # deployed and own Living Room endpoint enrolled 2026-10-19; PR109 integration pending, voice separate
+  home-nw-17-room-device-admission: done # implementation merged PR109; deployed and Living Room endpoint enrolled 2026-10-19; broader voice separate
   epic-4: backlog
   home-nw-15-linux-macos-safe-deployment: backlog
   home-mig-09-pilot-cutover-and-retirement: backlog

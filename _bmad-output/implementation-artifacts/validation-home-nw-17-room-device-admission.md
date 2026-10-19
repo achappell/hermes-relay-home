@@ -138,10 +138,11 @@ avoids pretending that a 90-day credential aged during the standalone smoke.
 
 ## Review and deployment boundary
 
-The local Home implementation and review are complete. Parent authorized
-normal fast-forward publication to existing PR109, not a duplicate PR.
-The story tracker remains `review` until integration; spec `done` describes
-local implementation completion only.
+Home implementation PR109 merged at reviewed source
+`4c3f62122fbb771f5ee20bacba8566274194143e`; live deployment and its own endpoint
+enrollment complete this Home story. The formal story/spec statuses are done.
+The follow-up publication preserves only reviewed recovery tooling and actual
+live evidence, not a duplicate implementation or broader Puck acceptance.
 
 **Home is deployed and its own Living Room Puck endpoint is enrolled.** After the
 independent review and private-copy rehearsal, parent approved the package-only
