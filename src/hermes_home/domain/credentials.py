@@ -533,6 +533,28 @@ class CredentialService:
             return _scope_from_record(record.get("scope"))
         return None
 
+    def active_wake_devices(self) -> tuple[AuthenticatedDevice, ...]:
+        """Read current unexpired wake contexts without secrets or state changes."""
+        now = self._now()
+        newest: dict[str, dict[str, object]] = {}
+        for record in _records(self._store.read_state(), "credentials"):
+            device_id = _identifier(record.get("device_id"), "device_id")
+            current = newest.get(device_id)
+            if current is None or _integer(
+                record.get("generation"), "generation"
+            ) > _integer(current.get("generation"), "generation"):
+                newest[device_id] = record
+        devices: list[AuthenticatedDevice] = []
+        for record in newest.values():
+            if record.get("status") != "active" or now >= _timestamp(
+                record.get("expires_at")
+            ):
+                continue
+            context = _authenticated_device(record)
+            if "wake_claim" in context.scope.capabilities:
+                devices.append(context)
+        return tuple(devices)
+
     def list_requests(self) -> tuple[EnrollmentRequest, ...]:
         """Return redacted enrollment request metadata for the admin surface."""
 

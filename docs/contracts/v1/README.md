@@ -228,8 +228,66 @@ install that file or implement consumer renewal.
 Renewal, rotation, revocation and re-enrollment use the existing NW-02 routes
 and generation rules. Home lifecycle support does not establish that a
 consumer automatically renews or installs credentials; that belongs to the
-Puck application/deployment. Pairing grants no wake-evidence exemption:
-calibrated proximity, wake arbitration and claim lifecycle remain unchanged.
+Puck application/deployment. Pairing alone grants no wake-evidence exemption.
+The strict wake contract remains unchanged; a separate explicit paired-room
+approval, described below, is required for the owner-approved mode.
+
+### Explicit paired-room wake approval
+
+The 2026-10-19 owner decision allows one explicitly approved paired-room Puck
+to hear its selected wake phrase without proximity qualification, including
+outside its Room. This is not evidence of proximity, a general bypass, or
+permission for proximity-free multi-device selection.
+
+The local authenticated administrator may publish this optional Device field
+through the normal revision-checked configuration API:
+
+```json
+{"wake_admission":{"mode":"paired_room","endpoint_id":"ops-hermes-puck-bridge","wake_mapping_ids":["hey-missy"]}}
+```
+
+The Device record supplies its identity and Room. At most one paired approval
+is allowed; unknown fields/modes, empty/duplicate IDs, inactive mappings or
+unavailable Profiles are rejected. Omission means the existing strict mode.
+Current credential capability/Room/mapping scope never expands. Discovery
+projects `wake_admission` inside the existing `snapshot`, with `mode`,
+`room_id` and the authorized selected `wake_mapping_ids`. A configured approval
+with invalid binding or competing eligibility returns `403 forbidden`, not a
+silent strict-mode downgrade.
+
+`POST /api/v1/paired-room-claims` accepts exactly `schema`, `claim_id`,
+`device_id`, `wake_mapping_id`, `configuration_revision` and
+`initiation: {"kind":"wake_word"}` using the own Device credential.
+It accepts no acoustic evidence, score or confidence. Success is the existing
+fresh Home grant envelope plus `admission_mode: "paired_room"`. The bridge
+validates the mode/revision/claim and completes conversation ready before
+capture. Each new physical wake requires a new grant after retiring the prior
+logical claim; bounded follow-ups keep their existing conversation semantics.
+
+The approved endpoint must be the sole configured and currently
+credential-authorized wake-enabled Device for that same mapping anywhere in
+the household. A same-mapping competitor in any Room denies paired admission,
+even if its credential becomes authorized without a configuration revision
+change. Different-mapping strict Devices are unchanged. Existing Room busy,
+cross-route claim-ID uniqueness, deadlines and no-replay apply. Policy/revision
+changes retire paired claims; every resolution rechecks current authority.
+
+Cold recovery uses `POST /api/v1/paired-room-claims/close` with exactly
+`{"schema":1,"conversation_handle":"..."}`. Only a known own scoped persisted
+paired row returns `{"schema":1,"conversation_handle":"...","admission_mode":"paired_room","status":"closed"}`.
+This is idempotent across process restart and policy removal, but still
+requires current valid Device authentication. Unknown, foreign, strict or
+out-of-scope rows return indistinguishable `404 not_found`, never proof of
+retirement. Revoked identity is `401`; unavailable storage is `503`.
+No upstream open, capture, automatic replay or uncertain-record deletion is
+part of retirement. A healthy bound conversation may use existing
+`conversation.close`.
+
+The complete request/error/recovery contract is
+[paired-room admission](../../../_bmad-output/specs/spec-puck-paired-room-wake/admission-contract.md).
+Before an old-code downgrade, remove this field via the normal revision-checked
+API and retire paired claims under the new binary; retain the current database
+and credentials. Rehearse exact old-package compatibility or forward repair.
 
 ### Other endpoint capability grants
 

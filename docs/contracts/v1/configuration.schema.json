@@ -21,7 +21,14 @@
     },
     "devices": {
       "type": "array",
-      "items": {"$ref": "#/$defs/device"}
+      "items": {"$ref": "#/$defs/device"},
+      "contains": {
+        "type": "object",
+        "required": ["wake_admission"]
+      },
+      "minContains": 0,
+      "maxContains": 1,
+      "description": "At most one explicit paired-room approval. Approval mappings must be active and reference available Profiles; Home validates these cross-record references."
     },
     "client_devices": {
       "type": "array",
@@ -66,11 +73,21 @@
       "type": "object",
       "required": ["id", "name", "room_id", "priority", "capabilities"],
       "additionalProperties": false,
+      "dependentSchemas": {
+        "wake_admission": {
+          "properties": {
+            "capabilities": {
+              "properties": {"wake_claim": {"const": true}}
+            }
+          }
+        }
+      },
       "properties": {
         "id": {"$ref": "#/$defs/id"},
         "name": {"type": "string", "minLength": 1, "maxLength": 128},
         "room_id": {"$ref": "#/$defs/id"},
         "priority": {"type": "integer", "minimum": 1},
+        "wake_admission": {"$ref": "#/$defs/wake_admission"},
         "capabilities": {
           "type": "object",
           "required": ["wake_claim"],
@@ -95,6 +112,22 @@
           }
         }
       }
+    },
+    "wake_admission": {
+      "type": "object",
+      "required": ["mode", "endpoint_id", "wake_mapping_ids"],
+      "additionalProperties": false,
+      "properties": {
+        "mode": {"const": "paired_room"},
+        "endpoint_id": {"$ref": "#/$defs/id"},
+        "wake_mapping_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/id"}
+        }
+      },
+      "description": "Explicit approval bound to this Device's current Room and durable credential endpoint. Omission preserves strict wake admission."
     },
     "client_device": {
       "type": "object",

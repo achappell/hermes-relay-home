@@ -28,6 +28,10 @@ class ConversationClaimConflict(RuntimeError):
 class ConversationClaimStore(Protocol):
     """The storage port used to turn a granted wake into an opaque handle."""
 
+    def set_paired_room_checker(
+        self, checker: Callable[[str, int | None, int, str], bool]
+    ) -> None: ...
+
     def create_from_decision(
         self,
         decision: WakeDecision,
@@ -41,6 +45,15 @@ class ConversationClaimStore(Protocol):
         device_id: str | None = None,
         *,
         reason: str = "stopped",
+    ) -> bool: ...
+
+    def close_owned_paired_room_claim(
+        self,
+        handle: str,
+        device_id: str,
+        *,
+        authorized_rooms: Iterable[str],
+        authorized_wake_mappings: Iterable[str],
     ) -> bool: ...
 
     def close_device_claims(
@@ -57,6 +70,10 @@ class ConversationClaimStore(Protocol):
 
     def close_mapping_claims(
         self, mapping_ids: Iterable[str], *, reason: str
+    ) -> int: ...
+
+    def close_paired_room_claims(
+        self, *, configuration_revision: int, reason: str
     ) -> int: ...
 
     def close_all_claims(self, *, reason: str) -> int: ...
@@ -105,6 +122,16 @@ class InMemoryConversationClaimStore:
         self._claims: dict[str, dict[str, object]] = {}
         self._used_claim_ids: set[str] = set()
         self._watch_connected_at: dict[str, float] = {}
+        self._paired_room_checker: (
+            Callable[[str, int | None, int, str], bool] | None
+        ) = None
+
+    def set_paired_room_checker(
+        self, checker: Callable[[str, int | None, int, str], bool]
+    ) -> None:
+        """Attach the current paired-room authority check."""
+        with self._lock:
+            self._paired_room_checker = checker
 
     def create_from_decision(
         self,
@@ -162,6 +189,9 @@ class InMemoryConversationClaimStore:
             self._used_claim_ids.add(decision.claim_id)
             self._claims[handle] = {
                 "claim_id": decision.claim_id,
+                "claim_kind": (
+                    "paired_room" if decision.claim_kind == "paired_room" else "room"
+                ),
                 "device_id": decision.device_id,
                 "room_id": decision.room_id,
                 "wake_mapping_id": decision.wake_mapping_id,
@@ -211,6 +241,30 @@ class InMemoryConversationClaimStore:
                 self._close_claim_locked(handle, claim, reason)
             return True
 
+    def close_owned_paired_room_claim(
+        self,
+        handle: str,
+        device_id: str,
+        *,
+        authorized_rooms: Iterable[str],
+        authorized_wake_mappings: Iterable[str],
+    ) -> bool:
+        rooms = frozenset(authorized_rooms)
+        mappings = frozenset(authorized_wake_mappings)
+        with self._lock:
+            claim = self._claims.get(handle)
+            if (
+                claim is None
+                or claim["device_id"] != device_id
+                or claim["claim_kind"] != "paired_room"
+                or claim["room_id"] not in rooms
+                or claim["wake_mapping_id"] not in mappings
+            ):
+                return False
+            if claim["status"] == "active":
+                self._close_claim_locked(handle, claim, "stopped")
+            return True
+
     def close_profile_claims(self, profile_ids: Iterable[str], *, reason: str) -> int:
         identifiers = set(profile_ids)
         return self._close_claims(
@@ -222,6 +276,17 @@ class InMemoryConversationClaimStore:
         identifiers = set(mapping_ids)
         return self._close_claims(
             lambda claim: claim["wake_mapping_id"] in identifiers,
+            reason,
+        )
+
+    def close_paired_room_claims(
+        self, *, configuration_revision: int, reason: str
+    ) -> int:
+        return self._close_claims(
+            lambda claim: (
+                claim["claim_kind"] == "paired_room"
+                and claim["configuration_revision"] != configuration_revision
+            ),
             reason,
         )
 

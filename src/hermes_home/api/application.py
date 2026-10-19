@@ -7,6 +7,7 @@ import sqlite3
 import time
 from collections.abc import Callable, Iterable, Mapping
 from threading import RLock
+from uuid import uuid4
 
 from hermes_home.api.pairing import PairingSurface
 from hermes_home.api.responses import HTTPResponse
@@ -26,6 +27,7 @@ from hermes_home.domain.conversations import (
     ConversationClaimStore,
 )
 from hermes_home.domain.credentials import (
+    AuthenticatedDevice,
     ClientGrant,
     CredentialMaterial,
     CredentialScope,
@@ -45,6 +47,7 @@ from hermes_home.domain.health import (
     bounded_health_body,
     run_health_check,
 )
+from hermes_home.domain.paired_room import authorize_paired_room
 from hermes_home.domain.watch import (
     WATCH_VIEW_CAPABILITY,
     WatchSnapshot,
@@ -138,6 +141,12 @@ class HomeApplication:
             store=InMemoryDiagnosticsStore(),
             metrics=self._metrics,
         )
+        if conversation_claim_store is not None:
+            set_paired_checker = getattr(
+                conversation_claim_store, "set_paired_room_checker", None
+            )
+            if callable(set_paired_checker):
+                set_paired_checker(self._paired_room_claim_current)
         try:
             snapshot = self._configuration_store.read()
         except ConfigurationMigrationRequired:
@@ -228,6 +237,10 @@ class HomeApplication:
                 return self._put_configuration(headers, body)
         elif path == "/api/v1/wake-claims" and method == "POST":
             return self._post_wake_claim(headers, body)
+        elif path == "/api/v1/paired-room-claims" and method == "POST":
+            return self._post_paired_room_claim(headers, body)
+        elif path == "/api/v1/paired-room-claims/close" and method == "POST":
+            return self._post_paired_room_claim_close(headers, body)
         elif path == "/api/v1/touch-claims" and method == "POST":
             return self._post_touch_claim(headers, body)
         elif path == "/api/v1/client-claims" and method == "POST":
@@ -594,6 +607,22 @@ class HomeApplication:
             "revision": snapshot["revision"],
             "wake_mappings": mappings,
         }
+        configured_device = next(
+            (device for device in snapshot["devices"] if device["id"] == device_id),
+            None,
+        )
+        if configured_device is not None and "wake_admission" in configured_device:
+            try:
+                policy = authorize_paired_room(
+                    snapshot,
+                    context,
+                    self._credential_service.active_wake_devices(),
+                )
+            except CredentialStateError as error:
+                return _credential_error(error)
+            except OSError, RuntimeError, TypeError, ValueError:
+                return _error(503, "service_unavailable")
+            configuration["wake_admission"] = policy.to_public()
         if "client_claim" in context.scope.capabilities and self._credential_service:
             try:
                 configuration["revision"], grants = (
@@ -1284,6 +1313,226 @@ class HomeApplication:
             revoked_mappings,
             reason="mapping_revoked",
         )
+        if any(
+            "wake_admission" in device
+            for snapshot in (previous, published)
+            for device in snapshot["devices"]
+        ):
+            store.close_paired_room_claims(
+                configuration_revision=published["revision"],
+                reason="configuration_changed",
+            )
+
+    def _paired_room_claim_current(
+        self,
+        device_id: str,
+        credential_generation: int | None,
+        configuration_revision: int,
+        wake_mapping_id: str,
+    ) -> bool:
+        service = self._credential_service
+        if service is None:
+            return False
+        contexts = service.active_wake_devices()
+        context = next(
+            (
+                item
+                for item in contexts
+                if item.device_id == device_id
+                and item.generation == credential_generation
+            ),
+            None,
+        )
+        if context is None:
+            return False
+        authorize_paired_room(
+            self._configuration_store.read(),
+            context,
+            contexts,
+            wake_mapping_id=wake_mapping_id,
+            configuration_revision=configuration_revision,
+        )
+        return True
+
+    def _post_paired_room_claim_close(
+        self, headers: Mapping[str, str], body: bytes | str
+    ) -> HTTPResponse:
+        try:
+            context = self._durable_device_context(headers)
+        except OSError, RuntimeError, TypeError, ValueError:
+            return _error(503, "service_unavailable")
+        if context is None:
+            return _error(401, "unauthorized")
+        if "wake_claim" not in context.scope.capabilities:
+            return _error(403, "forbidden")
+        try:
+            request = self._json_request(
+                headers, body, {"schema", "conversation_handle"}
+            )
+            handle = _claim_identifier(
+                request["conversation_handle"], "conversation_handle"
+            )
+        except TypeError, ValueError, json.JSONDecodeError:
+            return _error(400, "invalid_request")
+        store = self._conversation_claim_store
+        if store is None:
+            return _error(503, "service_unavailable")
+        try:
+            closed = store.close_owned_paired_room_claim(
+                handle,
+                context.device_id,
+                authorized_rooms=context.scope.rooms,
+                authorized_wake_mappings=context.scope.wake_mappings,
+            )
+            refreshed = self._durable_device_context(headers)
+        except OSError, RuntimeError, TypeError, ValueError:
+            return _error(503, "service_unavailable")
+        if (
+            refreshed is None
+            or refreshed.device_id != context.device_id
+            or refreshed.generation != context.generation
+        ):
+            return _error(401, "unauthorized")
+        if not closed:
+            return _error(404, "not_found")
+        return HTTPResponse(
+            200,
+            {
+                "schema": 1,
+                "conversation_handle": handle,
+                "admission_mode": "paired_room",
+                "status": "closed",
+            },
+        )
+
+    def _post_paired_room_claim(
+        self, headers: Mapping[str, str], body: bytes | str
+    ) -> HTTPResponse:
+        try:
+            context = self._durable_device_context(headers)
+        except OSError, RuntimeError, TypeError, ValueError:
+            return _error(503, "service_unavailable")
+        if context is None:
+            return _error(401, "unauthorized")
+        try:
+            request = self._json_request(
+                headers,
+                body,
+                {
+                    "schema",
+                    "claim_id",
+                    "device_id",
+                    "wake_mapping_id",
+                    "configuration_revision",
+                    "initiation",
+                },
+            )
+            claim_id = _claim_identifier(request["claim_id"], "claim_id")
+            device_id = _claim_identifier(request["device_id"], "device_id")
+            mapping_id = _claim_identifier(
+                request["wake_mapping_id"], "wake_mapping_id"
+            )
+            revision = request["configuration_revision"]
+            if type(revision) is not int or revision < 0:
+                raise ValueError("invalid configuration revision")
+            if request["initiation"] != {"kind": "wake_word"}:
+                raise ValueError("invalid initiation")
+        except TypeError, ValueError, json.JSONDecodeError:
+            return _error(400, "invalid_request")
+        if context.device_id != device_id:
+            return _error(401, "unauthorized")
+        store = self._conversation_claim_store
+        if store is None:
+            return _error(503, "service_unavailable")
+        with self._configuration_publish_lock:
+            handle = None
+            try:
+                snapshot, policy = self._authorize_paired_claim(
+                    context, mapping_id=mapping_id, revision=revision
+                )
+                if not self._arbitration_engine.reserve_claim_id(claim_id):
+                    return _error(409, "duplicate_claim")
+                mapping = next(
+                    item
+                    for item in snapshot["wake_mappings"]
+                    if item["id"] == mapping_id
+                )
+                decision = WakeDecision(
+                    claim_id=claim_id,
+                    decision="granted",
+                    arbitration_id=uuid4().hex,
+                    configuration_revision=revision,
+                    device_id=device_id,
+                    room_id=policy.room_id,
+                    wake_mapping_id=mapping_id,
+                    profile_id=mapping["profile_id"],
+                    claim_kind="paired_room",
+                )
+                handle = store.create_from_decision(
+                    decision, credential_generation=context.generation
+                )
+                refreshed = self._durable_device_context(headers)
+                if (
+                    refreshed is None
+                    or refreshed.device_id != device_id
+                    or refreshed.generation != context.generation
+                ):
+                    raise CredentialStateError("unauthorized")
+                self._authorize_paired_claim(
+                    refreshed, mapping_id=mapping_id, revision=revision
+                )
+            except CredentialStateError as error:
+                if handle is not None and not self._discard_new_claim(
+                    handle, device_id
+                ):
+                    return _error(503, "service_unavailable")
+                return _credential_error(error)
+            except ConversationClaimConflict as error:
+                code = (
+                    "duplicate_claim"
+                    if error.reason == "duplicate_claim"
+                    else "conversation_active"
+                )
+                return _error(409, code)
+            except ConfigurationMigrationRequired as error:
+                return _claim_submission_error(
+                    ClaimSubmission(
+                        claim_id,
+                        accepted=False,
+                        deadline=None,
+                        reason="configuration_migration_required",
+                        current_revision=error.current_revision,
+                    )
+                )
+            except OSError, RuntimeError, TypeError, ValueError:
+                if handle is not None:
+                    self._discard_new_claim(handle, device_id)
+                return _error(503, "service_unavailable")
+        return HTTPResponse(
+            200,
+            {
+                "schema": 1,
+                "claim_id": claim_id,
+                "decision": "granted",
+                "arbitration_id": decision.arbitration_id,
+                "configuration_revision": revision,
+                "conversation_handle": handle,
+                "admission_mode": "paired_room",
+            },
+        )
+
+    def _authorize_paired_claim(
+        self, context: AuthenticatedDevice, *, mapping_id: str, revision: int
+    ):
+        snapshot = self._configuration_store.read()
+        policy = authorize_paired_room(
+            snapshot,
+            context,
+            self._credential_service.active_wake_devices(),
+            wake_mapping_id=mapping_id,
+            configuration_revision=revision,
+        )
+        return snapshot, policy
 
     def _post_wake_claim(
         self,
@@ -2282,6 +2531,7 @@ def _credential_error(error: CredentialStateError) -> HTTPResponse:
         "unauthorized": 401,
         "forbidden": 403,
         "not_found": 404,
+        "stale_configuration": 409,
         "conflict": 409,
         "approval_pending": 409,
         "rejected": 403,
@@ -2729,6 +2979,8 @@ def _metric_route(path: str) -> str:
     return {
         "/api/v1/configuration": "configuration",
         "/api/v1/wake-claims": "wake_claims",
+        "/api/v1/paired-room-claims": "paired_room_claims",
+        "/api/v1/paired-room-claims/close": "paired_room_claim_close",
         "/api/v1/touch-claims": "touch_claims",
         "/api/v1/client-claims": "client_claims",
         "/api/v1/client-sessions/list": "client_sessions",
