@@ -145,19 +145,26 @@ local implementation completion only.
 
 **Live Puck enrollment is not complete.** The custodian successfully used raw
 SSH/PowerShell against CaticornQueen and found the Home SYSTEM scheduled task
-running. Transport access is not the blocker. The installed package points to
-the 2026-10-08 wheel with deployment revision
-`3a0eec0b9739524e2a8c54fd5a3308b3c3abb90b`, but four source files differ from
-that install manifest and the signed provenance names another baseline.
-Identification of that drift is still being completed; no exact current-code
-provenance is claimed.
+running. Transport access is not the blocker. Current installed source is
+verified at `3a0eec0b9739524e2a8c54fd5a3308b3c3abb90b`, matching the installed
+wheel and deployment-revision environment setting, with no unpreserved local
+source changes.
 
-The existing October-8 rollback kit restores the old package rather than the
-current drifted runtime and refuses a state containing later browser
-credentials. A safe reviewed cutover therefore requires fresh current-package
-preservation and an online SQLite backup, plus task/settings/secret-hash
-capture and a current-state-compatible recovery plan. These are distinct from
-the already completed local code review and require parent deployment signoff.
+The initial four apparent mismatches were against a **pre-upgrade** backup
+manifest, not the installed version's manifest. All 35 installed Python files
+are accounted for: the other 31 match that old manifest, and the four changed
+files (`api/application.py`, `api/pairing.py`, `api/pairing_page.py`,
+`domain/credentials.py`) exactly match the committed browser-admission upgrade
+at the verified revision. The signed provenance record is stale; it does not
+invalidate this source-hash verification. There is no unresolved source drift.
+
+The existing October-8 rollback kit restores the earlier pre-upgrade package
+and refuses a state containing later browser credentials. A safe reviewed
+cutover therefore requires a fresh recovery point of the current verified
+package and an online SQLite backup, plus task XML, machine settings,
+secret-hash capture and a current-state-compatible rollback script. These
+remain deployment gates requiring separate parent signoff. Parent has not
+authorized deployment before physical-Puck Room/mapping intent is settled.
 Merging PR109 is not a mechanical prerequisite and no merge is authorized.
 
 An authenticated read-only Home API snapshot found revision 97, sole Room
