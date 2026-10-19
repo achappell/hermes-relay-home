@@ -20,7 +20,7 @@ development_status:
   home-nw-13-custom-wake-phrases: backlog
   home-nw-16-touch-admission-tap-claim: done
   home-nw-17-browser-admission: review
-  home-nw-17-room-device-admission: backlog # draft spec 2026-10-18; owner decisions D-H1..D-H4 open
+  home-nw-17-room-device-admission: backlog # draft 2026-10-18; service-hosted room-device pairing/storage gap only
   epic-4: backlog
   home-nw-15-linux-macos-safe-deployment: backlog
   home-mig-09-pilot-cutover-and-retirement: backlog
