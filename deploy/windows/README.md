@@ -198,6 +198,15 @@ Readiness requires both listeners and an authenticated configuration read,
 plus the existing HTTPS `/pair` route and browser checks. There is no
 `/api/v1/health` endpoint.
 
+For the owner-approved paired-room wake mode, **before any older-code recovery**
+remove every `wake_admission` policy through the normal revision-checked API
+and retire paired claims **under the new binary**. The reviewed previous `4c3f621`
+build does not understand the policy field or enforce the paired claim kind.
+Only then may that preserved wheel reopen the current database, after the
+old-wheel compatibility check; otherwise use reviewed forward repair. Do not
+blindly use this helper's historical 3a examples or restore an old database.
+See the [paired-room validation and recovery evidence](../../_bmad-output/implementation-artifacts/validation-puck-paired-room-wake.md).
+
 Recovery replaces the package with the preserved current-revision wheel,
 again with `--force-reinstall --no-deps`, verifies its `RECORD`, restores that
 revision value and restarts only Home. Take another online DB backup first,

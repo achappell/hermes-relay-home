@@ -10,6 +10,9 @@
   Home grants, with household same-mapping exclusivity, current-authority
   revalidation and idempotent owned paired-claim retirement. Strict wake and
   other endpoint admission rules remain unchanged.
+  Reviewed deployment and a controlled real Standard Amanda audio turn are
+  recorded in the paired-room validation artifact; physical voice acceptance
+  remains a separate owner-gated check.
 - Preserve the reviewed Windows package-only swap/recovery helper, retaining
   live credentials/database with explicit wheel integrity and startup checks.
 

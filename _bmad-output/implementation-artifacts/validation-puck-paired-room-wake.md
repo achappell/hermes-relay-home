@@ -28,9 +28,9 @@ Python 3.14.8. All inputs, credentials and SQLite state below are temporary isol
 
 Initial local harness assumptions about the required `resolve(handle, device_id)` signature, credential `revoke` method and Standard `/api/ws` URL were corrected; no production workaround or relaxed assertion was used.
 
-## Exact next gated cutover/recovery procedure
+## Approved cutover and current-preserving recovery procedure
 
-No operation in this section has been executed for the new paired-room mode. Independent spec/code review, exact source/artifact acceptance and parent approval remain required before any live mutation.
+The parent accepted the independent review, exact replacement artifacts, compatibility fixture and recovery plan. Steps 1–5 were then executed on 2026-10-19 after both replacement-source CI runs succeeded, as recorded below. Steps 6–7 remain the required recovery procedure, not a claim that a production downgrade was exercised.
 
 1. Preserve the currently deployed Home source/package, environment and every secret/provenance file, plus a fresh online SQLite backup and integrity receipt. Preserve existing ops enrollment/state/credential and browser config/process state. Use a reviewed compatible package-only swap procedure, no installer, dependency refresh, credential recreation or database restore. The prior reviewed helper's historical success does not prove compatibility of a new wheel.
 2. Build the exact reviewed source; verify wheel RECORD, all Home modules plus top-level diagnostics module and metadata, dependency/schema compatibility and source revision. Rehearse the new/old package transitions against a private copied current database; prove old validation after policy removal and paired retirement. Do not rewrite signed historical provenance. Diagnostics/build claims must identify the actual installed source.
@@ -44,7 +44,7 @@ The prior Home/ops actor explicitly handed off ownership and acknowledged no chi
 
 ## Unexercised acceptance
 
-Actual configured Standard gateway capability/response-audio format and a real authorized Amanda text/audio turn are still unproven for this slice. Read-only planning must identify the supported transport; a bounded approved operation must observe actual sample rate/channels/width/endianness, frames/bytes and terminal result rather than synthesize capabilities. Full acceptance requires the later awake-owner wake → capture → STT → Home → unmodified Standard Amanda → TTS → actual Puck fetch/drain and owner-confirmed coherent audible answer. Local HTTP success does not replace that evidence.
+The controlled, explicitly authorized one-turn probe below now proves actual Home → unmodified Standard Amanda → response-audio transport and its observed format. Full physical acceptance remains open: the awake owner must still prove wake → capture → nonempty STT → Home → Standard → TTS → actual Puck fetch/drain and a coherent audible answer. The probe did not capture, fetch Puck media or play audio; no transcript or audio was retained. The hardware custodian alone may observe the physical window after the parent's explicit GO.
 
 ## Integrated regression checkpoint
 
@@ -71,3 +71,46 @@ This is a real package-code/database compatibility fixture, not an executed Wind
 Amanda reported PR111 conflicted after main advanced to `f6483c7` (merged PR110's reviewed Windows helper and actual Living Room enrollment evidence). `origin/main` was merged normally into the isolated feature branch: the sole conflict was two independent additive changelog bullets, both preserved. Upstream's seven files are recovery/evidence/status documentation and the already reviewed helper. `git diff --exit-code 2a2ab04a2276ce26d38b6b889d515b10abe30bb6 -- src tests` exited zero: **runtime and test source are unchanged** by reconciliation, so the existing independent code review and runtime/old-wheel compatibility proof remain applicable. No rebase, force push, PR merge or behavior change occurred.
 
 Required post-merge checks passed again: **143 focused in 1.81s; 1499 full passed, 26 skipped, 7 known deprecation warnings in 29.15s** (artifact 3561); Ruff check passed and format check reported 87 files. This rerun was explicitly requested for the merge, not to erase the earlier separately recorded startup/close warning. The new merge SHA and rebuilt wheel supersede `2a2ab04`/`f0da...` for the deployment gate. TUI's new post-reconciliation PR254 source/wheel also supersedes `d5cb6c5`/`93dad...`; neither old artifact may be deployed. Both new exact-source CI runs must succeed before the unchanged approved live sequence.
+
+## Actual reviewed deployment and controlled Standard speech proof
+
+Both exact replacement-source CI runs completed successfully before any cutover:
+
+| Component | Deployed immutable source | Exact wheel SHA-256 | Successful CI |
+| --- | --- | --- | --- |
+| Home 0.2.0 | `831e55e730ab49f3774ecc55a5bd111c993d2f1a` | `bcc6ea125aff1dd55de22b3f3a3a55a97cf7aeb16229056b684ff5215b9c7200` | [39285501187](https://github.com/achappell/hermes-relay-home/actions/runs/39285501187), completed 16:32:55 UTC |
+| TUI bridge 0.13.1 | `acb1da678f125e0b90672c6248b04016fa8f834c` | `596424ef7df888b0039ba0626b39e208c81a8fe0ad86f27bfa78870ee671b1b8` | [39286682815](https://github.com/achappell/hermes-relay-tui/actions/runs/39286682815), completed 16:42:58 UTC |
+
+The deployed Home runtime/test bytes are unchanged from independently reviewed `2a2ab04`; the normal main merge and final Serve-allowlist documentation produced the replacement source identity. All 36 packaged Python files (including top-level diagnostics), plus metadata, were checked against the exact source/wheel. The installed bridge matched all 51 source modules and all 69 hashed wheel RECORD entries (70 total rows including RECORD itself).
+
+### Current-preserving Home swap and narrow Serve publication
+
+- The fresh private backup is `C:\ProgramData\HermesHome\backups\home-paired-room-pre-831e55e-20261019-115056`. It preserves the current installed package, environment, all secrets and historical provenance, unchanged configuration, original Serve configuration, and a running-service online SQLite backup with integrity `ok` and zero active claims. All 39 hashed entries of the prior installed `4c3f621` package matched its preserved original wheel (`91a3a8f3ff01cfa6c3a7545e7948f5c7d2cb0ba3a4bf75e34320d694afdfca96`).
+- The existing reviewed [package-only helper](../../deploy/windows/home-package-swap.ps1), SHA-256 `0103c3ea233e7abf55b9e661c5ada3e54ff43c96c495c3957a8bb496f38cece1`, ran **once**, at host-local 11:52:29. Its transcript is `cutover-20261019-115229.log` in that backup. A second current online database backup passed integrity; the exact new wheel installed with `--force-reinstall --no-deps`; installed RECORD mismatches were zero; the full machine deployment revision became `831e55e...`; both 8780 and 8766 listened and authenticated configuration remained revision 99.
+- Post-swap semantic/configuration checks confirmed unchanged Kitchen, iPhone, Living Room, Profiles, mappings and optional client-device data. All **11 secret-file hashes** and every other machine environment value were unchanged. Historical signed provenance was preserved, not forged or rewritten. Python was 3.14.7; package metadata remains 0.2.0. Production old-code rollback was **not** run.
+- The first post-swap PowerShell guard incorrectly wrapped a JSON array, producing a count/type error before any Serve update. Read-only reconciliation confirmed all 11 files unchanged and no owned reader processes. Later SSH authentication stalled at the local 1Password agent, not at a remote shell: the already configured disk identity worked with per-command `IdentityAgent=none` and `IdentitiesOnly=yes`, with no persistent SSH/key/host changes and no swap retry.
+- During that hold, independent non-SSH checks at 17:03:21–38 UTC found the existing TLS `/pair` page **200** with actual Hermes pairing HTML and a tailnet pong via LAN in 3 ms. A single LAN TCP 8780 attempt failed, consistent with the existing documented tailnet-only firewall; no client-facing outage was observed. No restart or rollback was attempted to solve the authentication-agent issue.
+- Actual Serve configuration was privately backed up before adding **only** `/api/v1/paired-room-claims` → `http://127.0.0.1:8780/api/v1/paired-room-claims`. Handler count changed **9 → 10**; every pre-existing handler was unchanged; Funnel remained off. No admin or generic `/api` route was published. An actual unauthenticated HTTPS request from ops returned **401**.
+
+### Private bridge and explicit policy
+
+- The exact TUI wheel was installed in its own release venv using the existing operator recipe (`python3.14 -m venv`, then that venv's pip with the wheel's voice extra). A one-shot preparation wrapper's unnecessary uv assumption was corrected before package installation; a subsequent model-launch PATH omission was corrected using the existing absolute `runuser`, without repeating installation or adding global tools. No apt/global dependency change was made. Actual WAV bridge/voice/faster-whisper imports succeeded without PortAudio, which this device-playback path does not use; the real `base` CPU/int8 STT model cache was warmed **without audio or transcription**.
+- The distinct existing Puck token was selected privately from its recovery store and transferred only through encrypted stdin. Atomic environment replacement retained the existing Home Device credential and enrollment file unchanged, verified token/source equality privately, removed obsolete operator bootstrap values, and preserved owner `hermes-puck`, state mode `0700` and environment mode `0600`. No handle or browser/Standard credential was supplied. Source/file equality is not an independent claim about the board's embedded token.
+- `hermes-puck-bridge.service` is enabled and active, serving LAN `192.168.0.4:8766` in Home transport from the exact release, without an operator conversation handle. Its observed PID was 2673983. The existing browser service remained active at **PID 229999** throughout. A real `/response-status?seq=0` boundary check returned **401** for missing/bad tokens and **404** for the valid token with an unknown sequence, without capture, claim or playback.
+- Only then did normal authenticated revision-checked configuration publish **99 → 100**, adding the explicit paired policy to Device `c9dd86cfa9634330bf412e560969b7a9`, endpoint `ops-hermes-puck-bridge`, Room `living-room`, selected `hey-missy` → Amanda. The actual Puck's own credential subsequently obtained **200** discovery, exactly that paired Room/mapping policy, and only `hey-missy`. This also exercised the live authorization/same-mapping singleton intersection; no competing Device was disabled or reconfigured.
+
+### One real Standard speech transport probe — not physical acceptance
+
+At **2026-10-19T17:20:55.864563Z**, the independently reviewed probe (`37749330e08cd24a795c17d2c1e8a793d5cb82cc9f4e4b3ffb87fcd59a488cb2`) exited **0** after exactly one authorized deliberate text turn. It used only the Puck's existing Home credential, a fresh paired grant and a fresh private probe home; it did not reuse a browser token, Standard token or conversation handle.
+
+Observed results:
+
+- Fresh Home admission: **admitted / granted**, current configuration 100.
+- Unmodified Standard Amanda returned actual `audio_start`: **24000 Hz, mono, 2-byte samples**.
+- **7 audio chunks, 29696 PCM bytes**, followed by `audio_end` and terminal completion.
+- `conversation.close` was acknowledged; durable recovery status was **retired**, not guessed from a 404 or network reachability.
+- No failure, prompt replay, microphone/capture, audio file, Puck media fetch or playback occurred. Little-endian is the normalized Home PCM contract; raw wire byte order was **not separately observed**.
+
+Nonsecret control-plane receipts are retained under `/tmp/hermes-home-paired-rollback-fznabncz/`, notably `actual-standard-speech-probe-summary.json`, `windows-post-swap-receipt.json`, `home-paired-policy-publication-receipt.json`, `ops-service-install-receipt.json` and `ops-bridge-auth-boundary-receipt.json`. The private ops recovery backup is `/var/backups/hermes-puck-bridge/paired-room-pre-acb1da6-20261019T171004Z`; production credentials, enrollment state and current databases remain in place.
+
+The firmware custodian's read-only installed-212 source/configuration check separately found the actual micro-decoder accepts dynamic 24 kHz mono/16-bit WAV, the configured resampler targets 48 kHz, and the existing reader/decoder handles HTTP chunked EOF plus the bridge's streaming `0xFFFFFFFF` RIFF/data sizes. The bridge does not resample. This is **static compatibility**, not observed network decode, DAC drain or audibility. No hardware/configuration/volume/flash change was made. The 90-second physical observation window remains closed until the parent's explicit GO when Amanda is at the Puck.

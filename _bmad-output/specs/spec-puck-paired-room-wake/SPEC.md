@@ -43,3 +43,9 @@ Amanda approved this Home-paired Living Room Puck responding to Hey Missy withou
 ## Success signal
 
 An actual isolated Home runtime issues a fresh evidence-free paired-room grant only for the approved scoped singleton and preserves normal denial/revocation/no-replay boundaries, while strict and other-surface regressions remain intact. The owning consumer subsequently proves the real authorized wake → capture → STT → Home → unmodified Standard Amanda → TTS → audible Puck journey; Home-local tests alone do not claim that physical acceptance.
+
+## Dated implementation evidence — 2026-10-19
+
+The approved policy above is unchanged. After independent review and both exact-source CI successes, Home `831e55e730ab49f3774ecc55a5bd111c993d2f1a` and TUI bridge `acb1da678f125e0b90672c6248b04016fa8f834c` were deployed with current state/credentials preserved. Normal revision-checked configuration **99 → 100** approved the stated existing Living Room endpoint and only `hey-missy`; actual own-credential discovery returned that eligible paired policy.
+
+One authorized controlled Home → unmodified Standard Amanda turn observed actual 24 kHz mono/16-bit response audio, 29696 PCM bytes, normal terminal completion and confirmed claim retirement. It did not capture speech or fetch/play Puck media. [Detailed validation and current-preserving recovery](../../implementation-artifacts/validation-puck-paired-room-wake.md) distinguishes deployed source, actual probes and static installed-firmware compatibility from the still-owner-gated physical wake/STT/audibility acceptance. No other Device approval, calibrated-provider result or consumer auto-renewal is implied.
