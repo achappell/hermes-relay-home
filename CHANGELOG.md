@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Allow service-hosted `puck` room devices to enroll with private credential
+  storage, administrator-approved one-Room/wake-only scope and explicit active
+  Wake Mapping grants. Existing credential lifecycle and wake admission rules
+  are unchanged.
+
 ## 0.2.0 (2026-10-09)
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
