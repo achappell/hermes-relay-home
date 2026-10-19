@@ -10,6 +10,8 @@
   Home grants, with household same-mapping exclusivity, current-authority
   revalidation and idempotent owned paired-claim retirement. Strict wake and
   other endpoint admission rules remain unchanged.
+- Preserve the reviewed Windows package-only swap/recovery helper, retaining
+  live credentials/database with explicit wheel integrity and startup checks.
 
 ## 0.2.0 (2026-10-09)
 
