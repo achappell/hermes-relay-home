@@ -43,7 +43,7 @@ class WakeDecision:
     room_id: str = ""
     wake_mapping_id: str = ""
     profile_id: str = field(default="", repr=False)
-    claim_kind: Literal["wake", "touch"] = "wake"
+    claim_kind: Literal["wake", "touch", "paired_room"] = "wake"
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +91,14 @@ class ArbitrationEngine:
         self._resolved: dict[str, WakeDecision] = {}
         self._accepted_claim_ids: set[str] = set()
         self._sequence = 0
+
+    def reserve_claim_id(self, claim_id: str) -> bool:
+        """Reserve an authorized non-arbitrated claim against strict admission."""
+        with self._lock:
+            if claim_id in self._accepted_claim_ids:
+                return False
+            self._accepted_claim_ids.add(claim_id)
+            return True
 
     def submit(
         self,

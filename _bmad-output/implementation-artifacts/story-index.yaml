@@ -136,6 +136,7 @@ stories:
     depends_on: []
     acceptance_overlay: _bmad-output/implementation-artifacts/course-correction-2026-09-23.md
     historical_horizon: next
+    evidence_note: "2026-10-19 NW-05 paired-room extension: _bmad-output/specs/spec-puck-paired-room-wake/SPEC.md; implementation/validation-puck-paired-room-wake artifacts. Explicit Living Room Puck Hey Missy mode, same-mapping household singleton. Home code independently reviewed; real notification defect fixed and confirmed. Final143 focused/full1499 passed (26 skipped, 8 warnings recorded), Ruff and actual production HTTP/reopen plus old-4c DB compatibility fixture passed. Publication complete only when linked PR is created; deployment/real Standard/audio remain gated. TUI P4/3-P-5 owns physical full-turn acceptance; no new epic."
   - id: HOME-NW-16
     title: Admit Touch panels and grant bound tap-to-talk claims
     kind: next-wave

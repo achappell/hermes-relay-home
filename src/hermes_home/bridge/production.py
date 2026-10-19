@@ -96,6 +96,12 @@ class ConversationGrantStore:
         self._configuration = configuration
         self._client_revision_resolver = client_revision_resolver
         self._client_grant_checker = client_grant_checker
+        self._paired_room_checker: (
+            Callable[[str, int | None, int, str], bool] | None
+        ) = None
+        # A failed retirement write must not readmit denied paired authority.
+        # Restart already closes every remaining active durable claim.
+        self._denied_paired_claims: set[str] = set()
         self._claim_ref_factory = claim_ref_factory or (
             lambda: "cref-" + secrets.token_urlsafe(18)
         )
@@ -210,8 +216,8 @@ class ConversationGrantStore:
                         handle, claim_id, device_id, room_id, wake_mapping_id,
                         profile_id, configuration_revision, credential_generation,
                         session_id, status, activity, idle_deadline, close_reason,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'active', 'ready', ?, NULL, ?, ?)
+                        created_at, updated_at, claim_kind
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'active', 'ready', ?, NULL, ?, ?, ?)
                     """,
                     (
                         handle,
@@ -225,6 +231,11 @@ class ConversationGrantStore:
                         first_open_deadline,
                         now,
                         now,
+                        (
+                            "paired_room"
+                            if decision.claim_kind == "paired_room"
+                            else "room"
+                        ),
                     ),
                 )
                 self._connection.commit()
@@ -538,6 +549,13 @@ class ConversationGrantStore:
         """Attach the grant check once the credential service exists."""
         self._client_grant_checker = checker
 
+    def set_paired_room_checker(
+        self, checker: Callable[[str, int | None, int, str], bool]
+    ) -> None:
+        """Attach current paired-room policy and credential authorization."""
+        with self._lock:
+            self._paired_room_checker = checker
+
     def set_client_revision_resolver(
         self, resolver: Callable[[str, int], int | None]
     ) -> None:
@@ -574,7 +592,24 @@ class ConversationGrantStore:
         return type(projected) is int and projected == claim_revision
 
     def resolve(self, handle: str, device_id: str) -> ConversationGrant | None:
+        grant = self._resolve_grant(handle, device_id)
+        if grant is None:
+            with self._lock:
+                retire_paired = handle in self._denied_paired_claims
+            if retire_paired:
+                # Publish revocation only after resolution releases the store
+                # lock: a live bridge handler tears down its upstream binding.
+                self._close_matching_rows(
+                    "handle = ? AND device_id = ? AND claim_kind = 'paired_room'",
+                    (handle, device_id),
+                    "paired_room_revoked",
+                )
+        return grant
+
+    def _resolve_grant(self, handle: str, device_id: str) -> ConversationGrant | None:
         with self._lock:
+            if handle in self._denied_paired_claims:
+                return None
             if (handle, device_id) in self._failed_upstream_claims or (
                 handle,
                 None,
@@ -603,6 +638,18 @@ class ConversationGrantStore:
                 reason = _expiry_reason(row[8])
                 self._close_locked(handle, reason, now)
                 return None
+            if row[10] == "paired_room":
+                checker = self._paired_room_checker
+                try:
+                    paired_authorized = (
+                        checker is not None
+                        and checker(device_id, row[7], row[9], row[2]) is True
+                    )
+                except Exception:  # noqa: BLE001 - failed authority must retire the grant
+                    paired_authorized = False
+                if not paired_authorized:
+                    self._denied_paired_claims.add(handle)
+                    return None
             if row[10] == "client" and self._client_grant_checker is not None:
                 # A grant revoked after the claim was made, or while its
                 # claims were being closed, must not keep the conversation.
@@ -615,6 +662,10 @@ class ConversationGrantStore:
                     return None
             try:
                 snapshot = self._configuration()
+                if row[10] == "paired_room" and snapshot.get("revision") != row[9]:
+                    # A publish may race the checker before this snapshot read.
+                    self._denied_paired_claims.add(handle)
+                    return None
                 profiles = {profile["id"]: profile for profile in snapshot["profiles"]}
                 profile = profiles.get(row[3])
                 if profile is None or not profile["available"]:
@@ -1062,6 +1113,36 @@ class ConversationGrantStore:
             self._failed_upstream_claims.discard((handle, None))
             return True
 
+    def close_owned_paired_room_claim(
+        self,
+        handle: str,
+        device_id: str,
+        *,
+        authorized_rooms: Iterable[str],
+        authorized_wake_mappings: Iterable[str],
+    ) -> bool:
+        """Close known scoped paired work without readmitting its authority."""
+        rooms = frozenset(authorized_rooms)
+        mappings = frozenset(authorized_wake_mappings)
+        with self._lock:
+            try:
+                row = self._connection.execute(
+                    "SELECT room_id, wake_mapping_id FROM conversation_claims "
+                    "WHERE handle = ? AND device_id = ? AND claim_kind = 'paired_room'",
+                    (handle, device_id),
+                ).fetchone()
+            except sqlite3.Error as error:
+                raise OSError("cannot read Home paired-room claim") from error
+            if row is None or row[0] not in rooms or row[1] not in mappings:
+                return False
+        self._close_matching_rows(
+            "handle = ? AND device_id = ? AND claim_kind = 'paired_room' "
+            "AND room_id = ? AND wake_mapping_id = ?",
+            (handle, device_id, row[0], row[1]),
+            "stopped",
+        )
+        return True
+
     def close_device_claims(
         self,
         device_id: str,
@@ -1111,6 +1192,16 @@ class ConversationGrantStore:
         return self._close_matching_claims(
             f"wake_mapping_id IN ({placeholders})",
             identifiers,
+            reason,
+        )
+
+    def close_paired_room_claims(
+        self, *, configuration_revision: int, reason: str
+    ) -> int:
+        """Retire paired authority without touching strict or client claims."""
+        return self._close_matching_claims(
+            "claim_kind = 'paired_room' AND configuration_revision != ?",
+            (configuration_revision,),
             reason,
         )
 

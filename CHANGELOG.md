@@ -6,6 +6,10 @@
   storage, administrator-approved one-Room/wake-only scope and explicit active
   Wake Mapping grants. Existing credential lifecycle and wake admission rules
   are unchanged.
+- Add explicit owner-approved paired-room wake policy and fresh pre-capture
+  Home grants, with household same-mapping exclusivity, current-authority
+  revalidation and idempotent owned paired-claim retirement. Strict wake and
+  other endpoint admission rules remain unchanged.
 
 ## 0.2.0 (2026-10-09)
 
