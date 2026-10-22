@@ -1,6 +1,6 @@
-# Paired-room wake — local Home evidence and deployment gates
+# Paired-room wake — Home implementation and owner-accepted physical evidence
 
-Date: 2026-10-19. Owner: existing Home NW-05 policy/grants, coordinated with TUI P4/3-P-5 consumer. This records the new owner-approved admission mode, not a second enrollment or proof of completed physical voice acceptance.
+Date: 2026-10-19. Owner: existing Home NW-05 policy/grants, coordinated with TUI P4/3-P-5 consumer. This records implementation, controlled transport proof and the first owner-accepted paired-room physical happy path, not a second enrollment or blanket migration/edge-matrix acceptance.
 
 ## Source and approved contract
 
@@ -42,9 +42,9 @@ The parent accepted the independent review, exact replacement artifacts, compati
 
 The prior Home/ops actor explicitly handed off ownership and acknowledged no child/queued operations. This worker is the sole Home/ops coordinator/executor for this slice **after** the review/source/recovery gate; the firmware actor retains Puck custody. No additional live actor may mutate concurrently.
 
-## Unexercised acceptance
+## Acceptance result and explicit limits
 
-The controlled, explicitly authorized one-turn probe below now proves actual Home → unmodified Standard Amanda → response-audio transport and its observed format. Full physical acceptance remains open: the awake owner must still prove wake → capture → nonempty STT → Home → Standard → TTS → actual Puck fetch/drain and a coherent audible answer. The probe did not capture, fetch Puck media or play audio; no transcript or audio was retained. The hardware custodian alone may observe the physical window after the parent's explicit GO.
+Amanda explicitly accepted the real Living Room paired-room happy path on 2026-10-19 after hearing a reasonable spoken answer: wake → Home authority before capture → upload → nonempty STT → unmodified Standard Amanda → TTS → Puck playback. The controlled probe below remains a separate earlier transport proof; the later physical windows, dependency correction, owner confirmation and authoritative post-turn cleanup are recorded at the end. This is not a claim of repeated-wake, follow-up, interruption/reconnect/revocation/shutdown-matrix, automatic-renewal or generic strict-provider acceptance.
 
 ## Integrated regression checkpoint
 
@@ -76,7 +76,7 @@ Required post-merge checks passed again: **143 focused in 1.81s; 1499 full passe
 
 Both exact replacement-source CI runs completed successfully before any cutover:
 
-| Component | Deployed immutable source | Exact wheel SHA-256 | Successful CI |
+| Component | Initial deployed immutable source | Exact wheel SHA-256 | Successful CI |
 | --- | --- | --- | --- |
 | Home 0.2.0 | `831e55e730ab49f3774ecc55a5bd111c993d2f1a` | `bcc6ea125aff1dd55de22b3f3a3a55a97cf7aeb16229056b684ff5215b9c7200` | [39285501187](https://github.com/achappell/hermes-relay-home/actions/runs/39285501187), completed 16:32:55 UTC |
 | TUI bridge 0.13.1 | `acb1da678f125e0b90672c6248b04016fa8f834c` | `596424ef7df888b0039ba0626b39e208c81a8fe0ad86f27bfa78870ee671b1b8` | [39286682815](https://github.com/achappell/hermes-relay-tui/actions/runs/39286682815), completed 16:42:58 UTC |
@@ -114,4 +114,49 @@ Observed results:
 
 Nonsecret control-plane receipts are retained under `/tmp/hermes-home-paired-rollback-fznabncz/`, notably `actual-standard-speech-probe-summary.json`, `windows-post-swap-receipt.json`, `home-paired-policy-publication-receipt.json`, `ops-service-install-receipt.json` and `ops-bridge-auth-boundary-receipt.json`. The private ops recovery backup is `/var/backups/hermes-puck-bridge/paired-room-pre-acb1da6-20261019T171004Z`; production credentials, enrollment state and current databases remain in place.
 
-The firmware custodian's read-only installed-212 source/configuration check separately found the actual micro-decoder accepts dynamic 24 kHz mono/16-bit WAV, the configured resampler targets 48 kHz, and the existing reader/decoder handles HTTP chunked EOF plus the bridge's streaming `0xFFFFFFFF` RIFF/data sizes. The bridge does not resample. This is **static compatibility**, not observed network decode, DAC drain or audibility. No hardware/configuration/volume/flash change was made. The 90-second physical observation window remains closed until the parent's explicit GO when Amanda is at the Puck.
+Before physical testing, the firmware custodian's read-only installed-212 source/configuration check found the actual micro-decoder accepts dynamic 24 kHz mono/16-bit WAV, the configured resampler targets 48 kHz, and the existing reader/decoder handles HTTP chunked EOF plus the bridge's streaming `0xFFFFFFFF` RIFF/data sizes. The bridge does not resample. That was **static compatibility**, not by itself proof of network decode, speaker drain or audibility. Subsequent parent-GO physical evidence follows; no firmware/configuration/volume/flash change was made.
+
+## Owner-accepted physical paired-room happy path — 2026-10-19
+
+### First physical window found a real decoder incompatibility
+
+The first owner-authorized window (17:53:43–17:55:13 UTC) proved wake, authenticated Home-mode admission, a fresh paired grant, a 350880-byte capture and successful upload. It did **not** produce an audible answer. Actual bridge transcription was invoked, but `faster-whisper 1.2.1` failed in `decode_audio` at `av.open`: **`TypeError: open() got an unexpected keyword argument 'metadata_errors'`**, with installed PyAV 19.0.1. This occurred before WAV decoding, VAD, language detection or inference; it was not an observed empty transcript and does not establish a channel/gain, calibrated-provider or P8 fragmentation cause. The transient WAV was removed by the existing `finally` cleanup; no actual clip RMS/peak/clipping/zero statistics were logged or recoverable without a new capture.
+
+The installed 212 `HOME_GRANTED` path, matching fresh Home claim and accepted authenticated upload establish the actual Home transport, bridge target `192.168.0.4:8766` and operational board↔bridge token match, not merely matching source files. No token was read aloud or printed.
+
+### Narrow reviewed bridge dependency correction
+
+The owning TUI PR254 fixed the compatibility contract with `av<19` and a real decoder-boundary regression, independently reviewed before publication. Exact source **`6b288939adf9bfdc2954301f53c8fec68080b681`** passed [CI 39300603139](https://github.com/achappell/hermes-relay-tui/actions/runs/39300603139) before the separately approved bridge-only cutover:
+
+- TUI 0.13.1 wheel SHA-256: `ac232c4dbedf39f1fd4be68a82ebb4445ade3487bbf39d50e3030ba5892efc4e`.
+- Exact Linux PyAV **18.1.0** wheel SHA-256: `8a032e8d8ebc73dec079364b9b4a6837638a2d106e8472314e685ffbf163e700`; actual host tags were checked before installation.
+- The old isolated venv was backed up privately at `/var/backups/hermes-puck-bridge/av181-pre-6b28893-20261019T182101Z`. Only the bridge service was stopped. The existing known paired claim received the exact authenticated owned-close **200** receipt and its recovery marker became confirmed **retired**; no row/marker deletion or 404-as-proof occurred. The next paired wake would also have retired it: this was cleanup, not an admission blocker.
+- Only those two wheels were force-reinstalled with `--no-deps`. The only dependency-version delta was PyAV **19.0.1 → 18.1.0**; faster-whisper remained 1.2.1 and every other installed dependency version was unchanged. All **69 TUI + 259 PyAV hashed RECORD entries**, imports and pip dependency checks passed.
+- An actual on-host, in-memory synthetic mono/16-bit/16 kHz WAV passed **the real `faster_whisper.audio.decode_audio`**, yielding 1600 finite float32 samples. This was a content-free decoder compatibility check, not synthetic wake/physical speech evidence; no audio file, microphone or playback was used.
+- The same service, unit, private environment, Home credential, Puck token, enrollment and state were retained. The existing installation-slot directory still bears the original `acb1da6...` name; the unsigned operator deployment manifest correctly identifies installed source **6b288939...**, not that historical directory name. No path shim or broader installer was added.
+- The restarted service was active/enabled at observed PID 2690895. Missing/bad-token response-status requests returned **401**, valid-token/unknown sequence **404**, recovery was retired and Home had **zero total active claims** before the second window. Home stayed at source **831e55e...**, configuration **100**; the browser stayed at PID 229999; firmware remained **212** and volume remained unmuted **0.40**.
+
+### Accepted second physical window
+
+After a new explicit parent GO, the custodian checked actual build/authentication/IDLE/volume read-only and opened **18:40:35.374134–18:42:05.375707 UTC**. Amanda supplied one real Hey Missy question. **She explicitly confirmed hearing a reasonable spoken response.** This owner confirmation establishes audible/coherent acceptance; PCM counts alone do not.
+
+| Stage | Content-free observed evidence |
+| --- | --- |
+| Wake and authority before capture | Native `HOME_GRANTED` preceded capture; bridge Home ready at **18:40:49.786260**, fresh paired admission at **18:40:49.814838 UTC**, configuration 100. |
+| Capture/upload | Native primary sequence **0**, **388960 raw bytes** (about **3.039 s** at declared stereo/32-bit/16 kHz), VAD end and successful upload. Existing channel index 1/gain 4 conversion was unchanged. |
+| Nonempty STT → Standard | Established causally by the exclusive production path: the receiver calls the turn callback only after successful nonempty transcription, and that turn produced Standard audio. No transcript or positive-STT raw log was retained. |
+| TTS production | **112 audio chunks**, turn complete at **18:41:17.728554 UTC**, reported turn processing **18.0 s**. |
+| HTTP delivery/drain | At **18:41:17.729380 UTC**, **685568 source = 685568 delivered PCM bytes**, **24000 Hz / mono / 2-byte samples**, **14.283 s** audio, terminal/reason **complete**, **0.0 s** bridge stall; response duration **21.139 s**. No content hashes retained. |
+| Actual Puck playback | Native media **PLAYING → IDLE**, response confirmed COMPLETE and wake detection resumed; Amanda's reasonable-audible-answer confirmation is separate human evidence. |
+| Authoritative cleanup | After completed primary delivery, exact authenticated owned-paired close **200**, durable marker **retired**, then read-only Home count **0 total active claims**. No deletion, guessed 404 retirement or prompt replay. |
+
+Native observer relative times were grant **15.015**, capture **15.186**, VAD end **18.242**, upload delivered **21.786**, PLAYING **31.186**, IDLE **47.472**, response COMPLETE **47.530** and wake detector resumed **48.034 seconds**. These are the native observer's reported relative clock, not an independently synchronized UTC conversion.
+
+### Honest limits and quiescent finish
+
+- The custodian counted **one unattributed speaker error** (raw message not retained) and **one capture warning** matching the bounded 8-second automatic follow-up limit. Do not claim zero warnings or infer an unobserved diagnosis from them.
+- Automatic follow-up sequence **1** uploaded, then the bridge reported `NO_QUESTION_OR_AUDIO`; no second PLAYING/audio-producing turn was observed. That is not accepted follow-up reliability. Same-service repeated wake, interruption, reconnect, live revocation and shutdown/restart matrices remain separate, as do consumer renewal and the generic calibrated strict provider.
+- Little-endian remains the normalized Home PCM contract, not a separately observed raw-byte assertion. The successful primary path does not prove bit-exact capture or eliminate every installed-212 P8 quality risk.
+- No captured audio, transcript, credentials or content hashes were retained in observation artifacts. Both observers finished; the hardware custodian closed its tunnel/scaffolds and returned quiescent. After authoritative cleanup, no further live Home/ops/Puck actions were taken.
+
+The content-free combined control-plane receipt is `/tmp/hermes-home-paired-rollback-fznabncz/second-physical-turn-accepted-receipt.json`, shared with the owning TUI identity worker. This durable repository record preserves its nonsecret stage/count/timing/acceptance facts. It closes the **first owner-approved paired-room physical happy path**, not broader migration, other Device approval or all P4/STD6 edge gates.
