@@ -393,7 +393,8 @@ def test_identifiers_never_reach_logs_metrics_or_diagnostics(home, caplog) -> No
     home.close(material, [])
 
     routes = {event.route_id for event in home.diagnostics.accepted}
-    assert {"client_claims", "client_claim_close"} <= routes
+    # A successful list is routine polling and is not retained (see below).
+    assert "client_claim_close" in routes
     captured = "\n".join(
         [
             caplog.text,
@@ -493,3 +494,35 @@ def test_client_claim_routes_refuse_when_credential_service_is_missing(home) -> 
         home.close(material, ["cref-random"]).body["error"]["code"]
         == "client_claim_unavailable"
     )
+
+
+
+def test_routine_successful_list_polls_do_not_fill_the_capped_event_store(home) -> None:
+    """The household browser polled GET /api/v1/client-claims every 15 s;
+    ~4045 of Home's 4096 retained diagnostic events were these polls, which
+    evicted real turn history after ~17 h."""
+    material = home.pair("laptop", ["amanda"])
+    home.diagnostics.accepted.clear()
+    before = home.metrics.render()
+
+    for _ in range(50):
+        assert home.list(material).status == 200
+
+    assert not [e for e in home.diagnostics.accepted if e.route_id == "client_claims"]
+    assert home.metrics.render() != before, "volume still counted in metrics"
+
+
+def test_failed_list_is_still_recorded(home) -> None:
+    material = home.pair("laptop", ["amanda"])
+    home.diagnostics.accepted.clear()
+    response = home.list(material, headers={"Authorization": "Device wrong"})
+    assert response.status >= 400
+    assert [e for e in home.diagnostics.accepted if e.route_id == "client_claims"]
+
+
+def test_claim_writes_are_still_recorded(home) -> None:
+    material = home.pair("laptop", ["amanda"])
+    grant_id = _grant(material, "Amanda")["grant_id"]
+    home.diagnostics.accepted.clear()
+    home.claim(material, grant_id, "claim-1", session={"mode": "most_recent"})
+    assert [e for e in home.diagnostics.accepted if e.route_id == "client_claims"]
