@@ -197,6 +197,7 @@ class HomeApplication:
                 path=request_path,
                 status=500,
                 started=started,
+                method=method,
             )
             raise
         self._record_http(method, request_path, response.status, started)
@@ -207,6 +208,7 @@ class HomeApplication:
             status=response.status,
             started=started,
             response=response,
+            method=method,
         )
         return response
 
@@ -2344,7 +2346,20 @@ class HomeApplication:
         status: int,
         started: float,
         response: HTTPResponse | None = None,
+        method: str = "",
     ) -> None:
+        if (
+            method == "GET"
+            and 200 <= status < 300
+            and _metric_route(path) in _ROUTINE_READ_ROUTES
+        ):
+            # Clients poll these reads in the background (the household
+            # browser listed client claims every 15 s: ~4045 of 4096 retained
+            # events). A successful poll carries no diagnostic signal, and in
+            # the capped store it evicted real turn/audio history. Volume is
+            # still counted by hermes_home_http_requests_total; failures are
+            # still recorded below.
+            return
         if path in {
             "/metrics",
             "/api/v1/client-diagnostics",
@@ -2961,6 +2976,12 @@ def _health_diagnostic_code(reason: str | None) -> str | None:
         "standard_protocol_error": "protocol_error",
         "authorization_unavailable": "authorization_unavailable",
     }.get(reason, "service_unavailable")
+
+
+# Successful GETs on these routes are background polling, not activity.
+_ROUTINE_READ_ROUTES = frozenset(
+    {"client_claims", "client_sessions", "configuration", "device_configuration"}
+)
 
 
 def _metric_route(path: str) -> str:
