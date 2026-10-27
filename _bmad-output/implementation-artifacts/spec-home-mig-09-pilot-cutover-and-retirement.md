@@ -30,13 +30,13 @@ Reuse migration source Story 9; inventory and retire fork paths, services and cr
 
 Approved backlog scope. Owning BMAD specification/readiness review must settle API details and a bounded execution plan before implementation. No implementation or runtime acceptance is claimed.
 
-**Readiness review drafted 2026-10-08: not ready to execute.** The inventory, retirement plan, rollback runbook, gap list and owner decisions are in [validation-home-mig-09-readiness.md](validation-home-mig-09-readiness.md). The story stays `backlog`. The review is paper work only: no host, SSH, ops, device or deployment access was used, nothing in it is verified live, and every item the repository does not show is marked `UNKNOWN`.
+**Readiness refreshed 2026-10-27: not ready for cutover.** [Current evidence and bounded plan](validation-home-mig-09-readiness.md#0-current-readiness--2026-10-27) supersede the preserved October 8 paper snapshot. Read-only host/configuration/installed-source checks partially establish R0/R1; newer records establish revision-bound recovery rehearsals, not a generic production rollback guarantee. Required clean Standard provenance, per-surface migration acceptance, Apple direct-mode implementation, signed macOS distribution and next-candidate recovery remain open. Puck physical validation is deferred, not waived. Status remains `backlog`; no deployment, credential invalidation, service retirement or epic closure is authorized.
 
 ## Proposed acceptance criteria (PROPOSED, not approved)
 
 These make the approved Acceptance above checkable. They do not replace it, and each depends on the owner decisions named. Evidence for each is recorded as implementation, merge and physical/live acceptance separately.
 
-- AC-1 Provenance: the deployed Home revision and wheel hash, and the Standard commit and tree state actually running, are recorded. Any difference from unmodified Standard at the chosen baseline is a named, owner-signed exception (OD-4, OD-5).
+- AC-1 Provenance: the deployed Home revision and wheel hash, and the Standard commit and tree state actually running, are recorded. The selected supported Standard baseline satisfies the approved unmodified-agent contract; a named patch or owner-signed receipt alone does not satisfy it. Any exception requires a separate explicit product-contract decision before acceptance (OD-4, OD-5).
 - AC-2 Inventory: every `UNKNOWN` row of the readiness inventory is resolved with an owner, by name, path and holder only; no secret contents are recorded.
 - AC-3 Recovery before cutover: a compatible recovery build and the cutover backup set exist, the rollback is rehearsed including old code on the migrated database, and the result is recorded. If no compatible build exists, the rollout is paused and the surface is reported unavailable (OD-10, OD-11).
 - AC-4 Gates: a per-surface matrix links exact-build, dated evidence for Epics 1, 2 and 3 (CC capability matrix). The owner records the epic status; a historical `done` does not substitute (OD-1, OD-2, OD-3).
@@ -48,11 +48,11 @@ These make the approved Acceptance above checkable. They do not replace it, and 
 
 ## Proposed execution plan (PROPOSED)
 
-Steps R0 to R8 of the readiness document, in order: record the baseline; finish the inventory; prepare and rehearse recovery; check the Epic 1-3 gates; pilot surface by surface; write the household runbook; switch the default; retire; close. Preconditions, evidence and reversibility per step are in the readiness document, sections 4 and 5. No step is approved or started.
+Retain steps R0–R8: provenance/inventory; compatible recovery; required per-surface gates; controlled pilot; actual-household runbook; approved default switch/bake; retirement; closure. The current readiness document section 0 supplies owners, exit evidence and stop conditions. Work follows Home-personal, direct-personal, room-device and retirement dependency order. Only bounded read-only R0/R1 observations were performed in this audit; no mutation/pilot/cutover/retirement stage was executed or newly approved. Historical sections 4–5 are not a current executable runbook.
 
 ## Open owner decisions
 
-Questions and `PROPOSED` defaults are in the readiness document, section 7. None is decided.
+The original question identities below are retained for traceability. Current readiness section 0 distinguishes requirements already settled by the delivery contract, newer scoped approvals/rehearsals, and remaining owner decisions. This audit chooses no new upstream baseline, patch exception, scope reduction, pilot/bake duration, credential conversion or retention policy.
 
 | ID | Question |
 | --- | --- |
@@ -76,3 +76,4 @@ Questions and `PROPOSED` defaults are in the readiness document, section 7. None
 ## Spec Change Log
 
 - 2026-10-08: Added the readiness review, proposed acceptance criteria, proposed execution plan and open owner decisions (documentation only). Status unchanged (`backlog`). Added the `github_issue` and `validation` pointers, matching `story-index.yaml`.
+- 2026-10-27: Refreshed readiness with current repository evidence, bounded read-only Home/media-server/ops observations, installed-source/RECORD comparisons, per-platform/mode acceptance ledger, revision-bound recovery caveats and staged R0–R8 exit gates. Clarified that the firm unmodified-Standard contract is not satisfied by merely naming a local patch. Preserved the historical audit and all source/credential/service state; status remains `backlog`.
