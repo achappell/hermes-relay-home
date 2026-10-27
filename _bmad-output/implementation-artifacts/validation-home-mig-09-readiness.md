@@ -106,7 +106,7 @@ Every transition requires its evidence; this is a **PROPOSED execution sequence*
 | R6 | Separate owner approval for default switch and an explicitly agreed bake | Every required surface accepted or a separately approved product-scope change, compatible recovery available, exact start/end observations and abort authority. Active services or elapsed calendar time alone do not prove this gate |
 | R7–R8 | Only after accepted bake: owning-repository removal PRs and individually authorized service stops/credential invalidations/residue handling; Home then closes coordination | Before/after item/owner/time receipts, preserved historical evidence/history/configuration, supported install without fork/old pairing, final owner acceptance. No action here authorizes these irreversible steps |
 
-**Next executable work without the Puck:** finish the read-only Standard provenance/candidate comparison and current-preserving R2 preparation with Ops; separately route the missing `IOS-STD-01` implementation to Apple. This audit does not remove the current Standard patches, choose a new upstream baseline, install a candidate, implement Apple work or authorize a rehearsal against production. Device windows and any actual source/service/credential changes need their own bounded owner-approved work.
+**Next executable work without the Puck:** the initial clean Standard comparison and source-only recovery exercise are now complete (section 0.1). Resolve the missing upstream audio timeout/retry/privacy behavior before selecting a deployment baseline; keep unrelated Slack policy intact. Separately route missing `IOS-STD-01` implementation to Apple and prepare exact-build/current-data R2 recovery. This does not authorize agent patches, provider substitution, baseline installation, live rollback or a product-contract exception.
 
 ### Refresh verification
 
@@ -116,6 +116,46 @@ The host/package/configuration exercises above are the audit's runtime smoke pro
 - `uvx ruff check src tests`: **passed**.
 - `uvx ruff format --check src tests`: **not clean**; unchanged `tests/test_client_claim_list_close_api.py:499` would be reformatted, 86 files already formatted. No formatter was applied and no unrelated test source changed.
 - `uv run python scripts/render_surface_status.py --repo home=../hermes-relay-home/.worktrees/home-mig09-readiness-20261027 --allow-partial` from the coordinator: **exit 0**, Home story/index/spec/validation joins render with HOME-MIG-09 still `backlog`. This is deliberately Home-only, not a claimed current cross-repository rollup.
+
+## 0.1 Standard baseline reconciliation — 2026-10-27
+
+### Candidate and disposition
+
+The media-server checkout's sanitized origin is `github.com/NousResearch/hermes-agent.git`. GitHub's commit API confirms [candidate `e5ea5fd9ccdf2913c0b21b24eb3d22b321d2e2a6`](https://github.com/NousResearch/hermes-agent/commit/e5ea5fd9ccdf2913c0b21b24eb3d22b321d2e2a6) is upstream; it was also upstream `main` at observation. It is the same base as the current live disk checkout, avoiding an unrelated upgrade while assessing removal of local changes. A fresh isolated clone remained at this exact HEAD with empty `git status --porcelain --untracked-files=normal` after the probes.
+
+**Clean source candidate evaluated and rejected for cutover, not adopted as the supported household baseline.** Upstream has not yet absorbed the local OpenAI-stream timeout/no-retry or type-only warning changes. No supported configuration-only replacement was found for the selected household speech service. Other built-in providers and command providers have different service/streaming behavior; switching to them, adding a custom proxy/plugin or silently disabling required Home voice is not an equivalent fix authorized by this work.
+
+### Behavior comparison and exercised proof
+
+All probes used synthetic inputs, private temporary HOME/HERMES_HOME/HERMES_RUNTIME_DIR, clean candidate imports and an isolated `uv run --no-project` dependency environment. No production Python environment was installed into or changed. Only loopback HTTP was used for synthetic PCM/errors; no model, household TTS server, Home turn, Slack API, real audio or client session was contacted.
+
+| Local change | Clean upstream / supported configuration | Observed isolated result |
+| --- | --- | --- |
+| `tools/tts_streaming.py`: OpenAI request timeout and no SDK retries | [OpenAIStreamer lines 298–316](https://github.com/NousResearch/hermes-agent/blob/e5ea5fd9ccdf2913c0b21b24eb3d22b321d2e2a6/tools/tts_streaming.py#L298-L316) passes only key/base URL to the SDK and no request timeout/retry override. TTS configuration/docs do not expose the patch's `stream_timeout_seconds` or SDK retry control | Actual clean provider received **64 expected synthetic PCM bytes** in one loopback request after a **0.35 s** server delay despite a supplied **0.05 s** patch-only timeout; call elapsed **1.612 s**, including lazy imports/client setup. This proves the setting is ignored, not an exact network-timeout measurement |
+| No synthesis retry | The actual SDK version used was upstream-pinned `openai==2.54.0` | A synthetic HTTP 500 produced **3 requests** before `InternalServerError`; supplying patch-like `max_retries: 0` in the provider section did not change it. An ordinary SDK client reported default read timeout **600 s**, default max retries **2**. A real 600-second stall was not run |
+| `hermes_cli/web_routers/audio.py`: type-only failure warning | [Speak-stream lines 734–738](https://github.com/NousResearch/hermes-agent/blob/e5ea5fd9ccdf2913c0b21b24eb3d22b321d2e2a6/hermes_cli/web_routers/audio.py#L734-L738) still logs `%s`, `exc`, not exception type | The actual provider error string contained the synthetic response marker. **[INFERENCE]** that string can reach the unchanged warning. The actual ASGI/WebSocket warning/terminal path was inspected, not executed; no real provider log or private text was read |
+| Slack exact-peer restriction plus docs/untracked regression | [Slack bot gate](https://github.com/NousResearch/hermes-agent/blob/e5ea5fd9ccdf2913c0b21b24eb3d22b321d2e2a6/plugins/platforms/slack/adapter.py#L4447-L4471) supports none/mentions/all, not the local `allowed_bot_users` restriction. [Gateway bot authorization](https://github.com/NousResearch/hermes-agent/blob/e5ea5fd9ccdf2913c0b21b24eb3d22b321d2e2a6/gateway/authz_mixin.py#L570-L589) is distinct from the human allowlist | With actual adapter methods, synthetic bot-marked events and an in-memory exact-peer list, both configured peer and stranger mentions were **not dropped**; own posts and nonmentions were dropped. No Slack client was connected. `SLACK_ALLOWED_USERS` is not an equivalent bot-peer restriction under this path |
+
+The Slack result is a local-policy compatibility difference, not authorization to alter unrelated Slack profiles or a claim of an upstream security advisory. For a future separately approved Home-only deployment, keeping a separate unchanged Slack installation may avoid coupling its patch retirement to Home; this review implemented no such deployment or architecture change.
+
+### Source-only recovery material and reconstruction
+
+Private local directory: `~/.local/share/hermes-mig09-baselines/2026-10-27-e5ea5fd/`. It contains a clean Git source archive, a timestamped live-source overlay JSON and a nonsecret manifest. No profile/configuration, `.env`, credential, memory, history, session database or installed dependency was copied.
+
+| Artifact | SHA-256 / scope |
+| --- | --- |
+| `standard-e5ea5fd-clean.tar.gz` | `e136dd088994486bf256efb33a7eddc8825ca6624e8b4fda1a8a2b68d5ca65e7`; generated from the exact upstream commit |
+| `live-source-overlay.json` | `f63ab7f22202141be520b3707be2e057bec57d14e9bb32aff71114c891afa27e`; captures current Git HEAD, four-file binary-capable Git diff, source bytes/hashes/modes for those four files plus the untracked Slack regression |
+
+A second isolated directory was unpacked from the clean archive; `git apply --check` and application of the recorded diff succeeded, then the recorded untracked regression was restored. All **five reconstructed source-file SHA-256 values matched** the live-source receipt, with zero mismatches. This exercised source reconstruction only: it is **not** dependency restoration, loaded-process provenance, a compatible Home/Standard database rehearsal or permission to restore/restart production. The original checkout, patch files, Slack work and services were not changed. Temporary probe scripts and cloned/reconstructed scaffolding are removed after recording; private recovery material is retained.
+
+### Remaining gate and concrete handoff
+
+1. **Upstream prerequisite:** supported OpenAI streaming timeout/retry controls and content-safe synthesis failure handling that preserve the selected speech service, or an explicit new product decision about the resulting capability limit. A locally reapplied patch is not an unmodified baseline.
+2. **Slack owner boundary:** preserve the exact-peer policy and existing human admission. Do not reset the shared checkout, omit its untracked regression, or claim `allow_bots: mentions` plus the human allowlist reproduces it.
+3. After a compatible clean candidate exists, repeat isolated provider/route/session capability checks, preserve exact dependency/configuration/state recovery artifacts and rehearse the current-data-compatible R2 procedure before any separately approved cutover.
+
+No upstream issue/PR, agent-source patch, provider substitution, production restart, baseline promotion, credential change or migration-status promotion was made. This reconciliation closes the initial comparison/source-recovery investigation, **not R0/R2 as whole-household gates**.
 
 ## Historical paper review — 2026-10-08
 
