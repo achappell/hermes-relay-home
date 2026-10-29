@@ -16,6 +16,30 @@
 - Preserve the reviewed Windows package-only swap/recovery helper, retaining
   live credentials/database with explicit wheel integrity and startup checks.
 
+## 0.3.0 (2026-10-29)
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+## What's Changed
+### Documentation
+* docs(ops): preserve reviewed Home recovery and Living Room pairing evidence by @achappell in https://github.com/achappell/hermes-relay-home/pull/110
+### Other Changes
+* feat(home): paired-client typed-choice opt-in via client_devices (HOME-TC-B1 placeholder ID) by @achappell in https://github.com/achappell/hermes-relay-home/pull/105
+* HOME-TC-B2 (placeholder): project clarify choices by @achappell in https://github.com/achappell/hermes-relay-home/pull/106
+* feat(pairing): enroll service-hosted Puck room devices by @achappell in https://github.com/achappell/hermes-relay-home/pull/109
+* ci(actions)(deps): bump actions/upload-artifact from 7.0.1 to 7.0.2 in the actions-minor-and-patch group by @dependabot[bot] in https://github.com/achappell/hermes-relay-home/pull/108
+* feat(HOME-NW-05): authorize paired-room wake; deployed with Standard speech proof by @achappell in https://github.com/achappell/hermes-relay-home/pull/111
+* fix(diagnostics): keep routine poll reads out of the capped event store by @achappell in https://github.com/achappell/hermes-relay-home/pull/113
+* docs(HOME-NW-05): record owner-accepted paired-room physical turn by @achappell in https://github.com/achappell/hermes-relay-home/pull/112
+* ci(actions)(deps): bump actions/setup-python from 7.0.0 to 7.1.0 in the actions-minor-and-patch group by @dependabot[bot] in https://github.com/achappell/hermes-relay-home/pull/114
+* docs(HOME-MIG-09): refresh household cutover readiness by @achappell in https://github.com/achappell/hermes-relay-home/pull/115
+* docs(HOME-MIG-09): reconcile Standard baseline compatibility by @achappell in https://github.com/achappell/hermes-relay-home/pull/116
+
+## New Contributors
+* @dependabot[bot] made their first contribution in https://github.com/achappell/hermes-relay-home/pull/108
+
+**Full Changelog**: https://github.com/achappell/hermes-relay-home/compare/v0.2.0...v0.3.0
+
 ## 0.2.0 (2026-10-09)
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
