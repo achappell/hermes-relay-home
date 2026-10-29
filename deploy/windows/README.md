@@ -234,6 +234,31 @@ before use; this is not an unattended updater. The recorded live cutover
 executed this helper; production rollback was not executed, only old-code
 compatibility on a private post-enrollment database copy.
 
+### Offline current-deployment rehearsal
+
+The [2026-10-29 recovery record](../../_bmad-output/implementation-artifacts/validation-home-mig-09-readiness.md#03-current-deployment-recovery-rehearsal--2026-10-29)
+identifies private original-host bundles, exact source/dependency versions,
+manifest/receipt hashes and exercised restoration. This is installed-byte
+same-build recovery, not proof of an older wheel's compatibility or approval
+to run a patched Standard as the supported migration baseline.
+
+For a fresh rehearsal, use an access-restricted disposable subtree; verify
+the private manifest before extraction. The retained `restore-driver.py`
+reconstructs the captured interpreter and independent venv, then restores
+only copied data/secrets. Bootstrap from the archived interpreter if the
+original installation is unavailable. Keep Home's API/bridge on ephemeral
+loopback ports, omit Standard/export settings and preserve the existing root
+secret; do not rotate credentials or restore an old pre-enrollment database.
+The recorded Home probe exercises real authenticated configuration readback.
+
+Standard's separate driver checks captured database/history integrity and
+runs the restored CLI with an **empty** isolated home and denied networking.
+Never activate copied schedules/pending work automatically. Individual
+database snapshots are not a distributed Home/Standard checkpoint. Current
+client/session/audio and new/old-build compatibility require separate proof.
+Do not invoke `home-package-swap.ps1`, `install.ps1`, task start/stop or live
+database replacement to repeat this isolated rehearsal.
+
 ## Standard-backed bridge
 
 The Home route uses one dedicated Standard gateway target. Home creates each
