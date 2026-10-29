@@ -106,7 +106,7 @@ Every transition requires its evidence; this is a **PROPOSED execution sequence*
 | R6 | Separate owner approval for default switch and an explicitly agreed bake | Every required surface accepted or a separately approved product-scope change, compatible recovery available, exact start/end observations and abort authority. Active services or elapsed calendar time alone do not prove this gate |
 | R7–R8 | Only after accepted bake: owning-repository removal PRs and individually authorized service stops/credential invalidations/residue handling; Home then closes coordination | Before/after item/owner/time receipts, preserved historical evidence/history/configuration, supported install without fork/old pairing, final owner acceptance. No action here authorizes these irreversible steps |
 
-**Next executable work without the Puck:** the initial clean Standard comparison and source-only recovery exercise are complete (section 0.1). The missing audio behavior is now proposed upstream in [NousResearch/hermes-agent#146279](https://github.com/NousResearch/hermes-agent/pull/146279), with isolated real-provider/ASGI proof (section 0.2); upstream acceptance and clean-baseline revalidation remain required. Keep unrelated Slack policy intact. Separately route missing `IOS-STD-01` implementation to Apple and prepare exact-build/current-data R2 recovery. This does not authorize deploying the contribution branch, provider substitution, baseline installation, live rollback or a production restart.
+**Next executable work without the Puck:** current-deployment recovery capture and isolated restoration are now exercised (section 0.3), not clean-baseline or whole-household R2 acceptance. The owner does not expect upstream audio PR #146279 to land soon: treat that prerequisite as unavailable for scheduling. Keep the deployment/Slack policy intact. Migration still requires accepted upstream behavior or a separate explicit product-scope decision; no fork, provider switch or reduced voice acceptance is authorized. Apple direct/signed-Mac and current-build client/room acceptance remain separate.
 
 ### Refresh verification
 
@@ -175,6 +175,52 @@ The proposed supported option is `tts.openai.stream_timeout_seconds` (default `1
 All runtime proof was isolated and synthetic: no selected household speech service, physical audio playback, real model, production profile, live session or production credential was exercised. Temporary smoke scaffolding is removed after recording. The prior source-only recovery material remains retained; this does not extend its scope.
 
 **Remaining handoff:** obtain upstream review/merge, select and record an upstream commit containing the accepted behavior, and repeat clean-baseline provider/route/session and required client acceptance checks before any separately approved deployment. Slack exact-peer compatibility remains a separate unresolved gate; no Slack source, policy or profile was changed. Current-data-compatible R2 recovery, Apple direct-mode/signed-macOS evidence and the other R0–R8 gates remain open. Puck physical validation is **deferred, not waived or passed**. HOME-MIG-09 remains `backlog`; no cutover, service restart, credential/configuration change or status promotion occurred.
+
+## 0.3 Current-deployment recovery rehearsal — 2026-10-29
+
+Home PR #116 is merged. The owner authorized private current-state capture and isolated restoration, **not** a production rollback, restart, configuration/credential mutation or relaxation of the unmodified-Standard contract. No replacement/older build was selected: this recovers today's Home build and patched Standard disk source/dependencies; it does not adopt that agent as the migration baseline.
+
+### Private recovery sets
+
+| Host / recovery set | Captured material / identity |
+| --- | --- |
+| CaticornQueen: `C:\ProgramData\HermesHome\backups\home-mig09-rehearsal-20261029T005130Z` | Inheritance-protected **SYSTEM/Administrators-only** directory. Current online SQLite backup, required secret files, runner, private machine settings, task XML, Tailscale Serve inventory, ACL/firewall metadata, Python/runtime ZIPs, private manifest, executed restore driver and receipt retained |
+| Home build / dependencies | Installed `hermes-relay-home 0.2.0`; **36 Python sources match `0b5ca4b19ae922105f1050d0fc2591b0a7ea8d2f`**, **45 hashed RECORD entries verified**. Python **3.14.7**; cffi **2.1.1**, cryptography **50.0.1**, pycparser **3.0**, segno **1.6.6**, websockets **17.1**. Installed-byte recovery, **not an identified original wheel**; none found in the inspected app/stage/swap locations |
+| media-server: `~/.local/share/hermes-mig09-recovery/20261029T005130Z/` | **0700**, capture umask **077**. Exact Git archive at `e5ea5fd9ccdf2913c0b21b24eb3d22b321d2e2a6`, binary overlay for four modified files plus one untracked regression, actual interpreter/venv archives, dependency inventory, selected config/auth/history/memory/customization state, pilot scripts/token/LaunchAgents and service metadata. **8,282 regular files**, **1,990,607,720 bytes**, private manifests/receipts/drivers retained |
+| Standard scope | Python **3.11.15**, **166 distributions**; default home plus **six named profiles**. Two voice-profile memory aliases preserved as relative links to captured owning-profile memories. Two Home Assistant documentation links remain external. Source is still patched; audio/Slack differences remain |
+
+Secret-bearing recovery material stays on its original host. No secret values, configuration bodies, transcript/history rows or credential hashes were emitted or committed. Do not upload these bundles/manifests. No retention/deletion policy was invented; section 0.1's source-only set is unchanged.
+
+| Receipt | SHA-256 |
+| --- | --- |
+| Home `manifest.private.json` | `81820b7f0b6cd1e8f2b3633d06b82c4a9a51450b6d17042168fdb1feefd4d15f` |
+| Home `rehearsal-receipt.json` | `fa373c488a3adfd84f5de1b55734e4748f92937e8ea03fd8b410054cff99e1cc` |
+| Standard `manifest.private.json` | `6f4764c3dd56801aaf44b310d100cb95133363d90a3d30998d935a02dcb08e1a` |
+| Standard `rehearsal-receipt.json` | `c961a2235a0b5718873ec4970b42da9436ad1d07ff56588758bf6f2d1241c1fd` |
+
+### Restoration actually exercised
+
+| Surface | Observed result / boundary |
+| --- | --- |
+| Home interpreter/package | Extracted captured interpreter/installed files; made a separate venv offline using the **restored interpreter**, copied captured site-packages and verified exact dependency versions. Actual imported Home module came from the restored tree |
+| Home data / authority | Restored backed-up database and exact secret bytes into isolated paths. Integrity **ok**. Actual runtime in **paired** mode on ephemeral loopback ports, no Standard/export configuration. Real configuration HTTP **401** without authentication, **200** with preserved admin credential. Revision **102**, two Rooms, two Devices, six Profiles, two wake mappings, zero client devices. Configuration/credential rows unchanged after startup/readback; **nine active credential scopes** readable |
+| Standard source/runtime | Git archive plus overlay/untracked reconstruction: **five source hashes matched**. Restored interpreter created an independent venv; verified all **166 distribution versions**. Actual restored-source CLI `--help` exited **0** under an empty isolated home with a network-denying audit hook |
+| Standard data/history | **8,270 state/service files** restored with matching SHA-256 across seven profile homes. **21 nonempty databases** passed integrity checks; counts preserved across **397 tables**. **Three empty placeholders** stayed empty. Captured profiles, schedules, pending work and credentials were **not activated/replayed** |
+| Live services afterward | Home still **Running**, revision **102**, PID **36576**, API `0.0.0.0:8780`, bridge `127.0.0.1:8766`; Standard/proxy running at PIDs **21858 / 46947**, matching the previous inventory. No production stop/start/install/restore or configuration/credential mutation was issued |
+| Handoff verification | **14 metadata-consumer tests passed**; tracker YAML parses, actual issue CLI returns **55**, sprint status stays `backlog`. Unchanged source checks still report E731 at `tests/test_standard_bridge.py:333` and formatting needed in `tests/test_client_claim_list_close_api.py` (86 files already formatted). No unrelated fixes or full-green Home claim |
+
+Runtime probes used process audit guards against unintended network connections; Home settings excluded Standard and diagnostics export. These are application-level guards, **not an OS network sandbox**. Host-local copied-secret readback does not prove physical-client authentication/renewal/revocation.
+
+Capture corrections affected private/disposable material only: excluded live Unix IPC sockets; used deployed Standard Python/SQLite after OS Python could not back up `shared-state.db`; resolved outer interpreter/venv symlinks after initial archives held only links. Corrected actual runtime restoration/CLI passed. Temporary restored trees and local drivers were removed; canonical archives/state, receipts and executed restore drivers remain private. No production socket/symlink/source was repaired.
+
+### Recovery meaning and remaining gates
+
+- **Proven:** today's Home installed-byte/dependency recovery with actual authenticated API readback on the copied current database/root; today's Standard source/dependency reconstruction, offline CLI startup and captured database/history integrity.
+- **Not proven:** new/old-build schema compatibility, activated Standard session/audio recovery, distributed crash-consistent checkpoint, client reconnection/no replay against restored servers, original-wheel reinstall, external speech/model-service recovery or signed macOS/client recovery.
+- SQLite snapshots are transactionally consistent **individually**, not atomic across databases/profiles/hosts. Standard caches/models/logs/locks/checkpoints/active processes are excluded; two external skill-documentation links are inventoried but not bundled. A future live procedure must reconcile uncertain claims/turns and quarantine copied schedules/pending work before activation, never replay automatically.
+- These are **host-local recovery sets, not off-host disaster-recovery backups**. Loss of either host/disk is not covered by this rehearsal; no off-host secret transfer or backup-retention decision was authorized.
+- Private `restore-driver.py` files target a fresh private `restored` subtree and perform only the recorded offline probes; they are **not production rollback/install commands**. Bootstrap from the archived interpreter if the original installation is unavailable. Do not invoke production-targeted `home-package-swap.ps1` as a rehearsal driver.
+- R2 is **partially evidenced**, not closed: no migration-compatible unmodified Standard baseline or exact next/previous artifact pair is selected. Upstream PR timing is not a scheduled dependency. Slack stays untouched; Puck physical acceptance remains **deferred, not waived/passed**. HOME-MIG-09 remains `backlog`.
 
 ## Historical paper review — 2026-10-08
 
