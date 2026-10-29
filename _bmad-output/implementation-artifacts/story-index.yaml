@@ -179,7 +179,7 @@ stories:
     source_story: _bmad-output/specs/spec-standard-hermes-compatibility-migration/stories.yaml#9
     github_issue: https://github.com/achappell/hermes-relay-home/issues/55
     validation: _bmad-output/implementation-artifacts/validation-home-mig-09-readiness.md
-    evidence_note: "2026-10-27 readiness sections 0/0.1: current host/source evidence partially establishes R0/R1; clean upstream e5ea5fd evaluated and rejected for cutover (audio timeout/retry/privacy and Slack policy differences). Isolated provider/Slack smoke and five-file source reconstruction recorded; source-only recovery is not production R2 acceptance. Per-surface/Apple direct/signed Mac/current-data recovery gates remain open; Puck physical validation deferred, not waived. No cutover or status promotion."
+    evidence_note: "2026-10-27 readiness sections 0/0.1/0.2: current host/source evidence partially establishes R0/R1; clean upstream e5ea5fd rejected for cutover. Audio timeout/no-retry/private-warning contribution submitted as NousResearch/hermes-agent#146279, commit 5f4cfa6b on 83bde48; real provider/ASGI smoke and focused regressions pass, but upstream acceptance and clean-baseline revalidation remain pending. Slack exact-peer policy remains separate. Five-file source reconstruction is not production R2 acceptance. Per-surface/Apple direct/signed Mac/current-data recovery gates remain open; Puck physical validation deferred, not waived. No deployment, cutover or status promotion."
   - id: HOME-NW-15
     title: Add safe Linux and macOS deployment for other homes
     kind: next-wave
