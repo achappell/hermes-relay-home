@@ -980,6 +980,34 @@ class CredentialService:
 
         return self._store.mutate(replace)
 
+    def rename_device(self, device_id: str, label: str) -> None:
+        """Rename the current credential without changing its identity or grants."""
+        device_id = _identifier(device_id, "device_id")
+        if type(label) is not str:
+            raise CredentialValidationError("label must be a string")
+        label = label.strip()
+        if not 1 <= len(label) <= 128 or any(c in label for c in "\r\n\v\f\x85\u2028\u2029"):
+            raise CredentialValidationError(
+                "label must contain 1-128 characters without line breaks"
+            )
+
+        def rename(state: dict[str, object]) -> None:
+            records = [
+                record
+                for record in _records(state, "credentials")
+                if record.get("device_id") == device_id
+            ]
+            if not records:
+                raise CredentialStateError("not_found")
+            current = max(
+                records, key=lambda record: _integer(record.get("generation"), "generation")
+            )
+            if current.get("status") == "revoked":
+                raise CredentialStateError("conflict")
+            current["label"] = label
+
+        self._store.mutate(rename)
+
     def revoke(self, device_id: str, *, reason: str | None = None) -> RevocationEvent:
         """Commit revocation, then best-effort notify active-work adapters."""
         device_id = _identifier(device_id, "device_id")

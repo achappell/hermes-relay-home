@@ -55,6 +55,10 @@ device credentials remain an explicit legacy mode, and the two modes cannot be
 configured together. LAN binding policy and hardware acoustic calibration
 remain follow-up work.
 
+On the signed-in `/pair` page, use **Rename device** to distinguish an
+already paired client. Renaming preserves its credential and Profile grants,
+including on renewal. A later re-pair submits a new label from that client.
+
 ## BMAD ownership
 
 This repository owns the Home service foundation story record in

@@ -311,6 +311,10 @@ class PairingSurface:
         body: bytes | str,
     ) -> HTTPResponse:
         try:
+            if kind == "devices" and action == "rename":
+                request = _json_body(body, {"label"})
+                self._service.rename_device(identifier, request["label"])
+                return _json({"schema": 1, "ok": True})
             if kind == "devices" and action == "profile-grants":
                 request = _json_body(
                     body, {"profile_id", "idempotency_key", "authorize_bootstrap"}

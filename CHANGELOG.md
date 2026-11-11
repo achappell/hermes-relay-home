@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Let signed-in Home administrators rename paired devices without replacing
+  credentials or grants; names persist through credential renewal.
+
 - Allow service-hosted `puck` room devices to enroll with private credential
   storage, administrator-approved one-Room/wake-only scope and explicit active
   Wake Mapping grants. Existing credential lifecycle and wake admission rules

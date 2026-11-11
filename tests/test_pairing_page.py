@@ -326,6 +326,29 @@ def _paired(page, profiles):
     ).body
 
 
+def test_rename_requires_authenticated_same_origin_and_survives_renewal(page):
+    page.sign_in()
+    paired = _paired(page, ["spark"])
+    path = f"/pair/api/devices/{paired['device_id']}/rename"
+    assert page.call("POST", path, {"label": "Phone"}, cookie=False).status == 401
+    assert page.call("POST", path, {"label": "Phone"}, origin="https://evil.example").status == 403
+    for label in ("", "  ", "x" * 129, "one\ntwo", 42):
+        assert page.call("POST", path, {"label": label}).status == 400
+    assert page.call("POST", "/pair/api/devices/missing/rename", {"label": "Phone"}).status == 404
+    assert page.call("POST", path, {"label": "  Amanda's Duo  "}).status == 200
+    (device,) = page.call("GET", "/pair/api/state").body["devices"]
+    assert device["label"] == "Amanda's Duo"
+    assert [grant["profile"] for grant in device["grants"]] == ["Spark"]
+    page.service._clock = lambda: paired["expires_at"] - 1
+    page.service.renew(
+        device_id=paired["device_id"], credential=paired["credential"],
+        request_id="renew-label", expected_generation=paired["generation"],
+    )
+    assert page.service.paired_devices()[0].label == "Amanda's Duo"
+    assert 'Rename device' in page.call("GET", "/pair").body
+    assert r"/[\r\n\v\f\u0085\u2028\u2029]/" in page.call("GET", "/pair").body
+
+
 def test_waiting_request_shows_what_the_device_asked_for(page) -> None:
     page.sign_in()
     page.call("POST", "/pair/api/offers", {})
