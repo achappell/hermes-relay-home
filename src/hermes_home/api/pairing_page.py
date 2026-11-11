@@ -373,6 +373,22 @@ fieldset.profiles { border: 0; padding: 8px 0; margin: 0; }
         catch (error) { fail(error); }
       });
       const actions = el("div", undefined, "row gap-small");
+      const rename = el("button", "Rename device"); rename.type = "button";
+      rename.addEventListener("click", async () => {
+        const entered = window.prompt("Device name (1–128 characters)", device.label);
+        if (entered === null) return;
+        const label = entered.trim();
+        if (!label || Array.from(label).length > 128 || /[\\r\\n\\v\\f\\u0085\\u2028\\u2029]/.test(label)) {
+          $("app-error").textContent = "Enter a device name of 1–128 characters without line breaks.";
+          return;
+        }
+        rename.disabled = true;
+        try {
+          await api("/pair/api/devices/" + encodeURIComponent(device.device_id) + "/rename", {label});
+          refresh();
+        } catch (error) { rename.disabled = false; fail(error); }
+      });
+      actions.append(rename);
       if (device.status === "expired") {
         const again = el("button", "Pair again", "primary"); again.type = "button";
         again.addEventListener("click", () => createOffer(device.grants.map((grant) => grant.profile_id)));
